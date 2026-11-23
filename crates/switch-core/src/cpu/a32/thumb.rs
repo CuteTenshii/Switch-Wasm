@@ -37,7 +37,7 @@ impl Cpu {
     /// has counted it against the slice.
     pub(crate) fn step_thumb(&mut self) -> Result<()> {
         let pc = self.pc;
-        let first = match self.mem.read_u16(pc) {
+        let first = match self.mem.read_u16(u64::from(pc)) {
             Ok(h) => u32::from(h),
             Err(e) => {
                 self.record_fault(&e, pc, 0);
@@ -46,7 +46,7 @@ impl Cpu {
         };
         let wide = first >> 11 >= 0b11101;
         let (insn, size) = if wide {
-            match self.mem.read_u16(pc.wrapping_add(2)) {
+            match self.mem.read_u16(u64::from(pc.wrapping_add(2))) {
                 Ok(second) => (first << 16 | u32::from(second), 4),
                 Err(e) => {
                     self.record_fault(&e, pc, first);
@@ -221,34 +221,34 @@ impl Cpu {
             // LDR (literal).
             9 => {
                 let addr = (pc4 & !3).wrapping_add((hw & 0xFF) * 4);
-                let value = self.mem.read_u32(addr)?;
+                let value = self.mem.read_u32(u64::from(addr))?;
                 self.set_r32(((hw >> 8) & 7) as u8, value);
             }
             // Load and store with a register offset.
             10 | 11 => {
                 let addr = self.r32(rn3).wrapping_add(self.r32(((hw >> 6) & 7) as u8));
                 match (hw >> 9) & 7 {
-                    0 => self.mem.write_u32(addr, self.r32(rd3))?,
-                    1 => self.mem.write_u16(addr, self.r32(rd3) as u16)?,
-                    2 => self.mem.write_u8(addr, self.r32(rd3) as u8)?,
+                    0 => self.mem.write_u32(u64::from(addr), self.r32(rd3))?,
+                    1 => self.mem.write_u16(u64::from(addr), self.r32(rd3) as u16)?,
+                    2 => self.mem.write_u8(u64::from(addr), self.r32(rd3) as u8)?,
                     3 => {
-                        let v = self.mem.read_u8(addr)? as i8 as i32 as u32;
+                        let v = self.mem.read_u8(u64::from(addr))? as i8 as i32 as u32;
                         self.set_r32(rd3, v);
                     }
                     4 => {
-                        let v = self.mem.read_u32(addr)?;
+                        let v = self.mem.read_u32(u64::from(addr))?;
                         self.set_r32(rd3, v);
                     }
                     5 => {
-                        let v = u32::from(self.mem.read_u16(addr)?);
+                        let v = u32::from(self.mem.read_u16(u64::from(addr))?);
                         self.set_r32(rd3, v);
                     }
                     6 => {
-                        let v = u32::from(self.mem.read_u8(addr)?);
+                        let v = u32::from(self.mem.read_u8(u64::from(addr))?);
                         self.set_r32(rd3, v);
                     }
                     _ => {
-                        let v = self.mem.read_u16(addr)? as i16 as i32 as u32;
+                        let v = self.mem.read_u16(u64::from(addr))? as i16 as i32 as u32;
                         self.set_r32(rd3, v);
                     }
                 }
@@ -262,28 +262,28 @@ impl Cpu {
                     6 => {
                         let addr = base.wrapping_add(imm5 * 4);
                         if load {
-                            let v = self.mem.read_u32(addr)?;
+                            let v = self.mem.read_u32(u64::from(addr))?;
                             self.set_r32(rd3, v);
                         } else {
-                            self.mem.write_u32(addr, self.r32(rd3))?;
+                            self.mem.write_u32(u64::from(addr), self.r32(rd3))?;
                         }
                     }
                     7 => {
                         let addr = base.wrapping_add(imm5);
                         if load {
-                            let v = u32::from(self.mem.read_u8(addr)?);
+                            let v = u32::from(self.mem.read_u8(u64::from(addr))?);
                             self.set_r32(rd3, v);
                         } else {
-                            self.mem.write_u8(addr, self.r32(rd3) as u8)?;
+                            self.mem.write_u8(u64::from(addr), self.r32(rd3) as u8)?;
                         }
                     }
                     _ => {
                         let addr = base.wrapping_add(imm5 * 2);
                         if load {
-                            let v = u32::from(self.mem.read_u16(addr)?);
+                            let v = u32::from(self.mem.read_u16(u64::from(addr))?);
                             self.set_r32(rd3, v);
                         } else {
-                            self.mem.write_u16(addr, self.r32(rd3) as u16)?;
+                            self.mem.write_u16(u64::from(addr), self.r32(rd3) as u16)?;
                         }
                     }
                 }
@@ -293,10 +293,10 @@ impl Cpu {
                 let rt = ((hw >> 8) & 7) as u8;
                 let addr = self.r32(13).wrapping_add((hw & 0xFF) * 4);
                 if hw & 0x800 != 0 {
-                    let v = self.mem.read_u32(addr)?;
+                    let v = self.mem.read_u32(u64::from(addr))?;
                     self.set_r32(rt, v);
                 } else {
-                    self.mem.write_u32(addr, self.r32(rt))?;
+                    self.mem.write_u32(u64::from(addr), self.r32(rt))?;
                 }
             }
             // ADR and ADD to SP.
@@ -553,12 +553,12 @@ impl Cpu {
                 // STREX and LDREX with a word offset.
                 let addr = base.wrapping_add((hw2 & 0xFF) * 4);
                 if l {
-                    let value = self.mem.read_u32(addr)?;
+                    let value = self.mem.read_u32(u64::from(addr))?;
                     self.set_r32(rt, value);
-                    self.exclusive.arm(addr, [u64::from(value), 0]);
+                    self.exclusive.arm(u64::from(addr), [u64::from(value), 0]);
                 } else {
                     let value = u64::from(self.r32(rt));
-                    let stored = self.store_exclusive_at(addr, 4, [value, 0])?;
+                    let stored = self.store_exclusive_at(u64::from(addr), 4, [value, 0])?;
                     self.set_r32(rt2, u32::from(!stored));
                 }
                 return self.t32_next();
@@ -571,9 +571,12 @@ impl Cpu {
                     // The PC is the address 4 ahead as it is, not word-aligned.
                     let (table, index) = (self.r32(rn), self.r32(rm));
                     let offset = if op == 0 {
-                        u32::from(self.mem.read_u8(table.wrapping_add(index))?)
+                        u32::from(self.mem.read_u8(u64::from(table.wrapping_add(index)))?)
                     } else {
-                        u32::from(self.mem.read_u16(table.wrapping_add(index << 1))?)
+                        u32::from(
+                            self.mem
+                                .read_u16(u64::from(table.wrapping_add(index << 1)))?,
+                        )
                     };
                     self.pc = self.pc.wrapping_add(4).wrapping_add(offset << 1);
                     Ok(())
@@ -584,23 +587,23 @@ impl Cpu {
                         5 => (2, u64::from(self.r32(rt)) & 0xFFFF),
                         _ => (8, u64::from(self.r32(rt)) | u64::from(self.r32(rt2)) << 32),
                     };
-                    let stored = self.store_exclusive_at(base, size, [value, 0])?;
+                    let stored = self.store_exclusive_at(u64::from(base), size, [value, 0])?;
                     self.set_r32(rm, u32::from(!stored));
                     self.t32_next()
                 }
                 (true, 4 | 5 | 7) => {
                     let value = match op {
-                        4 => u64::from(self.mem.read_u8(base)?),
-                        5 => u64::from(self.mem.read_u16(base)?),
+                        4 => u64::from(self.mem.read_u8(u64::from(base))?),
+                        5 => u64::from(self.mem.read_u16(u64::from(base))?),
                         _ => {
-                            let lo = self.mem.read_u32(base)?;
-                            let hi = self.mem.read_u32(base.wrapping_add(4))?;
+                            let lo = self.mem.read_u32(u64::from(base))?;
+                            let hi = self.mem.read_u32(u64::from(base.wrapping_add(4)))?;
                             self.set_r32(rt2, hi);
                             u64::from(lo) | u64::from(hi) << 32
                         }
                     };
                     self.set_r32(rt, value as u32);
-                    self.exclusive.arm(base, [value, 0]);
+                    self.exclusive.arm(u64::from(base), [value, 0]);
                     self.t32_next()
                 }
                 _ => Err(self.undefined(insn)),
@@ -614,13 +617,14 @@ impl Cpu {
         };
         let addr = if p { moved } else { base };
         if l {
-            let lo = self.mem.read_u32(addr)?;
-            let hi = self.mem.read_u32(addr.wrapping_add(4))?;
+            let lo = self.mem.read_u32(u64::from(addr))?;
+            let hi = self.mem.read_u32(u64::from(addr.wrapping_add(4)))?;
             self.set_r32(rt, lo);
             self.set_r32(rt2, hi);
         } else {
-            self.mem.write_u32(addr, self.r32(rt))?;
-            self.mem.write_u32(addr.wrapping_add(4), self.r32(rt2))?;
+            self.mem.write_u32(u64::from(addr), self.r32(rt))?;
+            self.mem
+                .write_u32(u64::from(addr.wrapping_add(4)), self.r32(rt2))?;
         }
         if w {
             self.set_r32(rn, moved);

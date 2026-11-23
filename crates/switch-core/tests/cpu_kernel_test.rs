@@ -13,10 +13,10 @@ fn bootstrap_provides_stack_and_low_memory() {
     // SP is the top of the mapped stack.
     assert_eq!(cpu.sp(), switch_core::cpu::STACK_TOP);
     cpu.mem
-        .write_u64((cpu.sp() - 8) as u32, 0x1234_5678)
+        .write_u64(u64::from((cpu.sp() - 8) as u32), 0x1234_5678)
         .unwrap();
     assert_eq!(
-        cpu.mem.read_u64((cpu.sp() - 8) as u32).unwrap(),
+        cpu.mem.read_u64(u64::from((cpu.sp() - 8) as u32)).unwrap(),
         0x1234_5678
     );
 
@@ -26,16 +26,22 @@ fn bootstrap_provides_stack_and_low_memory() {
     assert!(cpu.mem.read_u32(0xc).is_err());
     assert!(cpu
         .mem
-        .read_u32(switch_core::cpu::GUEST_SPACE_START - 4)
+        .read_u32(u64::from(switch_core::cpu::GUEST_SPACE_START - 4))
         .is_err());
     // Writes allocate a private page on first touch.
     cpu.mem.write_u32(0xb00, 0xDEAD_BEEF).unwrap();
     assert_eq!(cpu.mem.read_u32(0xb00).unwrap(), 0xDEAD_BEEF);
-    // Reads past the end of the guest address space still fault.
-    assert!(cpu
-        .mem
-        .read_u32(switch_core::cpu::GUEST_SPACE_END + 0xDEAD)
-        .is_err());
+    // A 64-bit process's space runs to the end of 39 bits, past where a 32-bit one's ends.
+    let end = switch_core::mem::ADDRESS_SPACE_SIZE;
+    assert_eq!(cpu.memory_layout().space_end, end);
+    assert_eq!(cpu.mem.read_u32(end - 4).unwrap(), 0);
+    let past_32_bits = u64::from(switch_core::cpu::GUEST_SPACE_END + 0xDEAD);
+    assert_eq!(cpu.mem.read_u32(past_32_bits).unwrap(), 0);
+    cpu.set_64_bit(false);
+    assert!(
+        cpu.mem.read_u32(past_32_bits).is_err(),
+        "a 32-bit process reads past the end of its space"
+    );
 }
 
 #[test]
@@ -69,7 +75,7 @@ fn horizon_syscall_stubs() {
         bytes.extend_from_slice(&nop().to_le_bytes());
     }
     bytes.extend_from_slice(&svc(0x1E).to_le_bytes());
-    cpu.mem.map_zero(0x1000, bytes.len() + 0x10).unwrap();
+    cpu.mem.map_zero(0x1000, bytes.len() as u64 + 0x10).unwrap();
     cpu.mem.map(0x1000, &bytes).unwrap();
     cpu.run(5301).unwrap();
     assert_eq!(cpu.read_x(0), 5300 * 19_200_000 / 1_020_000_000);
@@ -110,20 +116,17 @@ fn horizon_query_memory_and_get_info() {
     assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 3); // type
     assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0b011); // perm (RW-)
 
-    // GetInfo returns the value in X1. InfoType 4 = HeapRegionAddress; regions must fit in a `u32`.
+    // GetInfo returns the value in X1. InfoType 4 = HeapRegionAddress, above 4 GiB for a 64-bit title.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(1, 4); // infoType
     cpu.set_reg(2, 0xffff_8001); // CUR_PROCESS_HANDLE
     cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
-    assert_eq!(
-        cpu.read_x(1),
-        u64::from(switch_core::cpu::GUEST_HEAP_REGION_ADDR)
-    );
+    assert_eq!(cpu.read_x(1), switch_core::cpu::HEAP_REGION_ADDR);
 
     // InfoType 21/22 = Total/UsedNonSystemMemorySize; `nnSdk` sizes its heap from the difference.
-    let total = u64::from(switch_core::cpu::GUEST_TOTAL_MEMORY_SIZE);
+    let total = switch_core::cpu::GUEST_TOTAL_MEMORY_SIZE;
     for (info_type, expected) in [(21u64, total), (22, 0)] {
         let mut cpu = cpu_at(0x1000);
         cpu.set_reg(1, info_type);
@@ -152,23 +155,18 @@ fn horizon_query_memory_and_get_info() {
     assert_eq!(cpu.read_x(0), 0);
     assert_eq!(cpu.read_x(1), total);
 
-    // A title declaring a system resource gets a larger alias region and a smaller total.
-    use switch_core::cpu::{
-        VAMM_ALIAS_REGION_ADDR, VAMM_ALIAS_REGION_SIZE, VAMM_SYSTEM_RESOURCE_SIZE,
-        VAMM_TOTAL_MEMORY_SIZE,
-    };
+    // A title declaring a system resource reports it, and keeps the same regions and total.
+    use switch_core::cpu::{ALIAS_REGION_ADDR, ALIAS_REGION_SIZE};
+    const SYSTEM_RESOURCE: u32 = 0x0100_0000;
     for (info_type, expected) in [
-        (6u64, u64::from(VAMM_TOTAL_MEMORY_SIZE)),
-        (16, u64::from(VAMM_SYSTEM_RESOURCE_SIZE)),
-        (
-            21,
-            u64::from(VAMM_TOTAL_MEMORY_SIZE - VAMM_SYSTEM_RESOURCE_SIZE),
-        ),
-        (2, u64::from(VAMM_ALIAS_REGION_ADDR)),
-        (3, u64::from(VAMM_ALIAS_REGION_SIZE)),
+        (6u64, total),
+        (16, u64::from(SYSTEM_RESOURCE)),
+        (21, total - u64::from(SYSTEM_RESOURCE)),
+        (2, ALIAS_REGION_ADDR),
+        (3, ALIAS_REGION_SIZE),
     ] {
         let mut cpu = cpu_at(0x1000);
-        cpu.set_system_resource_size(VAMM_SYSTEM_RESOURCE_SIZE);
+        cpu.set_system_resource_size(SYSTEM_RESOURCE);
         cpu.set_reg(1, info_type);
         cpu.set_reg(2, 0xffff_8001);
         cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
@@ -177,7 +175,7 @@ fn horizon_query_memory_and_get_info() {
         assert_eq!(
             cpu.read_x(1),
             expected,
-            "InfoType {info_type} under the VAMM layout"
+            "InfoType {info_type} with a system resource"
         );
     }
 
@@ -192,23 +190,28 @@ fn horizon_query_memory_and_get_info() {
 
 #[test]
 fn horizon_map_physical_memory() {
-    use switch_core::cpu::GUEST_ALIAS_REGION_ADDR;
+    use switch_core::cpu::ALIAS_REGION_ADDR;
+    use switch_core::mem::ADDRESS_SPACE_SIZE;
     // MapPhysicalMemory(address, size) grows the heap of a title on the 39-bit address space.
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
     cpu.mem.map(0x1000, &svc(0x2c).to_le_bytes()).unwrap();
-    cpu.set_reg(0, u64::from(GUEST_ALIAS_REGION_ADDR));
+    cpu.set_reg(0, ALIAS_REGION_ADDR);
     cpu.set_reg(1, 0x10_0000);
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
+    // The pages it grants are there to write, above 4 GiB.
+    cpu.mem.write_u32(ALIAS_REGION_ADDR + 0x8_0000, 7).unwrap();
+    assert_eq!(cpu.mem.read_u32(ALIAS_REGION_ADDR + 0x8_0000).unwrap(), 7);
 
-    // Unaligned, empty, or not `u32`-addressable ranges are rejected.
+    // Unaligned, empty, or past the address space's end, ranges are rejected.
     for (addr, size) in [
-        (u64::from(GUEST_ALIAS_REGION_ADDR), 0u64),
-        (u64::from(GUEST_ALIAS_REGION_ADDR) + 1, 0x1000),
-        (u64::from(GUEST_ALIAS_REGION_ADDR), 0x800),
-        (0x10_0000_0000, 0x1000),
+        (ALIAS_REGION_ADDR, 0u64),
+        (ALIAS_REGION_ADDR + 1, 0x1000),
+        (ALIAS_REGION_ADDR, 0x800),
+        (ADDRESS_SPACE_SIZE - 0x1000, 0x2000),
+        (ADDRESS_SPACE_SIZE, 0x1000),
     ] {
         let mut cpu = cpu_at(0x1000);
         cpu.bootstrap();
@@ -231,7 +234,9 @@ fn map_memory_backs_the_destination_and_unmap_frees_it() {
     const SRC: u32 = 0x3000_0000;
     const DST: u32 = 0x1800_0000;
     let mut cpu = cpu_at(0x1000);
-    cpu.mem.map(SRC, &0xDEAD_BEEFu32.to_le_bytes()).unwrap();
+    cpu.mem
+        .map(u64::from(SRC), &0xDEAD_BEEFu32.to_le_bytes())
+        .unwrap();
     cpu.mem.map(0x1000, &svc(0x04).to_le_bytes()).unwrap();
     cpu.mem.map(0x1004, &svc(0x05).to_le_bytes()).unwrap();
 
@@ -240,18 +245,18 @@ fn map_memory_backs_the_destination_and_unmap_frees_it() {
     cpu.set_reg(2, 0x2000);
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
-    assert!(cpu.mem.page_mapped(DST));
-    assert!(cpu.mem.page_mapped(DST + 0x1000));
-    assert_eq!(cpu.mem.read_u32(DST).unwrap(), 0xDEAD_BEEF);
+    assert!(cpu.mem.page_mapped(u64::from(DST)));
+    assert!(cpu.mem.page_mapped(u64::from(DST + 0x1000)));
+    assert_eq!(cpu.mem.read_u32(u64::from(DST)).unwrap(), 0xDEAD_BEEF);
 
-    cpu.mem.write_u32(DST, 0x1234_5678).unwrap();
+    cpu.mem.write_u32(u64::from(DST), 0x1234_5678).unwrap();
     cpu.set_reg(0, DST as u64);
     cpu.set_reg(1, SRC as u64);
     cpu.set_reg(2, 0x2000);
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
-    assert_eq!(cpu.mem.read_u32(SRC).unwrap(), 0x1234_5678);
-    assert!(!cpu.mem.page_mapped(DST));
+    assert_eq!(cpu.mem.read_u32(u64::from(SRC)).unwrap(), 0x1234_5678);
+    assert!(!cpu.mem.page_mapped(u64::from(DST)));
 }
 
 #[test]
@@ -302,8 +307,8 @@ fn query_memory_gives_the_execute_bit_only_to_module_text() {
     let rodata = 0x0800_3000u32;
     let mut cpu = cpu_at(0x1000);
     cpu.mem.map(0x1000, &svc(0x06).to_le_bytes()).unwrap();
-    cpu.mem.map_zero(text, 0x6000).unwrap();
-    cpu.mem.mark_readonly(text, rodata);
+    cpu.mem.map_zero(u64::from(text), 0x6000).unwrap();
+    cpu.mem.mark_readonly(u64::from(text), u64::from(rodata));
 
     cpu.set_reg(0, 0x3000); // MemoryInfo out
     cpu.set_reg(1, 0x4000); // PageInfo out
@@ -316,8 +321,8 @@ fn query_memory_gives_the_execute_bit_only_to_module_text() {
 
     let mut cpu = cpu_at(0x1000);
     cpu.mem.map(0x1000, &svc(0x06).to_le_bytes()).unwrap();
-    cpu.mem.map_zero(text, 0x6000).unwrap();
-    cpu.mem.mark_readonly(text, rodata);
+    cpu.mem.map_zero(u64::from(text), 0x6000).unwrap();
+    cpu.mem.mark_readonly(u64::from(text), u64::from(rodata));
     cpu.set_reg(0, 0x3000);
     cpu.set_reg(1, 0x4000);
     cpu.set_reg(2, rodata as u64);
@@ -788,7 +793,7 @@ fn an_audio_thread_appending_buffers_does_not_starve_the_others() {
     ipc_request_plain(&mut cpu, 0x30, 1, &args);
     let device = u64::from(cpu.mem.read_u32(cpu.tls_base() + 0x0c).unwrap());
     assert_ne!(device, 0, "no IAudioOut came back");
-    cpu.mem.write_u64(HANDLE_SLOT, device).unwrap();
+    cpu.mem.write_u64(u64::from(HANDLE_SLOT), device).unwrap();
 
     // main: start the mixer, sleep once, then set the flag and exit if the CPU comes back.
     let main = [
@@ -943,7 +948,9 @@ fn arbitrate_lock_hands_the_mutex_to_a_waiter() {
     cpu.mem.map(0x2000, &bytes(&child)).unwrap();
     // main "owns" the mutex to begin with (handle 1 = the main thread), contended:
     // a waiter sets the listeners bit before it arbitrates.
-    cpu.mem.write_u32(MUTEX, 1 | 0x4000_0000).unwrap();
+    cpu.mem
+        .write_u32(u64::from(MUTEX), 1 | 0x4000_0000)
+        .unwrap();
     cpu.set_pc(0x1000);
     cpu.run(10_000).unwrap();
 
@@ -1017,18 +1024,20 @@ fn a_timed_out_condvar_wait_comes_back_holding_its_mutex() {
 #[test]
 #[allow(clippy::assertions_on_constants)]
 fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
-    // All regions share one 4 GiB space and must not overlap.
     use switch_core::cpu::{
-        MemoryLayout, OperationMode, GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE,
-        GUEST_ASLR_REGION_ADDR, GUEST_ASLR_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
-        GUEST_HEAP_REGION_SIZE, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE,
-        GUEST_TOTAL_MEMORY_SIZE, HEAP_BESIDE_VAMM_HELD_BACK, MAIN_THREAD_TLS_BASE,
-        SELF_RETURN_TRAMPOLINE, SHARED_BUFFER_ADDR, SHARED_BUFFER_RESERVED_SIZE, STACK_SIZE,
-        STACK_TOP, THREAD_EXIT_TRAMPOLINE, THREAD_TLS_BASE, THREAD_TLS_STRIDE, VAMM_ARENA_SIZE,
+        MemoryLayout, OperationMode, ALIAS_REGION_ADDR, ALIAS_REGION_SIZE,
+        APPLET_TOTAL_MEMORY_SIZE, GUEST_ASLR_REGION_ADDR, GUEST_ASLR_REGION_SIZE, GUEST_SPACE_END,
+        GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE, GUEST_TOTAL_MEMORY_SIZE,
+        HEAP_REGION_ADDR, HEAP_REGION_SIZE, LOW_ALIAS_REGION_ADDR, LOW_ALIAS_REGION_SIZE,
+        LOW_HEAP_REGION_ADDR, LOW_HEAP_REGION_SIZE, MAIN_THREAD_TLS_BASE, SELF_RETURN_TRAMPOLINE,
+        SHARED_BUFFER_ADDR, SHARED_BUFFER_RESERVED_SIZE, STACK_SIZE, STACK_TOP,
+        THREAD_EXIT_TRAMPOLINE, THREAD_TLS_BASE, THREAD_TLS_STRIDE,
     };
+    use switch_core::mem::{ADDRESS_SPACE_SIZE, MAX_MAPPED_BYTES};
     use switch_core::{FB_BASE, FB_HEIGHT, FB_WIDTH, INPUT_ADDR};
 
-    assert!(GUEST_STACK_REGION_ADDR + GUEST_STACK_REGION_SIZE <= GUEST_HEAP_REGION_ADDR);
+    // The emulator's own furniture shares the low 4 GiB with a 32-bit process's regions.
+    assert!(GUEST_STACK_REGION_ADDR + GUEST_STACK_REGION_SIZE <= LOW_HEAP_REGION_ADDR);
     // Inside the ASLR region, and large enough for randomly placed thread stacks.
     assert!(GUEST_STACK_REGION_ADDR >= GUEST_ASLR_REGION_ADDR);
     assert!(
@@ -1056,14 +1065,14 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
         );
     }
     assert!(
-        STACK_TOP <= u64::from(GUEST_HEAP_REGION_ADDR),
+        STACK_TOP <= u64::from(LOW_HEAP_REGION_ADDR),
         "the main stack is below the heap"
     );
     assert_eq!(
-        GUEST_HEAP_REGION_ADDR + GUEST_HEAP_REGION_SIZE,
-        GUEST_ALIAS_REGION_ADDR
+        LOW_HEAP_REGION_ADDR + LOW_HEAP_REGION_SIZE,
+        LOW_ALIAS_REGION_ADDR
     );
-    assert!(GUEST_ALIAS_REGION_ADDR + GUEST_ALIAS_REGION_SIZE <= SHARED_BUFFER_ADDR);
+    assert!(LOW_ALIAS_REGION_ADDR + LOW_ALIAS_REGION_SIZE <= SHARED_BUFFER_ADDR);
     // The shared buffer is reserved for the docked geometry regardless of the starting mode.
     assert_eq!(
         SHARED_BUFFER_RESERVED_SIZE,
@@ -1075,113 +1084,113 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
             <= SHARED_BUFFER_RESERVED_SIZE,
         "and the one actually laid out in it"
     );
-    assert!(SHARED_BUFFER_ADDR + SHARED_BUFFER_RESERVED_SIZE <= FB_BASE);
-    assert!(FB_BASE + FB_WIDTH * FB_HEIGHT * 4 <= INPUT_ADDR);
-    assert!(INPUT_ADDR + 0x1000 <= GUEST_SPACE_END);
+    assert!(u64::from(SHARED_BUFFER_ADDR + SHARED_BUFFER_RESERVED_SIZE) <= FB_BASE);
+    assert!(FB_BASE + u64::from(FB_WIDTH * FB_HEIGHT * 4) <= INPUT_ADDR);
+    assert!(INPUT_ADDR + 0x1000 <= u64::from(GUEST_SPACE_END));
 
-    // Without VAMM, `nn::init` grows the heap region to the full total memory.
-    assert!(GUEST_TOTAL_MEMORY_SIZE <= GUEST_HEAP_REGION_SIZE);
-
-    // The advertised total must be backable.
+    // A 64-bit process's heap and alias regions are a console's, above everything that sits
+    // below 4 GiB, apart from each other and inside the 39-bit space.
+    let wide = MemoryLayout::WIDE;
+    assert_eq!(
+        (
+            wide.heap_addr,
+            wide.heap_size,
+            wide.alias_addr,
+            wide.alias_size
+        ),
+        (
+            HEAP_REGION_ADDR,
+            HEAP_REGION_SIZE,
+            ALIAS_REGION_ADDR,
+            ALIAS_REGION_SIZE
+        )
+    );
+    assert!(wide.heap_addr >= 1 << 32);
+    assert!(wide.heap_addr + wide.heap_size <= wide.alias_addr);
+    assert!(wide.alias_addr + wide.alias_size <= wide.space_end);
+    assert_eq!(wide.space_end, ADDRESS_SPACE_SIZE);
+    // Paper Mario: The Origami King reserves 62 GiB itself, beside the SDK's 1 GiB Vamm arena.
+    assert!(0xF_8000_0000 + 0x4000_0000 <= wide.alias_size);
+    // Tears of the Kingdom sizes a heap from its total, holding 1080 MiB back for the alias route.
+    const TOTK_SYSTEM_RESOURCE: u64 = 0x0180_0000;
+    let totk_heap = ((GUEST_TOTAL_MEMORY_SIZE - TOTK_SYSTEM_RESOURCE) & !0x1F_FFFF) - 0x4380_0000;
+    assert!(totk_heap <= wide.heap_size);
+    // Without Vamm, `nn::init` grows the heap region to the full total memory.
+    assert!(GUEST_TOTAL_MEMORY_SIZE <= wide.heap_size);
+    assert!(GUEST_TOTAL_MEMORY_SIZE <= u64::from(LOW_HEAP_REGION_SIZE));
+    // The advertised totals must be backable.
     assert!(
-        u64::from(GUEST_TOTAL_MEMORY_SIZE) <= switch_core::mem::MAX_MAPPED_BYTES,
+        GUEST_TOTAL_MEMORY_SIZE <= MAX_MAPPED_BYTES,
         "advertising {GUEST_TOTAL_MEMORY_SIZE:#x} of memory that cannot be backed"
     );
-    // The alias region only needs to be readable; non-VAMM titles never map into it.
-    assert!(
-        GUEST_ALIAS_REGION_SIZE >= 0x0100_0000,
-        "the alias region is still a region"
-    );
+    assert!(APPLET_TOTAL_MEMORY_SIZE <= GUEST_TOTAL_MEMORY_SIZE);
 
-    // On VAMM the alias region holds the SDK's arena plus the heap reservation.
-    for layout in [MemoryLayout::PLAIN, MemoryLayout::VIRTUAL_ADDRESS] {
+    // What a process gets, by its instruction set, program and system resource.
+    assert_eq!(MemoryLayout::for_process(true, 0, 0), wide);
+    let vamm = MemoryLayout::for_process(true, 0, 0x0100_0000);
+    assert_eq!(vamm.system_resource, 0x0100_0000, "the NPDM's, as declared");
+    assert_eq!(
+        MemoryLayout {
+            system_resource: 0,
+            ..vamm
+        },
+        wide,
+        "a system resource changes nothing else"
+    );
+    // `LibAppletWeb`, a library applet.
+    let applet = MemoryLayout::for_process(true, 0x0100_0000_0000_1010, 0x0100_0000);
+    assert_eq!(applet.total_memory, APPLET_TOTAL_MEMORY_SIZE);
+    assert_eq!(applet.heap_addr, wide.heap_addr);
+
+    let low = MemoryLayout::for_process(false, 0, 0);
+    assert_eq!(low, MemoryLayout::LOW);
+    assert_eq!(
+        low.system_resource, 0,
+        "zero is what keeps a title off Vamm"
+    );
+    let low_vamm = MemoryLayout::for_process(false, 0, 0x0100_0000);
+    assert_eq!(
+        MemoryLayout {
+            system_resource: 0,
+            ..low_vamm
+        },
+        MemoryLayout::LOW_VAMM
+    );
+    for layout in [low, low_vamm] {
         assert_eq!(layout.heap_addr + layout.heap_size, layout.alias_addr);
-        assert!(layout.alias_addr + layout.alias_size <= SHARED_BUFFER_ADDR);
-        assert!(STACK_TOP <= u64::from(layout.heap_addr));
+        assert!(layout.alias_addr + layout.alias_size <= u64::from(SHARED_BUFFER_ADDR));
+        assert!(STACK_TOP <= layout.heap_addr);
         assert!(layout.system_resource < layout.total_memory);
+        assert_eq!(layout.space_end, u64::from(GUEST_SPACE_END));
     }
-    // Each layout's total must fit the region that layout grows into.
-    assert!(MemoryLayout::PLAIN.total_memory <= MemoryLayout::PLAIN.heap_size);
-    assert!(MemoryLayout::VIRTUAL_ADDRESS.total_memory <= MemoryLayout::VIRTUAL_ADDRESS.alias_size);
-    assert_eq!(
-        MemoryLayout::PLAIN.system_resource,
-        0,
-        "zero is what keeps a title off VAMM"
-    );
-    assert_ne!(MemoryLayout::VIRTUAL_ADDRESS.system_resource, 0);
-    // A system resource of 0 selects the plain layout.
-    assert_eq!(MemoryLayout::for_system_resource(0), MemoryLayout::PLAIN);
-    assert_eq!(
-        MemoryLayout::for_system_resource(0x0100_0000),
-        MemoryLayout::VIRTUAL_ADDRESS
-    );
-
-    // Tears of the Kingdom's startup asks for exactly the heap region, and the alias region
-    // holds the arena and the memory it held back.
-    let split = MemoryLayout::HEAP_BESIDE_VAMM;
-    assert_eq!(split.heap_addr + split.heap_size, split.alias_addr);
-    assert!(split.alias_addr + split.alias_size <= SHARED_BUFFER_ADDR);
-    assert_eq!(
-        (split.total_memory - split.system_resource) - HEAP_BESIDE_VAMM_HELD_BACK,
-        split.heap_size
-    );
-    assert!(VAMM_ARENA_SIZE + HEAP_BESIDE_VAMM_HELD_BACK <= split.alias_size);
-    assert!(u64::from(split.total_memory) <= switch_core::mem::MAX_MAPPED_BYTES);
-    assert_ne!(
-        split.system_resource, 0,
-        "the title still uses the Vamm manager"
-    );
-    assert_eq!(
-        MemoryLayout::for_program(0, 0x0180_0000, true),
-        MemoryLayout::HEAP_BESIDE_VAMM
-    );
-    assert_eq!(
-        MemoryLayout::for_program(0, 0x0180_0000, false),
-        MemoryLayout::VIRTUAL_ADDRESS
-    );
-    assert_eq!(
-        MemoryLayout::for_program(0, 0, true),
-        MemoryLayout::PLAIN,
-        "without a system resource there is no Vamm to sit beside"
-    );
-
-    let vamm = MemoryLayout::VIRTUAL_ADDRESS;
-    let heap_reservation = vamm.total_memory - vamm.system_resource;
-    assert!(
-        VAMM_ARENA_SIZE + heap_reservation < vamm.alias_size,
-        "the alias region must hold the SDK's arena and a full heap reservation"
-    );
-    // Headroom for a title's own reservations; 274 MiB was not enough for Just Dance 2023.
-    let headroom = vamm.alias_size - VAMM_ARENA_SIZE - heap_reservation;
-    assert!(
-        headroom >= 0x2000_0000,
-        "leave a title room to reserve on its own account, got {headroom:#x}"
-    );
+    // Each 32-bit layout's total must fit the region it grows into.
+    assert!(low.total_memory <= low.heap_size);
+    assert!(low_vamm.total_memory <= low_vamm.alias_size);
 }
 
 #[test]
 fn a_heap_bigger_than_its_region_is_refused() {
-    use switch_core::cpu::{GUEST_HEAP_REGION_ADDR, GUEST_HEAP_REGION_SIZE};
+    use switch_core::cpu::{HEAP_REGION_ADDR, HEAP_REGION_SIZE};
     const OUT_OF_MEMORY: u64 = 1 | (104 << 9);
 
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
     cpu.mem.map(0x1000, &svc(0x01).to_le_bytes()).unwrap();
-    cpu.set_reg(1, u64::from(GUEST_HEAP_REGION_SIZE));
+    cpu.set_reg(1, HEAP_REGION_SIZE);
     cpu.run(1).unwrap();
     assert_eq!(
         cpu.read_x(0),
         0,
         "a heap that exactly fills its region is granted"
     );
-    assert_eq!(cpu.read_x(1), u64::from(GUEST_HEAP_REGION_ADDR));
+    assert_eq!(cpu.read_x(1), HEAP_REGION_ADDR);
 
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
     cpu.mem.map(0x1000, &svc(0x01).to_le_bytes()).unwrap();
-    cpu.set_reg(1, u64::from(GUEST_HEAP_REGION_SIZE) + 0x1000);
+    cpu.set_reg(1, HEAP_REGION_SIZE + 0x1000);
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), OUT_OF_MEMORY);
 }
@@ -1208,9 +1217,9 @@ fn homebrew_nro() -> Vec<u8> {
 /// `argv[0]` from the environment block's argument entry.
 fn argv0(cpu: &Cpu) -> String {
     let env = switch_core::nro::ENV_BLOCK_ADDR;
-    let at = cpu.mem.read_u64(env + 64).unwrap() as u32;
+    let at = cpu.mem.read_u64(u64::from(env + 64)).unwrap() as u32;
     let bytes: Vec<u8> = (at..)
-        .map(|a| cpu.mem.read_u8(a).unwrap())
+        .map(|a| cpu.mem.read_u8(u64::from(a)).unwrap())
         .take_while(|&b| b != 0)
         .collect();
     String::from_utf8(bytes).unwrap()
@@ -1240,7 +1249,7 @@ fn homebrew_names_the_program_it_asks_to_run_next() {
 
     cpu.mem
         .write_bytes(
-            switch_core::nro::NEXT_LOAD_PATH_ADDR,
+            u64::from(switch_core::nro::NEXT_LOAD_PATH_ADDR),
             b"sdmc:/switch/demo.nro\0",
         )
         .unwrap();

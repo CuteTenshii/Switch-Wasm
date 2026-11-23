@@ -148,7 +148,7 @@ impl SslConnection {
 impl Cpu {
     pub(super) fn ssl_connection_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         key: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -156,8 +156,11 @@ impl Cpu {
             return self.unimplemented_command(tls, "ssl:connection", cmd_id);
         }
         let data = self.ipc_request_data(tls);
-        let word =
-            |cpu: &Cpu, index: u32| cpu.mem.read_u32(data.wrapping_add(index * 4)).unwrap_or(0);
+        let word = |cpu: &Cpu, index: u32| {
+            cpu.mem
+                .read_u32(data.wrapping_add(u64::from(index * 4)))
+                .unwrap_or(0)
+        };
         let reply = |cpu: &mut Cpu, bytes: &[u8]| cpu.write_ipc_response(tls, 0, &[], bytes, &[]);
         let fail = |cpu: &mut Cpu, code: u32| cpu.write_ipc_response(tls, code, &[], &[], &[]);
         let connection = |cpu: &Cpu| cpu.process().ssl_connections[&key].clone();
@@ -349,14 +352,14 @@ impl Cpu {
         self.process().bsd_sockets.get(&fd)
     }
 
-    fn ssl_reply(&mut self, tls: u32, key: u64, result: u32, data: &[u8]) -> Result<()> {
+    fn ssl_reply(&mut self, tls: u64, key: u64, result: u32, data: &[u8]) -> Result<()> {
         self.connection_mut(key).deadline = None;
         self.write_ipc_response(tls, result, &[], data, &[])
     }
 
     /// A call that cannot finish yet. A non-blocking one says so; a blocking one writes no
     /// reply and is run again until it can, or until `timeout_ns` of guest time has passed.
-    fn ssl_wait(&mut self, tls: u32, key: u64, timeout_ns: i64, may_block: bool) -> Result<()> {
+    fn ssl_wait(&mut self, tls: u64, key: u64, timeout_ns: i64, may_block: bool) -> Result<()> {
         if !may_block {
             return self.ssl_reply(tls, key, RESULT_WOULD_BLOCK, &[]);
         }
@@ -371,7 +374,7 @@ impl Cpu {
     }
 
     /// How a call that is not told its own timeout waits: not at all when non-blocking.
-    fn ssl_io_wait(&mut self, tls: u32, key: u64) -> Result<()> {
+    fn ssl_io_wait(&mut self, tls: u64, key: u64) -> Result<()> {
         let connection = &self.process().ssl_connections[&key];
         let blocking = connection.io_mode != IO_NONBLOCKING;
         let timeout = match connection.io_timeout_ms {
@@ -382,7 +385,7 @@ impl Cpu {
     }
 
     /// `DoHandshake` and `DoHandshakeGetServerCert`: asked of the host once, then answered when it has.
-    fn ssl_handshake(&mut self, tls: u32, key: u64, with_certificates: bool) -> Result<()> {
+    fn ssl_handshake(&mut self, tls: u64, key: u64, with_certificates: bool) -> Result<()> {
         let connection = self.process().ssl_connections[&key].clone();
         let Some(fd) = connection.fd else {
             return self.ssl_reply(tls, key, RESULT_INTERNAL_LOGIC, &[]);
@@ -455,7 +458,7 @@ impl Cpu {
     }
 
     /// `Read` and `Peek`: what the host has decrypted, or end of file, or a wait.
-    fn ssl_read(&mut self, tls: u32, key: u64, peek: bool) -> Result<()> {
+    fn ssl_read(&mut self, tls: u64, key: u64, peek: bool) -> Result<()> {
         let connection = self.process().ssl_connections[&key].clone();
         let (Some(fd), Some(stream)) = (connection.fd, connection.stream) else {
             return self.ssl_reply(tls, key, RESULT_NO_CONNECTION, &[]);
@@ -485,7 +488,8 @@ impl Cpu {
             socket.rx.drain(..take).collect()
         };
         for (offset, &byte) in bytes.iter().enumerate() {
-            self.mem.write_u8(addr.wrapping_add(offset as u32), byte)?;
+            self.mem
+                .write_u8(addr.wrapping_add(u64::from(offset as u32)), byte)?;
         }
         if !peek {
             self.net.outbox.push(NetCommand::Consumed {
@@ -497,7 +501,7 @@ impl Cpu {
     }
 
     /// `Write`: handed to the host as plaintext, which it encrypts.
-    fn ssl_write(&mut self, tls: u32, key: u64) -> Result<()> {
+    fn ssl_write(&mut self, tls: u64, key: u64) -> Result<()> {
         let connection = self.process().ssl_connections[&key].clone();
         let (Some(fd), Some(stream)) = (connection.fd, connection.stream) else {
             return self.ssl_reply(tls, key, RESULT_NO_CONNECTION, &[]);
@@ -529,7 +533,7 @@ impl Cpu {
 
     /// `Poll(PollEvent, timeout ms)`: which of readable and writable hold, waiting up to the
     /// timeout for one.
-    fn ssl_poll(&mut self, tls: u32, key: u64, events: u32, timeout_ms: u32) -> Result<()> {
+    fn ssl_poll(&mut self, tls: u64, key: u64, events: u32, timeout_ms: u32) -> Result<()> {
         const READ: u32 = 1;
         const WRITE: u32 = 2;
         let done = self.process().ssl_connections[&key].handshake == Handshake::Done;

@@ -179,8 +179,8 @@ impl Cpu {
             SysOp::Barrier => std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst),
             SysOp::DcZva { rt } => {
                 // Eight doubleword stores rather than sixty-four byte ones.
-                let addr = self.reg_at(rt) as u32 & !0x3F;
-                for i in 0..8u32 {
+                let addr = self.reg_at(rt) & !0x3F;
+                for i in 0..8u64 {
                     self.mem.write_u64(addr.wrapping_add(i * 8), 0)?;
                 }
             }

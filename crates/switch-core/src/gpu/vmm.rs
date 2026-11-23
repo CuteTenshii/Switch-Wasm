@@ -30,7 +30,7 @@ pub const FLAG_REMAP_SUB_RANGE: u32 = 1 << 8;
 pub struct Mapping {
     pub gpu_va: u64,
     pub size: u64,
-    pub cpu_addr: u32,
+    pub cpu_addr: u64,
     /// 0 for a raw mapping.
     pub handle: u32,
     /// Memory kind (block-linear layout selector).
@@ -72,7 +72,7 @@ pub struct AddressSpace {
     /// only two arrays. A `size` of zero is an empty way.
     recent_base: [Cell<u64>; TRANSLATION_WAYS],
     recent_size: [Cell<u64>; TRANSLATION_WAYS],
-    recent_cpu: [Cell<u32>; TRANSLATION_WAYS],
+    recent_cpu: [Cell<u64>; TRANSLATION_WAYS],
     next_translation: Cell<usize>,
 }
 
@@ -150,7 +150,7 @@ impl AddressSpace {
     /// Map `size` bytes at `cpu_addr`, at `requested` or a fresh VA. Returns the GPU VA.
     pub fn map(
         &mut self,
-        cpu_addr: u32,
+        cpu_addr: u64,
         size: u64,
         handle: u32,
         kind: u8,
@@ -221,7 +221,7 @@ impl AddressSpace {
             let piece = |at: u64, to: u64, kind: u8| Mapping {
                 gpu_va: at,
                 size: to - at,
-                cpu_addr: m.cpu_addr.wrapping_add((at - m.gpu_va) as u32),
+                cpu_addr: m.cpu_addr.wrapping_add(at - m.gpu_va),
                 handle: m.handle,
                 kind,
                 origin: m.origin,
@@ -272,7 +272,7 @@ impl AddressSpace {
             let piece = |at: u64, size: u64| Mapping {
                 gpu_va: at,
                 size,
-                cpu_addr: mapping.cpu_addr.wrapping_add((at - mapping.gpu_va) as u32),
+                cpu_addr: mapping.cpu_addr.wrapping_add(at - mapping.gpu_va),
                 handle: mapping.handle,
                 kind: mapping.kind,
                 origin: mapping.origin,
@@ -347,15 +347,12 @@ impl AddressSpace {
     }
 
     #[inline]
-    pub fn translate(&self, gpu_va: u64) -> Option<(u32, u64)> {
+    pub fn translate(&self, gpu_va: u64) -> Option<(u64, u64)> {
         for way in 0..TRANSLATION_WAYS {
             let size = self.recent_size[way].get();
             let off = gpu_va.wrapping_sub(self.recent_base[way].get());
             if off < size {
-                return Some((
-                    self.recent_cpu[way].get().wrapping_add(off as u32),
-                    size - off,
-                ));
+                return Some((self.recent_cpu[way].get().wrapping_add(off), size - off));
             }
         }
         let (_, m) = self.mappings.range(..=gpu_va).next_back()?;
@@ -368,7 +365,7 @@ impl AddressSpace {
         self.recent_cpu[way].set(m.cpu_addr);
         self.next_translation.set((way + 1) % TRANSLATION_WAYS);
         let off = gpu_va - m.gpu_va;
-        Some((m.cpu_addr.wrapping_add(off as u32), m.size - off))
+        Some((m.cpu_addr.wrapping_add(off), m.size - off))
     }
 
     /// a cached entry outliving its mapping would hand out a stale address.
@@ -391,7 +388,7 @@ impl AddressSpace {
         self.mappings.values()
     }
 
-    fn cpu_addr(&self, gpu_va: u64, len: u64) -> Result<u32> {
+    fn cpu_addr(&self, gpu_va: u64, len: u64) -> Result<u64> {
         match self.translate(gpu_va) {
             Some((cpu, left)) if left >= len => Ok(cpu),
             Some((_, left)) => Err(Error::Gpu(format!(
@@ -431,7 +428,7 @@ impl AddressSpace {
 mod tests {
     use super::*;
 
-    fn space_with_buffer(cpu_addr: u32, size: u64) -> (AddressSpace, u64) {
+    fn space_with_buffer(cpu_addr: u64, size: u64) -> (AddressSpace, u64) {
         let mut vmm = AddressSpace::new();
         let va = vmm
             .map(cpu_addr, size, 1, 0, SMALL_PAGE_SIZE, 0, 0)
@@ -607,7 +604,7 @@ mod tests {
             );
             assert_eq!(
                 vmm.translate(va + offset).map(|(cpu, _)| cpu),
-                Some(0x2000_0000 + offset as u32),
+                Some(0x2000_0000 + offset),
                 "{offset:#x}"
             );
         }

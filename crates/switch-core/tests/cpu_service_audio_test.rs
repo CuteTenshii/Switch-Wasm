@@ -62,14 +62,18 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
 
     let samples: [i16; 8] = [1, -1, 2, -2, 3, -3, 4, -4];
     for (i, &s) in samples.iter().enumerate() {
-        cpu.mem.write_u16(PCM + i as u32 * 2, s as u16).unwrap();
+        cpu.mem
+            .write_u16(u64::from(PCM + i as u32 * 2), s as u16)
+            .unwrap();
     }
     // AudioOutBuffer { next, buffer, buffer_size, data_size, data_offset }.
-    cpu.mem.write_u64(DESC, 0).unwrap();
-    cpu.mem.write_u64(DESC + 8, u64::from(PCM)).unwrap();
-    cpu.mem.write_u64(DESC + 16, 16).unwrap();
-    cpu.mem.write_u64(DESC + 24, 16).unwrap();
-    cpu.mem.write_u64(DESC + 32, 0).unwrap();
+    cpu.mem.write_u64(u64::from(DESC), 0).unwrap();
+    cpu.mem
+        .write_u64(u64::from(DESC + 8), u64::from(PCM))
+        .unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 16), 16).unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 24), 16).unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 32), 0).unwrap();
     ipc_request_plain_with_buffer(&mut cpu, device, 3, DESC, 40, false, &TAG.to_le_bytes());
     assert_eq!(
         cpu.mem.read_u32(tls + 0x18).unwrap(),
@@ -97,7 +101,9 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
 
     // Spend the cycles with a branch-to-self; the clock is the instruction count.
     const SPIN: u32 = 0x9000;
-    cpu.mem.map(SPIN, &0x1400_0000u32.to_le_bytes()).unwrap(); // b .
+    cpu.mem
+        .map(u64::from(SPIN), &0x1400_0000u32.to_le_bytes())
+        .unwrap(); // b .
     cpu.set_pc(SPIN);
     cpu.run(90_000).unwrap();
     cpu.set_pc(0x1000);
@@ -109,7 +115,7 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
     );
     ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "no tag released");
-    assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), TAG);
+    assert_eq!(cpu.mem.read_u64(u64::from(TAGS)).unwrap(), TAG);
 
     // GetAudioOutPlayedSampleCount counts frames, not samples.
     ipc_request_plain(&mut cpu, device, 10, &[]);
@@ -171,18 +177,20 @@ fn audout_release_zeroes_the_entry_after_the_last_tag() {
     ipc_request_plain(&mut cpu, device, 1, &[]); // StartAudioOut
 
     for i in 0..8u32 {
-        cpu.mem.write_u16(PCM + i * 2, 0x4000).unwrap();
+        cpu.mem.write_u16(u64::from(PCM + i * 2), 0x4000).unwrap();
     }
-    cpu.mem.write_u64(DESC, 0).unwrap();
-    cpu.mem.write_u64(DESC + 8, u64::from(PCM)).unwrap();
-    cpu.mem.write_u64(DESC + 16, 16).unwrap();
-    cpu.mem.write_u64(DESC + 24, 16).unwrap();
-    cpu.mem.write_u64(DESC + 32, 0).unwrap();
+    cpu.mem.write_u64(u64::from(DESC), 0).unwrap();
+    cpu.mem
+        .write_u64(u64::from(DESC + 8), u64::from(PCM))
+        .unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 16), 16).unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 24), 16).unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 32), 0).unwrap();
     ipc_request_plain_with_buffer(&mut cpu, device, 3, DESC, 40, false, &TAG.to_le_bytes());
 
     // Nothing has played, so the release is empty and terminated.
-    cpu.mem.write_u64(TAGS, GARBAGE).unwrap();
-    cpu.mem.write_u64(TAGS + 8, GARBAGE).unwrap();
+    cpu.mem.write_u64(u64::from(TAGS), GARBAGE).unwrap();
+    cpu.mem.write_u64(u64::from(TAGS + 8), GARBAGE).unwrap();
     ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
     assert_eq!(
         cpu.mem.read_u32(tls + 0x20).unwrap(),
@@ -190,25 +198,27 @@ fn audout_release_zeroes_the_entry_after_the_last_tag() {
         "a tag came back early"
     );
     assert_eq!(
-        cpu.mem.read_u64(TAGS).unwrap(),
+        cpu.mem.read_u64(u64::from(TAGS)).unwrap(),
         0,
         "the guest kept reading its own stack"
     );
 
     // Once played, the tag lands in the first slot and the zero after it.
     const SPIN: u32 = 0x9000;
-    cpu.mem.map(SPIN, &0x1400_0000u32.to_le_bytes()).unwrap(); // b .
+    cpu.mem
+        .map(u64::from(SPIN), &0x1400_0000u32.to_le_bytes())
+        .unwrap(); // b .
     cpu.set_pc(SPIN);
     cpu.run(90_000).unwrap();
     cpu.set_pc(0x1000);
 
-    cpu.mem.write_u64(TAGS, GARBAGE).unwrap();
-    cpu.mem.write_u64(TAGS + 8, GARBAGE).unwrap();
+    cpu.mem.write_u64(u64::from(TAGS), GARBAGE).unwrap();
+    cpu.mem.write_u64(u64::from(TAGS + 8), GARBAGE).unwrap();
     ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "no tag released");
-    assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), TAG);
+    assert_eq!(cpu.mem.read_u64(u64::from(TAGS)).unwrap(), TAG);
     assert_eq!(
-        cpu.mem.read_u64(TAGS + 8).unwrap(),
+        cpu.mem.read_u64(u64::from(TAGS + 8)).unwrap(),
         0,
         "no terminator after the last tag"
     );
@@ -240,17 +250,19 @@ fn audout_release_answers_the_auto_commands_pointer_buffer() {
     ipc_request_plain(&mut cpu, device, 1, &[]); // StartAudioOut
 
     for i in 0..8u32 {
-        cpu.mem.write_u16(PCM + i * 2, 0x4000).unwrap();
+        cpu.mem.write_u16(u64::from(PCM + i * 2), 0x4000).unwrap();
     }
-    cpu.mem.write_u64(DESC, 0).unwrap();
-    cpu.mem.write_u64(DESC + 8, u64::from(PCM)).unwrap();
-    cpu.mem.write_u64(DESC + 16, 16).unwrap();
-    cpu.mem.write_u64(DESC + 24, 16).unwrap();
-    cpu.mem.write_u64(DESC + 32, 0).unwrap();
+    cpu.mem.write_u64(u64::from(DESC), 0).unwrap();
+    cpu.mem
+        .write_u64(u64::from(DESC + 8), u64::from(PCM))
+        .unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 16), 16).unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 24), 16).unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 32), 0).unwrap();
     ipc_request_plain_with_buffer(&mut cpu, device, 3, DESC, 40, false, &TAG.to_le_bytes());
 
     // The terminator reaches the guest's slot, not address 0.
-    cpu.mem.write_u64(TAGS, GARBAGE).unwrap();
+    cpu.mem.write_u64(u64::from(TAGS), GARBAGE).unwrap();
     ipc_request_auto_recv(&mut cpu, device, 8, TAGS, 16, &[]);
     assert_eq!(
         cpu.mem.read_u32(tls + 0x20).unwrap(),
@@ -258,25 +270,27 @@ fn audout_release_answers_the_auto_commands_pointer_buffer() {
         "a tag came back early"
     );
     assert_eq!(
-        cpu.mem.read_u64(TAGS).unwrap(),
+        cpu.mem.read_u64(u64::from(TAGS)).unwrap(),
         0,
         "the pointer buffer was never written"
     );
 
     // And once played, so does the tag.
     const SPIN: u32 = 0x9000;
-    cpu.mem.map(SPIN, &0x1400_0000u32.to_le_bytes()).unwrap(); // b .
+    cpu.mem
+        .map(u64::from(SPIN), &0x1400_0000u32.to_le_bytes())
+        .unwrap(); // b .
     cpu.set_pc(SPIN);
     cpu.run(90_000).unwrap();
     cpu.set_pc(0x1000);
 
-    cpu.mem.write_u64(TAGS, GARBAGE).unwrap();
-    cpu.mem.write_u64(TAGS + 8, GARBAGE).unwrap();
+    cpu.mem.write_u64(u64::from(TAGS), GARBAGE).unwrap();
+    cpu.mem.write_u64(u64::from(TAGS + 8), GARBAGE).unwrap();
     ipc_request_auto_recv(&mut cpu, device, 8, TAGS, 16, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "no tag released");
-    assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), TAG);
+    assert_eq!(cpu.mem.read_u64(u64::from(TAGS)).unwrap(), TAG);
     assert_eq!(
-        cpu.mem.read_u64(TAGS + 8).unwrap(),
+        cpu.mem.read_u64(u64::from(TAGS + 8)).unwrap(),
         0,
         "no terminator after the last tag"
     );
@@ -305,7 +319,7 @@ fn audren_update_reply_has_a_section_for_every_count_the_renderer_was_opened_wit
         ipc_request_plain(cpu, AUDREN, 0, &params);
         u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap())
     };
-    let section = |cpu: &Cpu, at: u32| cpu.mem.read_u32(OUT + at).unwrap();
+    let section = |cpu: &Cpu, at: u32| cpu.mem.read_u32(u64::from(OUT + at)).unwrap();
 
     let renderer = renderer_with(&mut cpu, b"REV9");
     assert_ne!(renderer, 0, "no IAudioRenderer came back");
@@ -352,7 +366,9 @@ fn audren_mixes_a_voice_through_to_the_host() {
     // A ramp, so a resampler off-by-one shows as a shift.
     let samples: Vec<i16> = (0..FRAMES).map(|i| (i as i16 - 120) * 100).collect();
     for (i, &s) in samples.iter().enumerate() {
-        cpu.mem.write_u16(PCM + i as u32 * 2, s as u16).unwrap();
+        cpu.mem
+            .write_u16(u64::from(PCM + i as u32 * 2), s as u16)
+            .unwrap();
     }
 
     let mut update = AudrenUpdate::new(1, 1, 1);
@@ -437,7 +453,7 @@ fn audren_reports_the_wave_buffers_it_finished_with() {
     let renderer = audren_stereo(&mut cpu);
 
     for i in 0..FRAMES {
-        cpu.mem.write_u16(PCM + i * 2, 0x1234).unwrap();
+        cpu.mem.write_u16(u64::from(PCM + i * 2), 0x1234).unwrap();
     }
     let mut update = AudrenUpdate::new(1, 1, 1);
     update.voice(0, PCM_INT16, 1, PCM, FRAMES * 2, FRAMES);
@@ -449,12 +465,12 @@ fn audren_reports_the_wave_buffers_it_finished_with() {
     update.send(&mut cpu, renderer, IN, OUT, 0x2000);
 
     assert_eq!(
-        cpu.mem.read_u64(OUT + VOICE_OUT).unwrap(),
+        cpu.mem.read_u64(u64::from(OUT + VOICE_OUT)).unwrap(),
         u64::from(FRAMES),
         "played sample count"
     );
     assert_eq!(
-        cpu.mem.read_u32(OUT + VOICE_OUT + 8).unwrap(),
+        cpu.mem.read_u32(u64::from(OUT + VOICE_OUT + 8)).unwrap(),
         1,
         "the wave buffer never came back"
     );
@@ -478,7 +494,9 @@ fn audren_decodes_the_adpcm_a_retail_voice_is_encoded_in() {
     // Pair 0 predicts nothing; pair 1 is 1.0 in Q11, adding the previous sample.
     let coefficients: [i16; 16] = [0, 0, 2048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     for (i, &c) in coefficients.iter().enumerate() {
-        cpu.mem.write_u16(COEFS + i as u32 * 2, c as u16).unwrap();
+        cpu.mem
+            .write_u16(u64::from(COEFS + i as u32 * 2), c as u16)
+            .unwrap();
     }
 
     // Frame 0: pair 0, shift 0, nibbles 1..7 then -8..-2.
@@ -488,7 +506,7 @@ fn audren_decodes_the_adpcm_a_retail_voice_is_encoded_in() {
         0x11,
     ];
     for (i, &b) in data.iter().enumerate() {
-        cpu.mem.write_u8(DATA + i as u32, b).unwrap();
+        cpu.mem.write_u8(u64::from(DATA + i as u32), b).unwrap();
     }
     let expected: [i16; 28] = [
         1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
@@ -557,7 +575,7 @@ fn audren_reports_a_disabled_effect_once_a_frame_has_been_generated() {
     let base = effect_out(COUNTS.voices, COUNTS.effects);
     let states = |cpu: &Cpu| -> Vec<u8> {
         (0..COUNTS.effects)
-            .map(|i| cpu.mem.read_u8(OUT + base + i * STRIDE).unwrap())
+            .map(|i| cpu.mem.read_u8(u64::from(OUT + base + i * STRIDE)).unwrap())
             .collect()
     };
 
@@ -628,8 +646,11 @@ fn audren_reports_effects_in_the_narrow_status_before_revision_9() {
     update.send(&mut cpu, renderer, IN, OUT, 0x2000);
 
     let base = OUT + effect_out(COUNTS.voices, COUNTS.effects);
-    assert_eq!(cpu.mem.read_u8(base).unwrap(), EFFECT_ENABLED);
-    assert_eq!(cpu.mem.read_u8(base + STRIDE).unwrap(), EFFECT_DISABLED);
+    assert_eq!(cpu.mem.read_u8(u64::from(base)).unwrap(), EFFECT_ENABLED);
+    assert_eq!(
+        cpu.mem.read_u8(u64::from(base + STRIDE)).unwrap(),
+        EFFECT_DISABLED
+    );
 }
 
 #[test]
@@ -656,7 +677,7 @@ fn audren_keeps_the_mixes_a_dirty_only_update_leaves_out() {
     let renderer = audren_open(&mut cpu, AUDREN, b"REV:", COUNTS);
     let state = |cpu: &Cpu| -> u8 {
         let base = OUT + effect_out(COUNTS.voices, COUNTS.effects);
-        cpu.mem.read_u8(base).unwrap()
+        cpu.mem.read_u8(u64::from(base)).unwrap()
     };
 
     // Every mix is dirty on the first update: the final mix and a submix feeding it.
@@ -741,7 +762,7 @@ fn audren_refuses_a_wave_buffer_that_is_outside_its_allocation() {
     let renderer = audren_stereo(&mut cpu);
 
     for i in 0..240 {
-        cpu.mem.write_u16(PCM + i * 2, 0x7FFF).unwrap();
+        cpu.mem.write_u16(u64::from(PCM + i * 2), 0x7FFF).unwrap();
     }
     let mut update = AudrenUpdate::new(1, 1, 1);
     // 240 samples claimed from a buffer with room for none.
@@ -765,7 +786,7 @@ fn audren_refuses_a_wave_buffer_that_is_outside_its_allocation() {
         "unplayable samples reached the host"
     );
     assert_eq!(
-        cpu.mem.read_u32(OUT + VOICE_OUT + 8).unwrap(),
+        cpu.mem.read_u32(u64::from(OUT + VOICE_OUT + 8)).unwrap(),
         1,
         "the buffer never came back"
     );
@@ -797,14 +818,16 @@ fn audout_refuses_a_buffer_whose_samples_are_outside_it() {
 
     // Playable data where the bad arithmetic would land, so a missing check is audible.
     for i in 0..8u32 {
-        cpu.mem.write_u16(PCM + i * 2, 0x4000).unwrap();
+        cpu.mem.write_u16(u64::from(PCM + i * 2), 0x4000).unwrap();
     }
     // buffer_size is 8 bytes; data_offset alone is past it.
-    cpu.mem.write_u64(DESC, 0).unwrap();
-    cpu.mem.write_u64(DESC + 8, u64::from(PCM)).unwrap();
-    cpu.mem.write_u64(DESC + 16, 8).unwrap();
-    cpu.mem.write_u64(DESC + 24, 8).unwrap();
-    cpu.mem.write_u64(DESC + 32, 16).unwrap();
+    cpu.mem.write_u64(u64::from(DESC), 0).unwrap();
+    cpu.mem
+        .write_u64(u64::from(DESC + 8), u64::from(PCM))
+        .unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 16), 8).unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 24), 8).unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 32), 16).unwrap();
     ipc_request_plain_with_buffer(&mut cpu, device, 7, DESC, 40, false, &TAG.to_le_bytes());
     assert_eq!(
         cpu.mem.read_u32(tls + 0x18).unwrap(),
@@ -826,7 +849,7 @@ fn audout_refuses_a_buffer_whose_samples_are_outside_it() {
         1,
         "the buffer was never released"
     );
-    assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), TAG);
+    assert_eq!(cpu.mem.read_u64(u64::from(TAGS)).unwrap(), TAG);
 }
 
 #[test]
@@ -877,11 +900,13 @@ fn audout_does_not_play_a_stopped_device() {
     ipc_request_plain(&mut cpu, AUDOUT, 1, &args);
     let device = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
 
-    cpu.mem.write_u16(PCM, 0x1234).unwrap();
-    cpu.mem.write_u64(DESC + 8, u64::from(PCM)).unwrap();
-    cpu.mem.write_u64(DESC + 16, 2).unwrap();
-    cpu.mem.write_u64(DESC + 24, 2).unwrap();
-    cpu.mem.write_u64(DESC + 32, 0).unwrap();
+    cpu.mem.write_u16(u64::from(PCM), 0x1234).unwrap();
+    cpu.mem
+        .write_u64(u64::from(DESC + 8), u64::from(PCM))
+        .unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 16), 2).unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 24), 2).unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 32), 0).unwrap();
     ipc_request_plain_with_buffer(&mut cpu, device, 3, DESC, 40, false, &7u64.to_le_bytes());
 
     let mut played = [0i16; 4];
@@ -892,7 +917,7 @@ fn audout_does_not_play_a_stopped_device() {
     );
     ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "released count");
-    assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), 7, "the tag");
+    assert_eq!(cpu.mem.read_u64(u64::from(TAGS)).unwrap(), 7, "the tag");
 }
 
 #[test]
@@ -957,8 +982,8 @@ fn hwopus_decodes_a_packet_into_the_buffer_the_caller_offered() {
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
-    cpu.mem.map_zero(INPUT, 0x400).unwrap();
-    cpu.mem.map_zero(OUTPUT, 0x1000).unwrap();
+    cpu.mem.map_zero(u64::from(INPUT), 0x400).unwrap();
+    cpu.mem.map_zero(u64::from(OUTPUT), 0x1000).unwrap();
     cpu.register_service_handle(HWOPUS, "hwopus");
     let tls = cpu.tls_base();
 
@@ -982,10 +1007,12 @@ fn hwopus_decodes_a_packet_into_the_buffer_the_caller_offered() {
     // One 20 ms CELT-only packet, 48 kHz mono, from the reference encoder.
     let len = OPUS_PACKET.len() as u32;
     for (i, &byte) in (len).to_be_bytes().iter().enumerate() {
-        cpu.mem.write_u8(INPUT + i as u32, byte).unwrap();
+        cpu.mem.write_u8(u64::from(INPUT + i as u32), byte).unwrap();
     }
     for (i, &byte) in OPUS_PACKET.iter().enumerate() {
-        cpu.mem.write_u8(INPUT + 8 + i as u32, byte).unwrap();
+        cpu.mem
+            .write_u8(u64::from(INPUT + 8 + i as u32), byte)
+            .unwrap();
     }
 
     // DecodeInterleaved: reset flag in, { bytes read, samples } out.
@@ -1015,7 +1042,7 @@ fn hwopus_decodes_a_packet_into_the_buffer_the_caller_offered() {
 
     // The samples are not all zero.
     let loudest = (0..960)
-        .map(|i| i32::from(cpu.mem.read_u16(OUTPUT + i * 2).unwrap() as i16).abs())
+        .map(|i| i32::from(cpu.mem.read_u16(u64::from(OUTPUT + i * 2)).unwrap() as i16).abs())
         .max()
         .unwrap();
     assert!(
@@ -1034,8 +1061,8 @@ fn hwopus_refuses_a_packet_shorter_than_its_own_header() {
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
-    cpu.mem.map_zero(INPUT, 0x400).unwrap();
-    cpu.mem.map_zero(OUTPUT, 0x1000).unwrap();
+    cpu.mem.map_zero(u64::from(INPUT), 0x400).unwrap();
+    cpu.mem.map_zero(u64::from(OUTPUT), 0x1000).unwrap();
     cpu.register_service_handle(HWOPUS, "hwopus");
     let tls = cpu.tls_base();
 
@@ -1049,7 +1076,7 @@ fn hwopus_refuses_a_packet_shorter_than_its_own_header() {
 
     // A header claiming more payload than the buffer holds.
     for (i, &byte) in 0x1000u32.to_be_bytes().iter().enumerate() {
-        cpu.mem.write_u8(INPUT + i as u32, byte).unwrap();
+        cpu.mem.write_u8(u64::from(INPUT + i as u32), byte).unwrap();
     }
     ipc_request_plain_with_both_buffers(
         &mut cpu,
@@ -1094,14 +1121,18 @@ fn play_on_a_new_device(cpu: &mut Cpu, audout: u64, rate: u32, channels: u32, sa
     ipc_request_plain(cpu, device, 4, &[]);
     ipc_request_plain(cpu, device, 1, &[]);
     for (i, &s) in samples.iter().enumerate() {
-        cpu.mem.write_u16(PCM + i as u32 * 2, s as u16).unwrap();
+        cpu.mem
+            .write_u16(u64::from(PCM + i as u32 * 2), s as u16)
+            .unwrap();
     }
     let bytes = samples.len() as u64 * 2;
-    cpu.mem.write_u64(DESC, 0).unwrap();
-    cpu.mem.write_u64(DESC + 8, u64::from(PCM)).unwrap();
-    cpu.mem.write_u64(DESC + 16, bytes).unwrap();
-    cpu.mem.write_u64(DESC + 24, bytes).unwrap();
-    cpu.mem.write_u64(DESC + 32, 0).unwrap();
+    cpu.mem.write_u64(u64::from(DESC), 0).unwrap();
+    cpu.mem
+        .write_u64(u64::from(DESC + 8), u64::from(PCM))
+        .unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 16), bytes).unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 24), bytes).unwrap();
+    cpu.mem.write_u64(u64::from(DESC + 32), 0).unwrap();
     ipc_request_plain_with_buffer(cpu, device, 3, DESC, 40, false, &1u64.to_le_bytes());
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "append failed");
 }

@@ -27,13 +27,19 @@ fn main() {
     const CODE: u32 = 0x1000;
     const OUTPUT: u32 = 0x2_0000;
     let mut cpu = common::new_cpu();
-    cpu.mem.map_zero(CODE, code.len() + 16).unwrap();
-    cpu.mem.map(CODE, &code).unwrap();
-    cpu.mem.map_zero(inputs_addr, inputs.len() + 4096).unwrap();
-    cpu.mem.map(inputs_addr, &inputs).unwrap();
+    cpu.mem
+        .map_zero(u64::from(CODE), code.len() as u64 + 16)
+        .unwrap();
+    cpu.mem.map(u64::from(CODE), &code).unwrap();
+    cpu.mem
+        .map_zero(u64::from(inputs_addr), inputs.len() as u64 + 4096)
+        .unwrap();
+    cpu.mem.map(u64::from(inputs_addr), &inputs).unwrap();
     // One dump per instruction under test.
     let capacity = (code.len() / 4 + 1) * 512;
-    cpu.mem.map_zero(OUTPUT, capacity).unwrap();
+    cpu.mem
+        .map_zero(u64::from(OUTPUT), capacity as u64)
+        .unwrap();
     cpu.set_reg(0, inputs_addr as u64);
     cpu.set_reg(1, OUTPUT as u64);
     cpu.set_pc(CODE);
@@ -63,7 +69,7 @@ fn main() {
     let written = (high_water as u32)
         .saturating_sub(OUTPUT)
         .min(capacity as u32);
-    let dump = cpu.mem.dump(OUTPUT, written as usize).unwrap();
+    let dump = cpu.mem.dump(u64::from(OUTPUT), written as usize).unwrap();
     std::fs::write(out, &dump).unwrap();
     println!(
         "ran {} instructions, dumped {written} bytes (halted={})",

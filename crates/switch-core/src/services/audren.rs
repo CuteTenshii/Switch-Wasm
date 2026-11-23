@@ -192,14 +192,14 @@ pub(crate) struct DeviceSink {
 /// Offsets are in samples per channel, not bytes.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct WaveBuf {
-    pub address: u32,
+    pub address: u64,
     pub size: u32,
     pub start: u32,
     pub end: u32,
     pub looping: bool,
     pub end_of_stream: bool,
     /// ADPCM history to restart a loop from.
-    pub context: u32,
+    pub context: u64,
 }
 
 /// Nintendo's ADPCM predictor state: the two previous samples.
@@ -363,7 +363,7 @@ impl Cpu {
     /// `IAudioRendererManager` (`audren:u`).
     pub(crate) fn audren_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -442,7 +442,7 @@ impl Cpu {
     /// `IAudioDevice`. Answers as a console docked to a TV.
     pub(crate) fn audio_device_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         cmd_id: Option<u32>,
         _handle: u64,
     ) -> Result<()> {
@@ -468,7 +468,8 @@ impl Cpu {
                         }
                         for j in 0..NAME_LEN as u32 {
                             let byte = name.get(j as usize).copied().unwrap_or(0);
-                            self.mem.write_u8(addr.wrapping_add(at + j), byte)?;
+                            self.mem
+                                .write_u8(addr.wrapping_add(u64::from(at + j)), byte)?;
                         }
                         written += 1;
                     }
@@ -491,7 +492,7 @@ impl Cpu {
                 if let Some((addr, len)) = self.ipc_output_buffer(tls, 0) {
                     for j in 0..NAME_LEN.min(len as usize) as u32 {
                         let byte = ACTIVE_DEVICE.get(j as usize).copied().unwrap_or(0);
-                        self.mem.write_u8(addr.wrapping_add(j), byte)?;
+                        self.mem.write_u8(addr.wrapping_add(u64::from(j)), byte)?;
                     }
                 }
                 self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -510,7 +511,7 @@ impl Cpu {
     /// `IAudioRenderer`.
     pub(crate) fn audren_renderer_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         cmd_id: Option<u32>,
         handle: u64,
     ) -> Result<()> {
@@ -613,7 +614,7 @@ impl Cpu {
     }
 
     /// `RequestUpdateAudioRenderer`: parse the state, render due frames, reply.
-    fn audren_update(&mut self, tls: u32, handle: u64) -> Result<()> {
+    fn audren_update(&mut self, tls: u64, handle: u64) -> Result<()> {
         if let Some(renderer) = self.process_mut().audren_renderers.get_mut(&handle) {
             renderer.updates += 1;
         }
@@ -625,11 +626,11 @@ impl Cpu {
     }
 
     /// Read one update's input buffer, walking sections by the guest's declared sizes.
-    fn audren_parse_update(&mut self, handle: u64, addr: u32, size: u32) {
+    fn audren_parse_update(&mut self, handle: u64, addr: u64, size: u32) {
         let Some(mut renderer) = self.process_mut().audren_renderers.remove(&handle) else {
             return;
         };
-        let read_u32 = |cpu: &Cpu, at: u32| cpu.mem.read_u32(at).unwrap_or(0);
+        let read_u32 = |cpu: &Cpu, at: u64| cpu.mem.read_u32(at).unwrap_or(0);
 
         if size < HEADER_SZ {
             self.process_mut().audren_renderers.insert(handle, renderer);
@@ -645,28 +646,32 @@ impl Cpu {
         // The word libnx calls padding is the splitter section size.
         let splitters_sz = read_u32(self, addr.wrapping_add(0x24));
 
-        let mut at = addr.wrapping_add(HEADER_SZ).wrapping_add(behavior_sz);
+        let mut at = addr
+            .wrapping_add(u64::from(HEADER_SZ))
+            .wrapping_add(u64::from(behavior_sz));
         self.audren_parse_mempools(&mut renderer, at, mempools_sz);
-        at = at.wrapping_add(mempools_sz);
+        at = at.wrapping_add(u64::from(mempools_sz));
         self.audren_parse_channels(&mut renderer, at, channels_sz);
-        at = at.wrapping_add(channels_sz);
+        at = at.wrapping_add(u64::from(channels_sz));
         self.audren_parse_voices(&mut renderer, at, voices_sz);
-        at = at.wrapping_add(voices_sz);
+        at = at.wrapping_add(u64::from(voices_sz));
         self.audren_parse_effects(&mut renderer, at, effects_sz);
-        at = at.wrapping_add(effects_sz).wrapping_add(splitters_sz);
+        at = at
+            .wrapping_add(u64::from(effects_sz))
+            .wrapping_add(u64::from(splitters_sz));
         self.audren_parse_mixes(&mut renderer, at, mixes_sz);
-        at = at.wrapping_add(mixes_sz);
+        at = at.wrapping_add(u64::from(mixes_sz));
         self.audren_parse_sinks(&mut renderer, at, sinks_sz);
 
         self.process_mut().audren_renderers.insert(handle, renderer);
     }
 
     /// `AudioRendererMemPoolInfoIn[]`. Attach and detach requests are acknowledged.
-    fn audren_parse_mempools(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
+    fn audren_parse_mempools(&mut self, renderer: &mut AudioRenderer, addr: u64, size: u32) {
         let count = (size / MEMPOOL_IN_SZ) as usize;
         renderer.mempool_states = vec![0; count];
         for (i, pool) in renderer.mempool_states.iter_mut().enumerate() {
-            let at = addr.wrapping_add(i as u32 * MEMPOOL_IN_SZ);
+            let at = addr.wrapping_add(u64::from(i as u32 * MEMPOOL_IN_SZ));
             let state = self.mem.read_u32(at.wrapping_add(0x10)).unwrap_or(0);
             *pool = match state {
                 MEMPOOL_REQUEST_ATTACH => MEMPOOL_ATTACHED,
@@ -677,15 +682,15 @@ impl Cpu {
     }
 
     /// `AudioRendererChannelInfoIn[]`.
-    fn audren_parse_channels(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
+    fn audren_parse_channels(&mut self, renderer: &mut AudioRenderer, addr: u64, size: u32) {
         let count = (size / CHANNEL_IN_SZ) as usize;
         renderer.channels.resize(count, ChannelResource::default());
         for (i, channel) in renderer.channels.iter_mut().enumerate() {
-            let at = addr.wrapping_add(i as u32 * CHANNEL_IN_SZ);
+            let at = addr.wrapping_add(u64::from(i as u32 * CHANNEL_IN_SZ));
             for (slot, mix) in channel.mix.iter_mut().enumerate().take(MAX_MIX_BUFFERS) {
                 let raw = self
                     .mem
-                    .read_u32(at.wrapping_add(4 + slot as u32 * 4))
+                    .read_u32(at.wrapping_add(u64::from(4 + slot as u32 * 4)))
                     .unwrap_or(0);
                 let gain = f32::from_bits(raw);
                 *mix = if gain.is_finite() { gain } else { 0.0 };
@@ -695,13 +700,13 @@ impl Cpu {
     }
 
     /// `AudioRendererVoiceInfoIn[]`.
-    fn audren_parse_voices(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
+    fn audren_parse_voices(&mut self, renderer: &mut AudioRenderer, addr: u64, size: u32) {
         let count = (size / VOICE_IN_SZ) as usize;
         if renderer.voices.len() < count {
             renderer.voices.resize(count, Voice::default());
         }
         for i in 0..count {
-            let at = addr.wrapping_add(i as u32 * VOICE_IN_SZ);
+            let at = addr.wrapping_add(u64::from(i as u32 * VOICE_IN_SZ));
             // The voice's id, not its array position, indexes the renderer state.
             let id = self.mem.read_u32(at).unwrap_or(0) as usize;
             let id = if id < renderer.voices.len() { id } else { i };
@@ -715,7 +720,7 @@ impl Cpu {
             let volume = f32::from_bits(self.mem.read_u32(at.wrapping_add(0x20)).unwrap_or(0));
             let wavebuf_count = self.mem.read_u32(at.wrapping_add(0x3c)).unwrap_or(0);
             let wavebuf_head = self.mem.read_u16(at.wrapping_add(0x40)).unwrap_or(0);
-            let extra_params = self.mem.read_u32(at.wrapping_add(0x48)).unwrap_or(0);
+            let extra_params = self.mem.read_u64(at.wrapping_add(0x48)).unwrap_or(0);
             let dest_mix_id = self.mem.read_u32(at.wrapping_add(0x58)).unwrap_or(0);
 
             let voice = &mut renderer.voices[id];
@@ -736,36 +741,36 @@ impl Cpu {
             voice.dest_mix_id = dest_mix_id;
 
             for (filter, biquad) in voice.biquads.iter_mut().enumerate().take(2) {
-                let base = at.wrapping_add(0x24 + filter as u32 * 0x0c);
+                let base = at.wrapping_add(u64::from(0x24 + filter as u32 * 0x0c));
                 biquad.enabled = self.mem.read_u8(base).unwrap_or(0) != 0;
                 for (n, num) in biquad.numerator.iter_mut().enumerate().take(3) {
                     let raw = self
                         .mem
-                        .read_u16(base.wrapping_add(2 + n as u32 * 2))
+                        .read_u16(base.wrapping_add(u64::from(2 + n as u32 * 2)))
                         .unwrap_or(0);
                     *num = raw as i16;
                 }
                 for (n, den) in biquad.denominator.iter_mut().enumerate().take(2) {
                     let raw = self
                         .mem
-                        .read_u16(base.wrapping_add(8 + n as u32 * 2))
+                        .read_u16(base.wrapping_add(u64::from(8 + n as u32 * 2)))
                         .unwrap_or(0);
                     *den = raw as i16;
                 }
             }
 
             for (slot, wavebuf) in voice.wavebufs.iter_mut().enumerate().take(WAVE_BUFFERS) {
-                let base = at.wrapping_add(0x60 + slot as u32 * WAVE_BUF_IN_SZ);
+                let base = at.wrapping_add(u64::from(0x60 + slot as u32 * WAVE_BUF_IN_SZ));
                 let start = self.mem.read_u32(base.wrapping_add(0x10)).unwrap_or(0);
                 let end = self.mem.read_u32(base.wrapping_add(0x14)).unwrap_or(0);
                 *wavebuf = WaveBuf {
-                    address: self.mem.read_u32(base).unwrap_or(0),
+                    address: self.mem.read_u64(base).unwrap_or(0),
                     size: self.mem.read_u32(base.wrapping_add(0x08)).unwrap_or(0),
                     start,
                     end,
                     looping: self.mem.read_u8(base.wrapping_add(0x18)).unwrap_or(0) != 0,
                     end_of_stream: self.mem.read_u8(base.wrapping_add(0x19)).unwrap_or(0) != 0,
-                    context: self.mem.read_u32(base.wrapping_add(0x20)).unwrap_or(0),
+                    context: self.mem.read_u64(base.wrapping_add(0x20)).unwrap_or(0),
                 };
             }
 
@@ -777,14 +782,14 @@ impl Cpu {
             {
                 let raw = self
                     .mem
-                    .read_u32(at.wrapping_add(0x140 + channel as u32 * 4));
+                    .read_u32(at.wrapping_add(u64::from(0x140 + channel as u32 * 4)));
                 *id = raw.unwrap_or(0);
             }
 
             // ADPCM coefficients: sixteen s16 in the voice's extra parameters.
             if format == PCM_ADPCM && extra_params != 0 {
                 for (n, coef) in voice.adpcm_coefficients.iter_mut().enumerate().take(16) {
-                    let raw = self.mem.read_u16(extra_params.wrapping_add(n as u32 * 2));
+                    let raw = self.mem.read_u16(extra_params.wrapping_add(n as u64 * 2));
                     *coef = raw.unwrap_or(0) as i16;
                 }
             }
@@ -795,10 +800,10 @@ impl Cpu {
     }
 
     /// `EffectInfo::InParameter[]`: type, is_new, is_enabled, then the mix id at 4.
-    fn audren_parse_effects(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
+    fn audren_parse_effects(&mut self, renderer: &mut AudioRenderer, addr: u64, size: u32) {
         let count = ((size / EFFECT_IN_SZ) as usize).min(renderer.effects.len());
         for (i, effect) in renderer.effects.iter_mut().enumerate().take(count) {
-            let at = addr.wrapping_add(i as u32 * EFFECT_IN_SZ);
+            let at = addr.wrapping_add(u64::from(i as u32 * EFFECT_IN_SZ));
             let kind = self.mem.read_u8(at).unwrap_or(0);
             // A new type is a new effect in the slot, with no usage yet.
             if kind != effect.kind {
@@ -814,15 +819,15 @@ impl Cpu {
 
     /// `AudioRendererMixInfoIn[]`, either every mix or only the changed ones
     /// (`MixInParameterDirtyOnlyUpdate`). Buffers are assigned in mix-id order.
-    fn audren_parse_mixes(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
+    fn audren_parse_mixes(&mut self, renderer: &mut AudioRenderer, addr: u64, size: u32) {
         // The server checks the section size exactly, so its remainder tells the forms apart.
         if size % MIX_IN_SZ == MIX_DIRTY_HEADER_SZ {
             let sent = self.mem.read_u32(addr.wrapping_add(4)).unwrap_or(0);
             let count = sent.min(size / MIX_IN_SZ);
             for i in 0..count {
                 let at = addr
-                    .wrapping_add(MIX_DIRTY_HEADER_SZ)
-                    .wrapping_add(i * MIX_IN_SZ);
+                    .wrapping_add(u64::from(MIX_DIRTY_HEADER_SZ))
+                    .wrapping_add(u64::from(i * MIX_IN_SZ));
                 let mix = self.audren_read_mix(at);
                 match renderer.mixes.iter_mut().find(|m| m.mix_id == mix.mix_id) {
                     Some(kept) => *kept = mix,
@@ -847,7 +852,7 @@ impl Cpu {
                 return;
             }
             for i in 0..count {
-                let mix = self.audren_read_mix(addr.wrapping_add(i as u32 * stride));
+                let mix = self.audren_read_mix(addr.wrapping_add(u64::from(i as u32 * stride)));
                 renderer.mixes.push(mix);
             }
         }
@@ -861,7 +866,7 @@ impl Cpu {
     }
 
     /// One `AudioRendererMixInfoIn`.
-    fn audren_read_mix(&self, at: u32) -> Mix {
+    fn audren_read_mix(&self, at: u64) -> Mix {
         let volume = f32::from_bits(self.mem.read_u32(at).unwrap_or(0));
         let buffer_count = self.mem.read_u32(at.wrapping_add(0x08)).unwrap_or(0);
         let is_used = self.mem.read_u8(at.wrapping_add(0x0c)).unwrap_or(0) != 0;
@@ -874,7 +879,10 @@ impl Cpu {
             for src in 0..buffer_count as usize {
                 for dest in 0..MAX_MIX_BUFFERS {
                     let offset = 0x24 + ((src * MAX_MIX_BUFFERS + dest) * 4) as u32;
-                    let raw = self.mem.read_u32(at.wrapping_add(offset)).unwrap_or(0);
+                    let raw = self
+                        .mem
+                        .read_u32(at.wrapping_add(u64::from(offset)))
+                        .unwrap_or(0);
                     let gain = f32::from_bits(raw);
                     matrix[src * MAX_MIX_BUFFERS + dest] =
                         if gain.is_finite() { gain } else { 0.0 };
@@ -893,7 +901,7 @@ impl Cpu {
     }
 
     /// `AudioRendererSinkInfoIn[]`.
-    fn audren_parse_sinks(&mut self, renderer: &mut AudioRenderer, addr: u32, size: u32) {
+    fn audren_parse_sinks(&mut self, renderer: &mut AudioRenderer, addr: u64, size: u32) {
         let count = renderer.sink_count as usize;
         let stride = if count > 0 { size / count as u32 } else { 0 };
         renderer.sink = None;
@@ -901,7 +909,7 @@ impl Cpu {
             return;
         }
         for i in 0..count {
-            let at = addr.wrapping_add(i as u32 * stride);
+            let at = addr.wrapping_add(u64::from(i as u32 * stride));
             let kind = self.mem.read_u8(at).unwrap_or(0);
             let is_used = self.mem.read_u8(at.wrapping_add(0x01)).unwrap_or(0) != 0;
             if !is_used {
@@ -924,7 +932,7 @@ impl Cpu {
             for (channel, slot) in inputs.iter_mut().enumerate() {
                 *slot = self
                     .mem
-                    .read_u8(sink.wrapping_add(0x104 + channel as u32))
+                    .read_u8(sink.wrapping_add(0x104 + channel as u64))
                     .unwrap_or(0);
             }
             renderer.sink = Some(DeviceSink {
@@ -994,7 +1002,7 @@ impl Cpu {
 
     /// `RequestUpdateAudioRenderer`'s reply. The guest checks every `_sz` field
     /// against sizes computed from the open counts and aborts on mismatch.
-    pub(crate) fn audren_write_update_reply(&mut self, tls: u32, handle: u64) -> Result<()> {
+    pub(crate) fn audren_write_update_reply(&mut self, tls: u64, handle: u64) -> Result<()> {
         let Some(renderer) = self.process().audren_renderers.get(&handle) else {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
         };
@@ -1091,7 +1099,8 @@ impl Cpu {
         if let Some(&(addr, size)) = recv.first() {
             let n = (size as usize).min(reply.len());
             for (i, &byte) in reply[..n].iter().enumerate() {
-                self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
+                self.mem
+                    .write_u8(addr.wrapping_add(u64::from(i as u32)), byte)?;
             }
         }
         self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -1416,7 +1425,9 @@ fn decode_adpcm_from_frame_start(mem: &Memory, voice: &mut Voice, wavebuf: WaveB
 fn decode_adpcm(mem: &Memory, voice: &mut Voice, wavebuf: WaveBuf, index: u32) -> f32 {
     let frame = index / ADPCM_SAMPLES_PER_FRAME;
     let within = index % ADPCM_SAMPLES_PER_FRAME;
-    let frame_at = wavebuf.address.wrapping_add(frame * ADPCM_BYTES_PER_FRAME);
+    let frame_at = wavebuf
+        .address
+        .wrapping_add(u64::from(frame * ADPCM_BYTES_PER_FRAME));
     let header = mem.read_u8(frame_at).unwrap_or(0);
     let scale = i64::from(header & 0xF);
     let coefficient = usize::from(header >> 4) & 0xF;
@@ -1424,7 +1435,7 @@ fn decode_adpcm(mem: &Memory, voice: &mut Voice, wavebuf: WaveBuf, index: u32) -
     let coef1 = i64::from(voice.adpcm_coefficients[coefficient * 2 + 1]);
 
     let byte = mem
-        .read_u8(frame_at.wrapping_add(1 + within / 2))
+        .read_u8(frame_at.wrapping_add(u64::from(1 + within / 2)))
         .unwrap_or(0);
     let raw = if within.is_multiple_of(2) {
         byte >> 4
@@ -1452,15 +1463,19 @@ fn decode_pcm(mem: &Memory, voice: &Voice, wavebuf: WaveBuf, index: u32, channel
     let slot = index.wrapping_mul(channels).wrapping_add(channel as u32);
     match voice.format {
         PCM_INT8 => {
-            let at = wavebuf.address.wrapping_add(slot);
+            let at = wavebuf.address.wrapping_add(u64::from(slot));
             f32::from(mem.read_u8(at).unwrap_or(0) as i8) / 128.0
         }
         PCM_INT16 => {
-            let at = wavebuf.address.wrapping_add(slot.wrapping_mul(2));
+            let at = wavebuf
+                .address
+                .wrapping_add(u64::from(slot.wrapping_mul(2)));
             f32::from(mem.read_u16(at).unwrap_or(0) as i16) / 32768.0
         }
         PCM_INT24 => {
-            let at = wavebuf.address.wrapping_add(slot.wrapping_mul(3));
+            let at = wavebuf
+                .address
+                .wrapping_add(u64::from(slot.wrapping_mul(3)));
             let low = u32::from(mem.read_u8(at).unwrap_or(0));
             let mid = u32::from(mem.read_u8(at.wrapping_add(1)).unwrap_or(0));
             let high = u32::from(mem.read_u8(at.wrapping_add(2)).unwrap_or(0));
@@ -1468,11 +1483,15 @@ fn decode_pcm(mem: &Memory, voice: &Voice, wavebuf: WaveBuf, index: u32, channel
             (raw >> 8) as f32 / 8_388_608.0
         }
         PCM_INT32 => {
-            let at = wavebuf.address.wrapping_add(slot.wrapping_mul(4));
+            let at = wavebuf
+                .address
+                .wrapping_add(u64::from(slot.wrapping_mul(4)));
             mem.read_u32(at).unwrap_or(0) as i32 as f32 / 2_147_483_648.0
         }
         PCM_FLOAT => {
-            let at = wavebuf.address.wrapping_add(slot.wrapping_mul(4));
+            let at = wavebuf
+                .address
+                .wrapping_add(u64::from(slot.wrapping_mul(4)));
             let value = f32::from_bits(mem.read_u32(at).unwrap_or(0));
             if value.is_finite() {
                 value

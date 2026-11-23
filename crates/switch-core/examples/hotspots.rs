@@ -75,7 +75,7 @@ fn main() {
         if detail {
             *by_pc.entry(pc).or_default() += 1;
         }
-        if let Ok(insn) = cpu.mem.read_u32(pc) {
+        if let Ok(insn) = cpu.mem.fetch(pc) {
             by_top[((insn >> 24) & 0xFF) as usize] += 1;
             *by_group.entry(group_of(insn)).or_default() += 1;
         }
@@ -102,7 +102,7 @@ fn main() {
         instructions.sort_unstable_by_key(|&(pc, count)| (std::cmp::Reverse(count), pc));
         println!("--- hottest individual instructions ---");
         for (pc, count) in instructions.iter().take(48) {
-            let insn = cpu.mem.read_u32(*pc).unwrap();
+            let insn = cpu.mem.fetch(*pc).unwrap();
             println!(
                 "{pc:#010x} {count:>12} {insn:08x} {}",
                 switch_core::disasm::disassemble(insn)

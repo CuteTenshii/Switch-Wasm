@@ -68,9 +68,9 @@ impl Cpu {
 
         if a.load {
             let value = if byte {
-                u32::from(self.mem.read_u8(addr)?)
+                u32::from(self.mem.read_u8(u64::from(addr))?)
             } else {
-                self.mem.read_u32(addr)?
+                self.mem.read_u32(u64::from(addr))?
             };
             // Writeback first, so `ldr r0, [r0], #4` keeps the loaded value.
             if let Some(value) = writeback {
@@ -83,9 +83,9 @@ impl Cpu {
         } else {
             let value = self.r32(a.rt);
             if byte {
-                self.mem.write_u8(addr, value as u8)?;
+                self.mem.write_u8(u64::from(addr), value as u8)?;
             } else {
-                self.mem.write_u32(addr, value)?;
+                self.mem.write_u32(u64::from(addr), value)?;
             }
             if let Some(value) = writeback {
                 self.set_r32(a.rn, value);
@@ -112,28 +112,29 @@ impl Cpu {
 
         match (sh, a.load) {
             (0b01, true) => {
-                let value = u32::from(self.mem.read_u16(addr)?);
+                let value = u32::from(self.mem.read_u16(u64::from(addr))?);
                 self.set_r32(rt, value);
             }
-            (0b01, false) => self.mem.write_u16(addr, self.r32(rt) as u16)?,
+            (0b01, false) => self.mem.write_u16(u64::from(addr), self.r32(rt) as u16)?,
             (0b10, true) => {
-                let value = self.mem.read_u8(addr)? as i8 as i32 as u32;
+                let value = self.mem.read_u8(u64::from(addr))? as i8 as i32 as u32;
                 self.set_r32(rt, value);
             }
             (0b11, true) => {
-                let value = self.mem.read_u16(addr)? as i16 as i32 as u32;
+                let value = self.mem.read_u16(u64::from(addr))? as i16 as i32 as u32;
                 self.set_r32(rt, value);
             }
             // LDRD and STRD, which move `Rt` and `Rt + 1` together.
             (0b10, false) => {
-                let lo = self.mem.read_u32(addr)?;
-                let hi = self.mem.read_u32(addr.wrapping_add(4))?;
+                let lo = self.mem.read_u32(u64::from(addr))?;
+                let hi = self.mem.read_u32(u64::from(addr.wrapping_add(4)))?;
                 self.set_r32(rt, lo);
                 self.set_r32(rt + 1, hi);
             }
             _ => {
-                self.mem.write_u32(addr, self.r32(rt))?;
-                self.mem.write_u32(addr.wrapping_add(4), self.r32(rt + 1))?;
+                self.mem.write_u32(u64::from(addr), self.r32(rt))?;
+                self.mem
+                    .write_u32(u64::from(addr.wrapping_add(4)), self.r32(rt + 1))?;
             }
         }
         if let Some(value) = writeback {
@@ -187,7 +188,7 @@ impl Cpu {
                 continue;
             }
             if load {
-                let value = self.mem.read_u32(addr)?;
+                let value = self.mem.read_u32(u64::from(addr))?;
                 if reg == 15 {
                     branch_to = Some(value);
                 } else {
@@ -195,7 +196,7 @@ impl Cpu {
                 }
             } else {
                 // Storing r15 stores pc+8, which `r32` already gives.
-                self.mem.write_u32(addr, self.r32(reg))?;
+                self.mem.write_u32(u64::from(addr), self.r32(reg))?;
             }
             addr = addr.wrapping_add(4);
         }
@@ -227,12 +228,12 @@ impl Cpu {
                 let byte = (insn >> 22) & 1 != 0;
                 let value = self.r32(rt);
                 if byte {
-                    let old = self.mem.read_u8(addr)?;
-                    self.mem.write_u8(addr, value as u8)?;
+                    let old = self.mem.read_u8(u64::from(addr))?;
+                    self.mem.write_u8(u64::from(addr), value as u8)?;
                     self.set_r32(rd, u32::from(old));
                 } else {
-                    let old = self.mem.read_u32(addr)?;
-                    self.mem.write_u32(addr, value)?;
+                    let old = self.mem.read_u32(u64::from(addr))?;
+                    self.mem.write_u32(u64::from(addr), value)?;
                     self.set_r32(rd, old);
                 }
             }
@@ -245,36 +246,36 @@ impl Cpu {
                     0b10 => (1, value),
                     _ => (2, value),
                 };
-                let stored = self.store_exclusive_at(addr, size, [value, 0])?;
+                let stored = self.store_exclusive_at(u64::from(addr), size, [value, 0])?;
                 self.set_r32(rd, u32::from(!stored));
             }
             // LDREX{,D,B,H}. `rd` is the destination here, not a status word.
             0b1001 | 0b1011 | 0b1101 | 0b1111 => {
                 let value = match (insn >> 21) & 0b11 {
                     0b00 => {
-                        let value = self.mem.read_u32(addr)?;
+                        let value = self.mem.read_u32(u64::from(addr))?;
                         self.set_r32(rd, value);
                         u64::from(value)
                     }
                     0b01 => {
-                        let lo = self.mem.read_u32(addr)?;
-                        let hi = self.mem.read_u32(addr.wrapping_add(4))?;
+                        let lo = self.mem.read_u32(u64::from(addr))?;
+                        let hi = self.mem.read_u32(u64::from(addr.wrapping_add(4)))?;
                         self.set_r32(rd, lo);
                         self.set_r32(rd + 1, hi);
                         u64::from(lo) | u64::from(hi) << 32
                     }
                     0b10 => {
-                        let value = u32::from(self.mem.read_u8(addr)?);
+                        let value = u32::from(self.mem.read_u8(u64::from(addr))?);
                         self.set_r32(rd, value);
                         u64::from(value)
                     }
                     _ => {
-                        let value = u32::from(self.mem.read_u16(addr)?);
+                        let value = u32::from(self.mem.read_u16(u64::from(addr))?);
                         self.set_r32(rd, value);
                         u64::from(value)
                     }
                 };
-                self.exclusive.arm(addr, [value, 0]);
+                self.exclusive.arm(u64::from(addr), [value, 0]);
             }
             _ => {
                 return Err(Error::Cpu(format!(
@@ -293,19 +294,19 @@ impl Cpu {
         // A fence on both sides is stronger than either half needs.
         fence(SeqCst);
         match ((insn >> 21) & 0b11, load) {
-            (0b00, false) => self.mem.write_u32(addr, self.r32(rt))?,
-            (0b10, false) => self.mem.write_u8(addr, self.r32(rt) as u8)?,
-            (0b11, false) => self.mem.write_u16(addr, self.r32(rt) as u16)?,
+            (0b00, false) => self.mem.write_u32(u64::from(addr), self.r32(rt))?,
+            (0b10, false) => self.mem.write_u8(u64::from(addr), self.r32(rt) as u8)?,
+            (0b11, false) => self.mem.write_u16(u64::from(addr), self.r32(rt) as u16)?,
             (0b00, true) => {
-                let value = self.mem.read_u32(addr)?;
+                let value = self.mem.read_u32(u64::from(addr))?;
                 self.set_r32(rd, value);
             }
             (0b10, true) => {
-                let value = u32::from(self.mem.read_u8(addr)?);
+                let value = u32::from(self.mem.read_u8(u64::from(addr))?);
                 self.set_r32(rd, value);
             }
             (0b11, true) => {
-                let value = u32::from(self.mem.read_u16(addr)?);
+                let value = u32::from(self.mem.read_u16(u64::from(addr))?);
                 self.set_r32(rd, value);
             }
             // A doubleword has only the exclusive forms.

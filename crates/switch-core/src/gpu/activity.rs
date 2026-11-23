@@ -131,7 +131,7 @@ impl GpuActivity {
 }
 
 /// A surface's GPU address, CPU address when known, size, and format.
-pub fn surface_text(gpu_va: u64, cpu: Option<u32>, width: u32, height: u32, format: u32) -> String {
+pub fn surface_text(gpu_va: u64, cpu: Option<u64>, width: u32, height: u32, format: u32) -> String {
     let cpu = match cpu {
         Some(cpu) => format!(" (cpu {cpu:#x})"),
         None => String::new(),

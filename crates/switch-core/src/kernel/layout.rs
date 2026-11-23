@@ -1,5 +1,7 @@
 //! Guest address space layout and operation modes.
 
+use crate::mem::ADDRESS_SPACE_SIZE;
+
 /// Host-provided stack for [`Cpu::bootstrap`]: 1 MiB full-descending, top at `STACK_TOP`,
 /// between the ASLR region and the heap.
 pub const STACK_SIZE: u64 = 0x0010_0000;
@@ -101,137 +103,116 @@ pub const GUEST_STACK_REGION_SIZE: u32 = SELF_RETURN_TRAMPOLINE - GUEST_STACK_RE
 /// dereference aborts where it happens instead of reading zeros.
 pub const GUEST_SPACE_START: u32 = 0x0020_0000;
 
-/// End of the guest address space: below is soft-mapped by [`Cpu::bootstrap`],
-/// above faults (hbmenu probes the top to size the space).
+/// End of a 32-bit process's address space: below is soft-mapped by `Cpu::map_runtime`,
+/// above faults (hbmenu probes the top to size the space). A 64-bit process's runs to
+/// [`ADDRESS_SPACE_SIZE`].
 pub const GUEST_SPACE_END: u32 = 0xFF00_0000;
 
-/// Heap region (`svcSetHeapSize`) and alias region (`svcMapPhysicalMemory`). A process
-/// uses only one route, so this layout gives the heap nearly everything.
-pub const GUEST_HEAP_REGION_ADDR: u32 = 0x3000_0000;
-pub const GUEST_HEAP_REGION_SIZE: u32 = 0xC800_0000;
-pub const GUEST_ALIAS_REGION_ADDR: u32 =
-    GUEST_HEAP_REGION_ADDR.wrapping_add(GUEST_HEAP_REGION_SIZE);
-pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x0200_0000;
-
-/// Where `ldr:ro` maps run-time loaded modules: between [`STACK_TOP`] and the heap,
+/// Where `ldr:ro` maps run-time loaded modules: between [`STACK_TOP`] and the low heap region,
 /// clear of every region the guest's allocators use.
 pub const RO_MODULE_REGION_ADDR: u32 = 0x2900_0000;
-pub const RO_MODULE_REGION_SIZE: u32 = GUEST_HEAP_REGION_ADDR.wrapping_sub(RO_MODULE_REGION_ADDR);
+pub const RO_MODULE_REGION_SIZE: u32 = LOW_HEAP_REGION_ADDR - RO_MODULE_REGION_ADDR;
 
-/// `svcGetInfo`'s total memory, which `nn::init` asks for as its heap: one region's worth.
-pub const GUEST_TOTAL_MEMORY_SIZE: u32 = GUEST_HEAP_REGION_SIZE;
+/// A 32-bit process's heap region (`svcSetHeapSize`) and alias region (`svcMapPhysicalMemory`),
+/// sharing what is left of 4 GiB. `nnSdk` takes one route per process, so the layout gives
+/// that route nearly everything.
+pub const LOW_HEAP_REGION_ADDR: u32 = 0x3000_0000;
+pub const LOW_HEAP_REGION_SIZE: u32 = 0xC800_0000;
+pub const LOW_ALIAS_REGION_ADDR: u32 = LOW_HEAP_REGION_ADDR + LOW_HEAP_REGION_SIZE;
+pub const LOW_ALIAS_REGION_SIZE: u32 = SHARED_BUFFER_ADDR - LOW_ALIAS_REGION_ADDR;
+/// The same for a 32-bit process on the alias route, which declares a system resource.
+pub const LOW_VAMM_HEAP_REGION_SIZE: u32 = 0x0800_0000;
+pub const LOW_VAMM_ALIAS_REGION_ADDR: u32 = LOW_HEAP_REGION_ADDR + LOW_VAMM_HEAP_REGION_SIZE;
+pub const LOW_VAMM_ALIAS_REGION_SIZE: u32 = SHARED_BUFFER_ADDR - LOW_VAMM_ALIAS_REGION_ADDR;
+/// Its `TotalMemorySize`, which `nn::init` reserves in the alias region beside the Vamm arena.
+pub const LOW_VAMM_TOTAL_MEMORY_SIZE: u64 = 0x3800_0000;
 
-/// The arena `VammManagerImplByHorizon` claims at the alias region base; an SDK constant.
-pub const VAMM_ARENA_SIZE: u32 = 0x0200_0000;
+/// A 64-bit process's heap and alias regions, above the 4 GiB the emulator's own furniture sits
+/// in, at a console's sizes. Both routes fit at once, so a title that uses both (Tears of the
+/// Kingdom), or reserves tens of GiB of address space (Paper Mario: The Origami King, Pokémon
+/// Legends: Z-A), gets what it would on a console.
+pub const HEAP_REGION_ADDR: u64 = 0x10_0000_0000;
+pub const HEAP_REGION_SIZE: u64 = 0x1_8000_0000;
+pub const ALIAS_REGION_ADDR: u64 = 0x20_0000_0000;
+pub const ALIAS_REGION_SIZE: u64 = 0x10_0000_0000;
+const _: () = assert!(ALIAS_REGION_ADDR + ALIAS_REGION_SIZE <= ADDRESS_SPACE_SIZE);
 
-/// What a title's own oversized Vamm reservation is cut to; above the memory it can commit.
-pub const VAMM_TITLE_RESERVATION_SIZE: u32 = 0x8000_0000;
+/// `svcGetInfo`'s total memory for an application, which `nn::init` sizes its heap from: about
+/// the 3.2 GiB a console gives. Titles size pools from hardcoded constants (Just Dance 2019's
+/// 699 MiB graphics pool), so less than a console's fails their allocations.
+pub const GUEST_TOTAL_MEMORY_SIZE: u64 = LOW_HEAP_REGION_SIZE as u64;
+/// The same for firmware library applets.
+pub const APPLET_TOTAL_MEMORY_SIZE: u64 = 0x2000_0000;
+const _: () = assert!(GUEST_TOTAL_MEMORY_SIZE <= crate::mem::MAX_MAPPED_BYTES);
 
-/// Layout for titles using virtual address memory: nearly everything is alias region.
-/// The heap region is unused here, so it is small.
-pub const VAMM_HEAP_REGION_SIZE: u32 = 0x0800_0000;
-pub const VAMM_ALIAS_REGION_ADDR: u32 = GUEST_HEAP_REGION_ADDR.wrapping_add(VAMM_HEAP_REGION_SIZE);
-/// Up to the system shared buffer.
-pub const VAMM_ALIAS_REGION_SIZE: u32 = SHARED_BUFFER_ADDR.wrapping_sub(VAMM_ALIAS_REGION_ADDR);
-/// `TotalMemorySize`, and the size of the alias-region reservation `nn::init` makes.
-pub const VAMM_TOTAL_MEMORY_SIZE: u32 = 0x3800_0000;
-/// `SystemResourceSizeTotal` for this layout.
-pub const VAMM_SYSTEM_RESOURCE_SIZE: u32 = 0x0100_0000;
-
-/// Layout for firmware library applets, which use both a Vamm arena and `svcSetHeapSize`.
-pub const APPLET_HEAP_REGION_SIZE: u32 = 0x2000_0000;
-pub const APPLET_ALIAS_REGION_ADDR: u32 =
-    GUEST_HEAP_REGION_ADDR.wrapping_add(APPLET_HEAP_REGION_SIZE);
-pub const APPLET_ALIAS_REGION_SIZE: u32 = SHARED_BUFFER_ADDR.wrapping_sub(APPLET_ALIAS_REGION_ADDR);
-
-/// Layout for titles that declare a system resource but size an `svcSetHeapSize` heap
-/// themselves, holding back [`HEAP_BESIDE_VAMM_HELD_BACK`] for the alias route. A console fits
-/// both in its 39-bit space; here the heap region and alias region split what is left.
-pub const HEAP_BESIDE_VAMM_HEAP_REGION_SIZE: u32 = 0x8000_0000;
-pub const HEAP_BESIDE_VAMM_ALIAS_REGION_ADDR: u32 =
-    GUEST_HEAP_REGION_ADDR.wrapping_add(HEAP_BESIDE_VAMM_HEAP_REGION_SIZE);
-pub const HEAP_BESIDE_VAMM_ALIAS_REGION_SIZE: u32 =
-    SHARED_BUFFER_ADDR.wrapping_sub(HEAP_BESIDE_VAMM_ALIAS_REGION_ADDR);
-/// What Tears of the Kingdom's `nninitStartup` subtracts from `TotalNonSystemMemorySize`.
-pub const HEAP_BESIDE_VAMM_HELD_BACK: u32 = 0x4380_0000;
-/// Reported so the title's heap comes out exactly as large as the heap region.
-pub const HEAP_BESIDE_VAMM_TOTAL_MEMORY_SIZE: u32 =
-    HEAP_BESIDE_VAMM_HEAP_REGION_SIZE + HEAP_BESIDE_VAMM_HELD_BACK + VAMM_SYSTEM_RESOURCE_SIZE;
-
-/// The address space a process is given, selected by its NPDM system resource size:
-/// `nnSdk` uses the Vamm manager exactly when `SystemResourceSizeTotal` is nonzero.
+/// The address space a process is given: its regions, from whether it is 64-bit and its NPDM
+/// system resource size, and the memory figures `svcGetInfo` reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryLayout {
-    pub heap_addr: u32,
-    pub heap_size: u32,
-    pub alias_addr: u32,
-    pub alias_size: u32,
+    pub heap_addr: u64,
+    pub heap_size: u64,
+    pub alias_addr: u64,
+    pub alias_size: u64,
     /// `TotalMemorySize`.
-    pub total_memory: u32,
-    /// `SystemResourceSizeTotal`; zero keeps `nnSdk` off the Vamm manager.
-    pub system_resource: u32,
+    pub total_memory: u64,
+    /// `SystemResourceSizeTotal`, as the NPDM declares it; nonzero puts `nnSdk` on the
+    /// Vamm manager.
+    pub system_resource: u64,
+    /// The end of the address space: where the soft region and `svcQueryMemory`'s walks stop.
+    pub space_end: u64,
 }
 
 impl MemoryLayout {
-    /// No system resource: `libnx` homebrew and `nnSdk` titles declaring zero.
-    pub const PLAIN: MemoryLayout = MemoryLayout {
-        heap_addr: GUEST_HEAP_REGION_ADDR,
-        heap_size: GUEST_HEAP_REGION_SIZE,
-        alias_addr: GUEST_ALIAS_REGION_ADDR,
-        alias_size: GUEST_ALIAS_REGION_SIZE,
+    /// A 64-bit process's, before its total memory and system resource are known.
+    pub const WIDE: MemoryLayout = MemoryLayout {
+        heap_addr: HEAP_REGION_ADDR,
+        heap_size: HEAP_REGION_SIZE,
+        alias_addr: ALIAS_REGION_ADDR,
+        alias_size: ALIAS_REGION_SIZE,
         total_memory: GUEST_TOTAL_MEMORY_SIZE,
         system_resource: 0,
+        space_end: ADDRESS_SPACE_SIZE,
     };
 
-    /// Titles declaring a system resource.
-    pub const VIRTUAL_ADDRESS: MemoryLayout = MemoryLayout {
-        heap_addr: GUEST_HEAP_REGION_ADDR,
-        heap_size: VAMM_HEAP_REGION_SIZE,
-        alias_addr: VAMM_ALIAS_REGION_ADDR,
-        alias_size: VAMM_ALIAS_REGION_SIZE,
-        total_memory: VAMM_TOTAL_MEMORY_SIZE,
-        system_resource: VAMM_SYSTEM_RESOURCE_SIZE,
+    /// A 32-bit process's on the heap route.
+    pub const LOW: MemoryLayout = MemoryLayout {
+        heap_addr: LOW_HEAP_REGION_ADDR as u64,
+        heap_size: LOW_HEAP_REGION_SIZE as u64,
+        alias_addr: LOW_ALIAS_REGION_ADDR as u64,
+        alias_size: LOW_ALIAS_REGION_SIZE as u64,
+        total_memory: GUEST_TOTAL_MEMORY_SIZE,
+        system_resource: 0,
+        space_end: GUEST_SPACE_END as u64,
     };
 
-    /// Firmware library applets; see [`APPLET_HEAP_REGION_SIZE`].
-    pub const APPLET: MemoryLayout = MemoryLayout {
-        heap_addr: GUEST_HEAP_REGION_ADDR,
-        heap_size: APPLET_HEAP_REGION_SIZE,
-        alias_addr: APPLET_ALIAS_REGION_ADDR,
-        alias_size: APPLET_ALIAS_REGION_SIZE,
-        total_memory: APPLET_HEAP_REGION_SIZE,
-        system_resource: VAMM_SYSTEM_RESOURCE_SIZE,
+    /// A 32-bit process's on the alias route.
+    pub const LOW_VAMM: MemoryLayout = MemoryLayout {
+        heap_addr: LOW_HEAP_REGION_ADDR as u64,
+        heap_size: LOW_VAMM_HEAP_REGION_SIZE as u64,
+        alias_addr: LOW_VAMM_ALIAS_REGION_ADDR as u64,
+        alias_size: LOW_VAMM_ALIAS_REGION_SIZE as u64,
+        total_memory: LOW_VAMM_TOTAL_MEMORY_SIZE,
+        system_resource: 0,
+        space_end: GUEST_SPACE_END as u64,
     };
 
-    /// Titles whose startup code sizes a heap beside the Vamm manager's alias reservations.
-    pub const HEAP_BESIDE_VAMM: MemoryLayout = MemoryLayout {
-        heap_addr: GUEST_HEAP_REGION_ADDR,
-        heap_size: HEAP_BESIDE_VAMM_HEAP_REGION_SIZE,
-        alias_addr: HEAP_BESIDE_VAMM_ALIAS_REGION_ADDR,
-        alias_size: HEAP_BESIDE_VAMM_ALIAS_REGION_SIZE,
-        total_memory: HEAP_BESIDE_VAMM_TOTAL_MEMORY_SIZE,
-        system_resource: VAMM_SYSTEM_RESOURCE_SIZE,
-    };
-
-    /// Zero (or no readable manifest) selects the plain layout.
-    pub fn for_system_resource(size: u32) -> MemoryLayout {
-        if size == 0 {
-            MemoryLayout::PLAIN
+    /// The layout of a process: 64-bit or not, which program, and the NPDM's system resource.
+    pub fn for_process(is_64_bit: bool, program_id: u64, system_resource: u32) -> MemoryLayout {
+        let base = match (is_64_bit, system_resource) {
+            (true, _) => MemoryLayout::WIDE,
+            (false, 0) => MemoryLayout::LOW,
+            (false, _) => MemoryLayout::LOW_VAMM,
+        };
+        let total_memory = if is_64_bit && crate::services::am::is_library_applet(program_id) {
+            APPLET_TOTAL_MEMORY_SIZE
         } else {
-            MemoryLayout::VIRTUAL_ADDRESS
+            base.total_memory
+        };
+        MemoryLayout {
+            total_memory,
+            system_resource: u64::from(system_resource),
+            ..base
         }
-    }
-
-    /// [`Self::for_system_resource`], except library applets get [`Self::APPLET`] and a title
-    /// whose loaded code sizes its own heap beside Vamm gets [`Self::HEAP_BESIDE_VAMM`].
-    pub fn for_program(program_id: u64, size: u32, heap_beside_vamm: bool) -> MemoryLayout {
-        if size != 0 && crate::services::am::is_library_applet(program_id) {
-            return MemoryLayout::APPLET;
-        }
-        if size != 0 && heap_beside_vamm {
-            return MemoryLayout::HEAP_BESIDE_VAMM;
-        }
-        MemoryLayout::for_system_resource(size)
     }
 }
 

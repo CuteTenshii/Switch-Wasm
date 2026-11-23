@@ -471,7 +471,7 @@ impl Emitter<'_> {
                 });
                 self.f.i64_add();
                 self.f.i32_wrap_i64();
-                self.f.local_set(L_ADDR);
+                self.set_addr32();
                 let n = if double { 8 } else { 4 };
                 self.vfp_copy(&[reg], double, n, load, at);
             }
@@ -494,7 +494,7 @@ impl Emitter<'_> {
                     self.f.i64_add();
                 }
                 self.f.i32_wrap_i64();
-                self.f.local_set(L_ADDR);
+                self.set_addr32();
                 let size = if double { 8 } else { 4 };
                 let regs: Vec<u8> = (0..count).map(|i| reg.wrapping_add(i) & 0x1F).collect();
                 self.vfp_copy(&regs, double, size, load, at);

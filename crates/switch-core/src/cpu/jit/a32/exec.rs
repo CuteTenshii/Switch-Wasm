@@ -62,7 +62,8 @@ impl Cpu {
         }
         let block = Rc::new(translate(&self.mem, pc));
         for &page in &block.pages {
-            self.mem.mark_code_page(page << crate::mem::PAGE_BITS);
+            self.mem
+                .mark_code_page(u64::from(page << crate::mem::PAGE_BITS));
         }
         self.jit.translated += 1;
         self.jit.executed += 1;
@@ -387,15 +388,15 @@ impl Cpu {
                 let addr = self.r32(rn);
                 if load {
                     let value = match size {
-                        0 => u32::from(self.mem.read_u8(addr)?),
-                        1 => u32::from(self.mem.read_u16(addr)?),
-                        _ => self.mem.read_u32(addr)?,
+                        0 => u32::from(self.mem.read_u8(u64::from(addr))?),
+                        1 => u32::from(self.mem.read_u16(u64::from(addr))?),
+                        _ => self.mem.read_u32(u64::from(addr))?,
                     };
                     self.set_r32(rd, value);
-                    self.exclusive.arm(addr, [u64::from(value), 0]);
+                    self.exclusive.arm(u64::from(addr), [u64::from(value), 0]);
                 } else {
                     let value = u64::from(self.r32(rt));
-                    let stored = self.store_exclusive_at(addr, 1 << size, [value, 0])?;
+                    let stored = self.store_exclusive_at(u64::from(addr), 1 << size, [value, 0])?;
                     self.set_r32(rd, u32::from(!stored));
                 }
             }

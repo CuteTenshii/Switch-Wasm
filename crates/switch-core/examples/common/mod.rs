@@ -102,10 +102,10 @@ pub struct Shots {
 pub struct Probe {
     /// Report the pc and call stack of the first writes into a region.
     #[arg(long, value_parser = span, value_name = "ADDR:SIZE")]
-    trap_write: Option<(u32, u32)>,
+    trap_write: Option<(u64, u64)>,
     /// Count every distinct pc that reads a region.
     #[arg(long, value_parser = span, value_name = "ADDR:SIZE")]
-    trap_read: Option<(u32, u32)>,
+    trap_read: Option<(u64, u64)>,
     /// Trap writes of zero too.
     #[arg(long)]
     trap_zero: bool,
@@ -263,7 +263,7 @@ pub fn hex32(text: &str) -> Result<u32, String> {
 }
 
 /// A flag value that is `<addr>:<hex size>`, as `(addr, addr + size)`.
-pub fn span(text: &str) -> Result<(u32, u32), String> {
+pub fn span(text: &str) -> Result<(u64, u64), String> {
     parse_span(text).ok_or_else(|| format!("{text:?} is not <hex addr>:<hex size>"))
 }
 
@@ -687,10 +687,10 @@ pub fn stop_cores(cpu: &mut Cpu, cores: Vec<std::thread::JoinHandle<()>>) {
     }
 }
 
-fn parse_span(raw: &str) -> Option<(u32, u32)> {
+fn parse_span(raw: &str) -> Option<(u64, u64)> {
     let (lo, len) = raw.split_once(':')?;
-    let lo = parse_hex32(lo)?;
-    Some((lo, lo.saturating_add(parse_hex32(len)?)))
+    let lo = parse_hex(lo)?;
+    Some((lo, lo.saturating_add(parse_hex(len)?)))
 }
 
 /// Give the guest the fallback shared font; firmware fonts replace it.
@@ -993,7 +993,7 @@ pub fn report(cpu: &Cpu, run: &Run) {
 
 /// Where one `--dump` entry starts: a register or an absolute address.
 enum DumpBase {
-    Absolute(u32),
+    Absolute(u64),
     Register(u8),
     StackPointer,
     ProgramCounter,
@@ -1039,7 +1039,7 @@ fn parse_dump_specs(spec: &str) -> Vec<DumpSpec> {
                 "sp" => DumpBase::StackPointer,
                 "pc" => DumpBase::ProgramCounter,
                 name if name.starts_with('x') => DumpBase::Register(name[1..].parse().ok()?),
-                absolute => DumpBase::Absolute(parse_hex(absolute)? as u32),
+                absolute => DumpBase::Absolute(parse_hex(absolute)?),
             };
             Some(DumpSpec {
                 label: entry.to_string(),
@@ -1056,29 +1056,26 @@ fn dump_regions(cpu: &Cpu, specs: &[DumpSpec]) -> String {
     let mut out = String::new();
     for spec in specs {
         let base = match spec.base {
-            DumpBase::Absolute(addr) => u64::from(addr),
+            DumpBase::Absolute(addr) => addr,
             DumpBase::Register(reg) => cpu.read_x(reg),
             DumpBase::StackPointer => cpu.sp(),
             DumpBase::ProgramCounter => u64::from(cpu.get_pc()),
         };
         let base = if spec.deref {
-            let at = base as u32;
-            let low = cpu.mem.read_u32(at).unwrap_or(0);
-            let high = cpu.mem.read_u32(at.wrapping_add(4)).unwrap_or(0);
-            u64::from(high) << 32 | u64::from(low)
+            cpu.mem.read_u64(base).unwrap_or(0)
         } else {
             base
         };
-        let at = (base as i64).wrapping_add(spec.offset) as u32;
+        let at = base.wrapping_add_signed(spec.offset);
         out.push_str(&format!(
             "[dump] {} = {at:#010x} ({:#x} bytes)\n",
             spec.label, spec.len
         ));
         for line in (0..spec.len).step_by(16) {
-            let addr = at.wrapping_add(line);
+            let addr = at.wrapping_add(u64::from(line));
             let mut words = String::new();
             let mut ascii = String::new();
-            for word in 0..4u32 {
+            for word in 0..4u64 {
                 let value = cpu.mem.read_u32(addr.wrapping_add(word * 4)).unwrap_or(0);
                 words.push_str(&format!(" {value:08x}"));
                 for byte in value.to_le_bytes() {
@@ -1121,8 +1118,8 @@ fn backtrace(cpu: &Cpu, depth: usize) -> String {
 /// - `--watch-pc`: argument registers and call stack the first few times execution reaches an
 ///   address.
 pub struct Debug {
-    write_trap: Option<(u32, u32)>,
-    read_trap: Option<(u32, u32)>,
+    write_trap: Option<(u64, u64)>,
+    read_trap: Option<(u64, u64)>,
     trap_zero: bool,
     /// `TRAP_LAST`: capacity and the latest trapped writes.
     trap_last: usize,

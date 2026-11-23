@@ -53,7 +53,7 @@ impl Cpu {
     /// `connect` on a datagram socket: it only names where `send` goes and whom to hear. This
     /// console, or with the network on any address the host carries; anything else is refused
     /// as it always was.
-    pub(super) fn bsd_connect_datagram(&mut self, tls: u32, fd: i32, address: &[u8]) -> Result<()> {
+    pub(super) fn bsd_connect_datagram(&mut self, tls: u64, fd: i32, address: &[u8]) -> Result<()> {
         let enabled = self.net.enabled;
         let Some((ip, port)) = sockaddr_in(address)
             .filter(|&(ip, port)| port != 0 && (is_local_ip(ip) || (enabled && is_carried(ip))))
@@ -258,10 +258,10 @@ mod tests {
     use crate::kernel::ipc::testing::*;
     use crate::services::netbridge::Peer;
 
-    const DATA: u32 = SCRATCH + 0x40;
-    const ADDRESS: u32 = SCRATCH + 0x100;
-    const INTO: u32 = SCRATCH + 0x180;
-    const SOURCE: u32 = SCRATCH + 0x300;
+    const DATA: u64 = SCRATCH + 0x40;
+    const ADDRESS: u64 = SCRATCH + 0x100;
+    const INTO: u64 = SCRATCH + 0x180;
+    const SOURCE: u64 = SCRATCH + 0x300;
 
     /// A datagram socket on a console that reaches the outside, and the address that stands for
     /// `name` there.

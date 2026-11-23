@@ -65,29 +65,36 @@ fn storage_read_uses_the_istorage_field_layout() {
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
     for i in 0..8u32 {
         assert_eq!(
-            cpu.mem.read_u8(OUT + i).unwrap(),
+            cpu.mem.read_u8(u64::from(OUT + i)).unwrap(),
             romfs[4 + i as usize],
             "byte {i}"
         );
     }
-    assert_eq!(cpu.mem.read_u8(OUT + 8).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u8(u64::from(OUT + 8)).unwrap(), 0);
 
     // A read past the end is refused with 2002-3005, not clamped.
     const OUT_OF_RANGE: u32 = 2 | (3005 << 9);
-    cpu.mem.write_u8(OUT, 0xAA).unwrap();
+    cpu.mem.write_u8(u64::from(OUT), 0xAA).unwrap();
     let mut args = Vec::new();
     args.extend_from_slice(&(romfs.len() as u64 - 2).to_le_bytes());
     args.extend_from_slice(&64u64.to_le_bytes());
     ipc_request_with_buffer(&mut cpu, FS, 1, 0, OUT, 64, true, &args);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), OUT_OF_RANGE);
-    assert_eq!(cpu.mem.read_u8(OUT).unwrap(), 0xAA, "buffer left alone");
+    assert_eq!(
+        cpu.mem.read_u8(u64::from(OUT)).unwrap(),
+        0xAA,
+        "buffer left alone"
+    );
 
     let mut args = Vec::new();
     args.extend_from_slice(&(romfs.len() as u64 - 2).to_le_bytes());
     args.extend_from_slice(&2u64.to_le_bytes());
     ipc_request_with_buffer(&mut cpu, FS, 1, 0, OUT, 64, true, &args);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
-    assert_eq!(cpu.mem.read_u8(OUT).unwrap(), romfs[romfs.len() - 2]);
+    assert_eq!(
+        cpu.mem.read_u8(u64::from(OUT)).unwrap(),
+        romfs[romfs.len() - 2]
+    );
 
     ipc_request(&mut cpu, FS, 4, Some(1), 4);
     assert_eq!(cpu.mem.read_u64(tls + 0x30).unwrap(), romfs.len() as u64);
@@ -147,7 +154,7 @@ fn lm_writes_the_guests_own_log_to_the_console() {
         0,
         &[(KEY_TEXT, b"truncated")],
     );
-    cpu.mem.write_u32(PACKET + 0x14, 0xFFFF).unwrap();
+    cpu.mem.write_u32(u64::from(PACKET + 0x14), 0xFFFF).unwrap();
     ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len, false, &[]);
     assert_eq!(String::from_utf8_lossy(&cpu.out), "[lm/TRACE] truncated\n");
 }
@@ -236,13 +243,18 @@ fn mapping_pl_shared_memory_delivers_the_shared_font() {
     cpu.mem.map(0x1000, &svc(0x13).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
-    assert_eq!(cpu.mem.dump(ADDR + HEADER, font.len()).unwrap(), font);
+    assert_eq!(
+        cpu.mem.dump(u64::from(ADDR + HEADER), font.len()).unwrap(),
+        font
+    );
 
     // A font set after mapping still reaches the guest.
     let replacement: Vec<u8> = vec![0xAB; 0x1000];
     cpu.set_shared_font(replacement.clone());
     assert_eq!(
-        cpu.mem.dump(ADDR + HEADER, replacement.len()).unwrap(),
+        cpu.mem
+            .dump(u64::from(ADDR + HEADER), replacement.len())
+            .unwrap(),
         replacement
     );
 }

@@ -13,6 +13,11 @@ Titles decode video on the console's nvdec engine and hand the frames to VIC. `g
 - `cargo run --release -p switch-core --example vp9_bench -- <clip.ivf>` times the decoder natively.
 - Unsupported: scaled reference frames (an inter frame whose references differ from it in size; a key or intra-only frame may change size), profiles 1 to 3.
 
+## Device addresses
+
+- Engine methods hold a device address shifted right by 8, which `MAP_BUFFER` hands out 32 bits wide. A buffer below 4 GiB is named by its own address; one above (a 64-bit title's heap and alias regions are at 64 GiB and up) gets room in `DEVICE_WINDOW`, a 64-bit process's unused low heap region, and `DeviceSpace` turns method addresses back into CPU addresses. Relocations patch device addresses too. `UNMAP_BUFFER` frees the room.
+- Decoded surfaces are keyed by the method word naming their luma plane, which is lossless.
+
 ## nvdec
 
 An `EXECUTE` (method 0xC0) with codec 9 in method 0x80 decodes one frame. The driver supplies:

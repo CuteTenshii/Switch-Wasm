@@ -426,7 +426,7 @@ mod tests {
     fn lent_program(pid: u64, code: &[u32]) -> (Cpu, Lent) {
         let mut cpu = Cpu::new();
         cpu.mem.map(0x1000, &words(code)).unwrap();
-        cpu.mem.map_zero(COUNTER, 0x1000).unwrap();
+        cpu.mem.map_zero(u64::from(COUNTER), 0x1000).unwrap();
         cpu.ensure_main_thread();
         let mut thread = cpu.process().threads[0].clone();
         thread.pc = 0x1000;
@@ -451,13 +451,13 @@ mod tests {
 
         let (ended, lent) = lent_program(PID, &store_then_svc(1));
         assert_eq!(core.run_lent(lent).why, Handback::Svc);
-        assert_eq!(ended.mem.read_u64(COUNTER).unwrap(), 1);
+        assert_eq!(ended.mem.read_u64(u64::from(COUNTER)).unwrap(), 1);
 
         core.forget_translations(PID);
         let (reused, lent) = lent_program(PID, &store_then_svc(2));
         assert_eq!(core.run_lent(lent).why, Handback::Svc);
         assert_eq!(
-            reused.mem.read_u64(COUNTER).unwrap(),
+            reused.mem.read_u64(u64::from(COUNTER)).unwrap(),
             2,
             "the ended process's translation ran"
         );
@@ -480,7 +480,7 @@ mod tests {
         let mut cpu = Cpu::new();
         cpu.mem.map(0x1000, &words(&MAIN)).unwrap();
         cpu.mem.map(0x1100, &words(&WORKER)).unwrap();
-        cpu.mem.map_zero(COUNTER, 0x1000).unwrap();
+        cpu.mem.map_zero(u64::from(COUNTER), 0x1000).unwrap();
         cpu.mem.map_zero(0x10_0000, 0x1000).unwrap();
         cpu.set_pc(0x1000);
         cpu.set_reg(0, u64::from(COUNTER));
@@ -493,10 +493,7 @@ mod tests {
         cpu.stop_cores();
         core.join().unwrap();
         assert!(cpu.halted);
-        assert_eq!(
-            cpu.mem.read_u64(u64::from(COUNTER) as u32).unwrap(),
-            0x10000
-        );
+        assert_eq!(cpu.mem.read_u64(u64::from(COUNTER)).unwrap(), 0x10000);
         assert!(
             cpu.other_core_steps() > 0x8000 * 6,
             "core 1 ran {} instructions",

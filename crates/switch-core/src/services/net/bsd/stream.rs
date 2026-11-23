@@ -39,7 +39,7 @@ impl Cpu {
     /// until the host has answered, and that run reports the outcome.
     pub(super) fn bsd_connect_outside(
         &mut self,
-        tls: u32,
+        tls: u64,
         fd: i32,
         ip: [u8; 4],
         port: u16,
@@ -386,7 +386,7 @@ mod tests {
 
     /// `getsockopt(fd, SOL_SOCKET, SO_ERROR)`.
     fn so_error(cpu: &mut Cpu, fd: i32) -> u32 {
-        const AT: u32 = SCRATCH + 0x100;
+        const AT: u64 = SCRATCH + 0x100;
         let mut payload = [0u8; 12];
         payload[..4].copy_from_slice(&fd.to_le_bytes());
         payload[4..8].copy_from_slice(&super::BSD_SOL_SOCKET.to_le_bytes());
@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn sends_stop_at_the_window_until_the_host_delivers() {
         let (mut cpu, fd, address) = networked_socket("example.com");
-        cpu.mem.map_zero(0x10_0000, SEND_WINDOW as usize).unwrap();
+        cpu.mem.map_zero(0x10_0000, u64::from(SEND_WINDOW)).unwrap();
         connect_to(&mut cpu, fd, address, 80);
         cpu.deliver_net_events([NetEvent::Connected { stream: 1 }]);
         cpu.take_net_commands();
@@ -584,7 +584,7 @@ mod tests {
     #[test]
     fn a_blocking_send_waits_for_room_and_then_sends_it_all() {
         let (mut cpu, fd, address) = blocking_socket("example.com");
-        cpu.mem.map_zero(0x10_0000, SEND_WINDOW as usize).unwrap();
+        cpu.mem.map_zero(0x10_0000, u64::from(SEND_WINDOW)).unwrap();
         connect_to(&mut cpu, fd, address, 80);
         cpu.pending_retry = None;
         cpu.deliver_net_events([NetEvent::Connected { stream: 1 }]);
@@ -788,7 +788,7 @@ mod tests {
     fn the_kernel_runs_a_waiting_connect_again_and_answers_it_once() {
         const AFTER_SVC: u32 = 0x0800_0004;
         let (mut cpu, fd, address) = blocking_socket("example.com");
-        cpu.tpidr = u64::from(TLS);
+        cpu.tpidr = TLS;
         let mut remote = loopback_sockaddr(443);
         remote[4..8].copy_from_slice(&address);
         place(&mut cpu, SCRATCH, &remote);

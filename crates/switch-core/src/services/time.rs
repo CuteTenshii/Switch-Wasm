@@ -73,7 +73,7 @@ impl Cpu {
     /// Control requests must be checked first.
     pub(crate) fn time_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         cmd_id: Option<u32>,
         handle: u64,
     ) -> Result<()> {
@@ -136,7 +136,7 @@ impl Cpu {
     /// accepted but have no effect.
     pub(crate) fn time_system_clock_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
         const GET_CURRENT_TIME: u32 = 0;
@@ -160,7 +160,7 @@ impl Cpu {
 
     pub(crate) fn time_steady_clock_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
         const GET_CURRENT_TIME_POINT: u32 = 0;
@@ -225,7 +225,7 @@ impl Cpu {
 
     /// `ntc` and its `IEnsureNetworkClockAvailabilityService`. The network clock is the host's
     /// and already in sync, so a task to ensure it finishes as soon as it starts.
-    pub(crate) fn ntc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn ntc_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_answer_control(tls, handle, "ntc", cmd_id)? {
             return Ok(());
         }
@@ -270,7 +270,7 @@ impl Cpu {
 
     /// `ITimeZoneService`: every conversion uses the host's current offset from UTC (no
     /// DST history), and the zone name is the one `set:sys` stores.
-    pub(crate) fn time_timezone_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn time_timezone_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         const LOCATION_NAME: &[u8] = super::settings::DEVICE_TIME_ZONE;
         const GET_DEVICE_LOCATION_NAME: u32 = 0;
         const GET_TOTAL_LOCATION_NAME_COUNT: u32 = 2;
@@ -292,7 +292,8 @@ impl Cpu {
                 if let Some(&(addr, size)) = self.ipc_buffers(tls).1.first() {
                     if size >= LOCATION_NAME.len() as u32 {
                         for (i, &b) in LOCATION_NAME.iter().enumerate() {
-                            self.mem.write_u8(addr.wrapping_add(i as u32), b)?;
+                            self.mem
+                                .write_u8(addr.wrapping_add(u64::from(i as u32)), b)?;
                         }
                     }
                 }
@@ -373,14 +374,14 @@ mod tests {
     use crate::kernel::ipc::testing::*;
 
     /// What a client reads: the current copy of a double-buffered value.
-    fn read_current(cpu: &Cpu, at: u32, len: u32) -> Vec<u8> {
+    fn read_current(cpu: &Cpu, at: u64, len: u32) -> Vec<u8> {
         let counter = cpu.mem.read_u32(at).unwrap();
-        cpu.read_bytes(at + 8 + (counter % 2) * len, len)
+        cpu.read_bytes(at + 8 + u64::from((counter % 2) * len), len)
     }
 
     #[test]
     fn the_shared_memory_clock_reads_the_host_time_as_it_moves() {
-        const SHMEM: u32 = 0x3000_0000;
+        const SHMEM: u64 = 0x3000_0000;
         let mut cpu = request(false, 20, &[]);
         cpu.register_service_handle(9, "time:u");
         cpu.time_request(TLS, Some(20), 9).unwrap();
@@ -391,7 +392,7 @@ mod tests {
 
         // Offset plus the steady clock is the time; the steady clock moves with the tick.
         let now = |cpu: &Cpu| {
-            let context = read_current(cpu, SHMEM + super::LOCAL_CONTEXT_AT, 0x20);
+            let context = read_current(cpu, SHMEM + u64::from(super::LOCAL_CONTEXT_AT), 0x20);
             let offset = i64::from_le_bytes(context[..8].try_into().unwrap());
             assert_eq!(
                 &context[0x10..0x20],
@@ -405,7 +406,7 @@ mod tests {
         cpu.cycles += 5 * 1_020_000_000;
         cpu.set_unix_time(1_700_000_007);
         assert_eq!(now(&cpu), 1_700_000_007);
-        let steady = read_current(&cpu, SHMEM + super::STEADY_TIME_POINT_AT, 0x18);
+        let steady = read_current(&cpu, SHMEM + u64::from(super::STEADY_TIME_POINT_AT), 0x18);
         assert_eq!(&steady[8..], &super::CLOCK_SOURCE);
     }
 

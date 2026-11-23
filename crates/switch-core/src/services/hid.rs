@@ -7,7 +7,7 @@ use crate::Result;
 impl Cpu {
     /// HasBattery, HasLeftRightBattery, GetNpadInterfaceType, GetNpadLeftRightInterfaceType:
     /// the handheld pad is on the rails, the Pro Controller in slot 0 is wired (USB).
-    fn npad_power_or_interface(&mut self, tls: u32, data: u32, cmd_id: Option<u32>) -> Result<()> {
+    fn npad_power_or_interface(&mut self, tls: u64, data: u64, cmd_id: Option<u32>) -> Result<()> {
         /// `HidNpadInterfaceType_Rail` and `_USB`.
         const RAIL: u8 = 2;
         const USB: u8 = 3;
@@ -32,7 +32,7 @@ impl Cpu {
         }
     }
 
-    pub(crate) fn hid_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn hid_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
@@ -105,7 +105,8 @@ impl Cpu {
                     if let Some((addr, len)) = self.ipc_output_buffer(tls, 0) {
                         let info = six_axis_ic_information();
                         for (i, &byte) in info.iter().take(len as usize).enumerate() {
-                            self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
+                            self.mem
+                                .write_u8(addr.wrapping_add(u64::from(i as u32)), byte)?;
                         }
                     }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -130,7 +131,7 @@ impl Cpu {
                     let mut ids = Vec::new();
                     if let Some((addr, len)) = self.ipc_input_buffer(tls, 0) {
                         for i in 0..len / 4 {
-                            ids.push(self.mem.read_u32(addr.wrapping_add(i * 4))?);
+                            ids.push(self.mem.read_u32(addr.wrapping_add(u64::from(i * 4)))?);
                         }
                     }
                     self.npad_id_types = ids;
@@ -392,7 +393,7 @@ mod tests {
     #[test]
     fn six_axis_ic_information_fills_the_buffer_with_the_sensor_ranges() {
         // Nintendo Switch Sports asks after its first scene change; a refusal reads as no sensor.
-        const BUFFER: u32 = 0x3_0000;
+        const BUFFER: u64 = 0x3_0000;
         // { handle, padding, aruid }
         let mut payload = 0x2000_0000u32.to_le_bytes().to_vec();
         payload.extend_from_slice(&[0; 12]);
@@ -401,7 +402,7 @@ mod tests {
         cpu.register_service_handle(9, "hid");
         cpu.hid_request(TLS, 9, Some(88)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "a refusal");
-        let float = |at: u32| f32::from_bits(cpu.mem.read_u32(BUFFER + at).unwrap());
+        let float = |at: u64| f32::from_bits(cpu.mem.read_u32(BUFFER + at).unwrap());
         assert_eq!(super::six_axis_ic_information().len(), 0xC8);
         assert_eq!(float(0), 2000.0, "the gyroscope's range");
         assert_eq!(float(0x64), 8.0, "the accelerometer's range");
@@ -411,7 +412,7 @@ mod tests {
     #[test]
     fn six_axis_calibration_is_loaded_as_a_zeroed_block() {
         // Nintendo Switch Sports asks for it with a map-alias buffer and retries on a refusal.
-        const BUFFER: u32 = 0x3_0000;
+        const BUFFER: u64 = 0x3_0000;
         let size = super::SIX_AXIS_CALIBRATION_SIZE;
         // { handle, padding, aruid }
         let mut payload = 0x2000_0000u32.to_le_bytes().to_vec();
@@ -424,12 +425,12 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "a refusal");
         assert_eq!(cpu.mem.read_u8(BUFFER).unwrap(), 0, "the first byte");
         assert_eq!(
-            cpu.mem.read_u8(BUFFER + size - 1).unwrap(),
+            cpu.mem.read_u8(BUFFER + u64::from(size) - 1).unwrap(),
             0,
             "the last byte"
         );
         assert_eq!(
-            cpu.mem.read_u8(BUFFER + size).unwrap(),
+            cpu.mem.read_u8(BUFFER + u64::from(size)).unwrap(),
             0xAA,
             "past the block"
         );
@@ -490,7 +491,7 @@ mod tests {
     }
 
     /// Map the console's hid block at `addr`, as `svcMapSharedMemory` does.
-    fn map_hid(cpu: &mut Cpu, addr: u32) {
+    fn map_hid(cpu: &mut Cpu, addr: u64) {
         let block = cpu.hid_shmem.clone();
         cpu.mem.map_shared(addr, &block).unwrap();
         cpu.process_mut().hid_shmem_addr = addr;
@@ -500,7 +501,7 @@ mod tests {
     #[test]
     fn every_process_that_maps_hid_sees_the_same_pad() {
         use crate::cpu::hid_shmem as h;
-        const SHMEM: u32 = 0x3000_0000;
+        const SHMEM: u64 = 0x3000_0000;
         const BUTTONS: u64 = 0x5;
 
         let mut cpu = Cpu::new();
@@ -509,12 +510,13 @@ mod tests {
         cpu.in_process(other, |cpu| map_hid(cpu, SHMEM));
         cpu.set_gamepad_state(BUTTONS, 0, 0, 0, 0);
 
-        let entry = SHMEM + h::NPAD + h::HANDHELD_SLOT * h::ENTRY_SIZE;
+        let entry = h::NPAD + h::HANDHELD_SLOT * h::ENTRY_SIZE;
         for pid in [crate::cpu::ROOT_PID, other] {
             let mem = &cpu.processes[&pid].mem;
             let lifo = entry + h::SYSTEM_EXT_LIFO + h::LIFO_STORAGE;
             assert_eq!(
-                mem.read_u64(lifo + h::STATE_BUTTONS).unwrap(),
+                mem.read_u64(SHMEM + u64::from(lifo + h::STATE_BUTTONS))
+                    .unwrap(),
                 BUTTONS,
                 "process {pid} does not see the pad"
             );
@@ -525,7 +527,7 @@ mod tests {
     fn the_pad_is_published_in_a_style_the_title_actually_asked_for() {
         // A title that supports Joy-Con pairs but not Pro Controllers must find a style it asked for.
         use crate::cpu::hid_shmem as h;
-        const SHMEM: u32 = 0x3000_0000;
+        const SHMEM: u64 = 0x3000_0000;
 
         let mut cpu = request(false, 100, &h::STYLE_JOY_DUAL.to_le_bytes());
         map_hid(&mut cpu, SHMEM);
@@ -536,35 +538,57 @@ mod tests {
         cpu.set_gamepad_state(0x3, 0, 0, 0, 0);
 
         // Player 1 is a dual pair, with its state in the joy_dual LIFO.
-        let slot = SHMEM + h::NPAD;
+        let slot = h::NPAD;
         assert_eq!(
-            cpu.mem.read_u32(slot + h::STYLE_SET).unwrap(),
+            cpu.mem
+                .read_u32(SHMEM + u64::from(slot + h::STYLE_SET))
+                .unwrap(),
             h::STYLE_JOY_DUAL
         );
         assert_eq!(
-            cpu.mem.read_u32(slot + h::DEVICE_TYPE).unwrap(),
+            cpu.mem
+                .read_u32(SHMEM + u64::from(slot + h::DEVICE_TYPE))
+                .unwrap(),
             h::DEVICE_JOY_LEFT | h::DEVICE_JOY_RIGHT
         );
         let entry = slot + h::JOY_DUAL_LIFO + h::LIFO_STORAGE;
-        assert_eq!(cpu.mem.read_u64(entry + h::STATE_BUTTONS).unwrap(), 0x3);
         assert_eq!(
-            cpu.mem.read_u32(entry + h::STATE_ATTRIBUTES).unwrap() & 1,
+            cpu.mem
+                .read_u64(SHMEM + u64::from(entry + h::STATE_BUTTONS))
+                .unwrap(),
+            0x3
+        );
+        assert_eq!(
+            cpu.mem
+                .read_u32(SHMEM + u64::from(entry + h::STATE_ATTRIBUTES))
+                .unwrap()
+                & 1,
             1
         );
         // Nothing in the Pro Controller's LIFO.
         let full_key = slot + h::FULL_KEY_LIFO + h::LIFO_STORAGE;
-        assert_eq!(cpu.mem.read_u64(full_key + h::STATE_BUTTONS).unwrap(), 0);
+        assert_eq!(
+            cpu.mem
+                .read_u64(SHMEM + u64::from(full_key + h::STATE_BUTTONS))
+                .unwrap(),
+            0
+        );
 
         // The handheld slot, which the title did not ask for, is empty.
-        let handheld = SHMEM + h::NPAD + h::HANDHELD_SLOT * h::ENTRY_SIZE;
-        assert_eq!(cpu.mem.read_u32(handheld + h::STYLE_SET).unwrap(), 0);
+        let handheld = h::NPAD + h::HANDHELD_SLOT * h::ENTRY_SIZE;
+        assert_eq!(
+            cpu.mem
+                .read_u32(SHMEM + u64::from(handheld + h::STYLE_SET))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
     fn there_is_one_pad_in_the_one_slot_the_title_can_use() {
         use crate::cpu::hid_shmem as h;
         use crate::cpu::OperationMode::{Docked, Handheld};
-        const SHMEM: u32 = 0x3000_0000;
+        const SHMEM: u64 = 0x3000_0000;
         const BUTTONS: u64 = 0x3;
         const PLAYER_1: u32 = 0;
 
@@ -644,16 +668,20 @@ mod tests {
             cpu.set_operation_mode(mode);
             cpu.set_gamepad_state(BUTTONS, 0, 0, 0, 0);
 
-            let entry = |slot: u32| SHMEM + h::NPAD + slot * h::ENTRY_SIZE;
+            let entry = |slot: u32| h::NPAD + slot * h::ENTRY_SIZE;
             let live = entry(slot);
             assert_eq!(
-                cpu.mem.read_u32(live + h::STYLE_SET).unwrap(),
+                cpu.mem
+                    .read_u32(SHMEM + u64::from(live + h::STYLE_SET))
+                    .unwrap(),
                 style,
                 "{case}"
             );
             let state = live + lifo + h::LIFO_STORAGE;
             assert_eq!(
-                cpu.mem.read_u64(state + h::STATE_BUTTONS).unwrap(),
+                cpu.mem
+                    .read_u64(SHMEM + u64::from(state + h::STATE_BUTTONS))
+                    .unwrap(),
                 BUTTONS,
                 "{case}"
             );
@@ -663,16 +691,26 @@ mod tests {
             } else {
                 PLAYER_1
             });
-            assert_eq!(cpu.mem.read_u32(idle + h::STYLE_SET).unwrap(), 0, "{case}");
+            assert_eq!(
+                cpu.mem
+                    .read_u32(SHMEM + u64::from(idle + h::STYLE_SET))
+                    .unwrap(),
+                0,
+                "{case}"
+            );
             for lifo in [lifo, h::SYSTEM_EXT_LIFO] {
                 let state = idle + lifo + h::LIFO_STORAGE;
                 assert_eq!(
-                    cpu.mem.read_u64(state + h::STATE_BUTTONS).unwrap(),
+                    cpu.mem
+                        .read_u64(SHMEM + u64::from(state + h::STATE_BUTTONS))
+                        .unwrap(),
                     0,
                     "{case}"
                 );
                 assert_eq!(
-                    cpu.mem.read_u32(state + h::STATE_ATTRIBUTES).unwrap(),
+                    cpu.mem
+                        .read_u32(SHMEM + u64::from(state + h::STATE_ATTRIBUTES))
+                        .unwrap(),
                     0,
                     "{case}"
                 );
@@ -684,7 +722,7 @@ mod tests {
     fn the_pad_carries_the_system_ext_lifo_the_home_menu_reads() {
         // SystemExt is a second copy the pad carries, whatever style was asked for.
         use crate::cpu::hid_shmem as h;
-        const SHMEM: u32 = 0x3000_0000;
+        const SHMEM: u64 = 0x3000_0000;
 
         let mut cpu = request(false, 100, &h::STYLE_JOY_DUAL.to_le_bytes());
         map_hid(&mut cpu, SHMEM);
@@ -692,21 +730,25 @@ mod tests {
         cpu.hid_request(TLS, 9, Some(100)).unwrap();
         cpu.set_gamepad_state(0x3, 1000, -2000, 3000, -4000);
 
-        let slot = SHMEM + h::NPAD;
+        let slot = h::NPAD;
         let entry = slot + h::SYSTEM_EXT_LIFO + h::LIFO_STORAGE;
         assert_eq!(
-            cpu.mem.read_u64(entry + h::STATE_BUTTONS).unwrap(),
+            cpu.mem
+                .read_u64(SHMEM + u64::from(entry + h::STATE_BUTTONS))
+                .unwrap(),
             0x3,
             "player 1 publishes buttons in the SystemExt LIFO"
         );
         assert_eq!(
-            cpu.mem.read_u32(entry + h::STATE_STICK_L).unwrap() as i32,
+            cpu.mem
+                .read_u32(SHMEM + u64::from(entry + h::STATE_STICK_L))
+                .unwrap() as i32,
             1000,
             "player 1 publishes sticks there too"
         );
         assert_eq!(
             cpu.mem
-                .read_u64(slot + h::SYSTEM_EXT_LIFO + h::LIFO_COUNT)
+                .read_u64(SHMEM + u64::from(slot + h::SYSTEM_EXT_LIFO + h::LIFO_COUNT))
                 .unwrap(),
             1,
             "player 1's SystemExt LIFO header says it holds an entry"
@@ -714,7 +756,9 @@ mod tests {
 
         // The style tag names only the physical controller.
         assert_eq!(
-            cpu.mem.read_u32(SHMEM + h::NPAD + h::STYLE_SET).unwrap(),
+            cpu.mem
+                .read_u32(SHMEM + u64::from(h::NPAD + h::STYLE_SET))
+                .unwrap(),
             h::STYLE_JOY_DUAL
         );
     }
@@ -768,7 +812,7 @@ mod tests {
     fn the_npad_condition_is_published_so_the_hold_type_can_be_read_at_all() {
         // `GetNpadJoyHoldType` reads `NpadCondition` from shared memory and aborts unless it is valid.
         use crate::cpu::hid_shmem as h;
-        const SHMEM: u32 = 0x3000_0000;
+        const SHMEM: u64 = 0x3000_0000;
         const HORIZONTAL: u64 = 1;
 
         let mut cpu = request(false, 120, &[]);
@@ -776,15 +820,17 @@ mod tests {
         cpu.register_service_handle(9, "hid");
         cpu.set_gamepad_state(0, 0, 0, 0, 0);
 
-        let at = SHMEM + h::NPAD_CONDITION;
+        let at = h::NPAD_CONDITION;
         assert_eq!(
-            cpu.mem.read_u32(at + h::NPAD_CONDITION_VALID).unwrap(),
+            cpu.mem
+                .read_u32(SHMEM + u64::from(at + h::NPAD_CONDITION_VALID))
+                .unwrap(),
             1,
             "is_valid"
         );
         assert_eq!(
             cpu.mem
-                .read_u32(at + h::NPAD_CONDITION_INITIALIZED)
+                .read_u32(SHMEM + u64::from(at + h::NPAD_CONDITION_INITIALIZED))
                 .unwrap(),
             1,
             "is_initialized"
@@ -796,7 +842,9 @@ mod tests {
         cpu.mem.write_u64(data + 8, HORIZONTAL).unwrap();
         cpu.hid_request(TLS, 9, Some(120)).unwrap();
         assert_eq!(
-            cpu.mem.read_u32(at + h::NPAD_CONDITION_HOLD_TYPE).unwrap() as u64,
+            cpu.mem
+                .read_u32(SHMEM + u64::from(at + h::NPAD_CONDITION_HOLD_TYPE))
+                .unwrap() as u64,
             HORIZONTAL
         );
 
@@ -844,7 +892,7 @@ mod tests {
             "Result for command {command_id}, npad {npad_id}"
         );
         (0..len)
-            .map(|i| cpu.mem.read_u8(TLS + 0x20 + i).unwrap())
+            .map(|i| cpu.mem.read_u8(TLS + 0x20 + u64::from(i)).unwrap())
             .collect()
     }
 

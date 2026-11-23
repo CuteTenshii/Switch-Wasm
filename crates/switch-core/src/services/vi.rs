@@ -16,7 +16,7 @@ const DISPLAY_ID: u64 = 1;
 const LAYER_ID: u64 = 1;
 
 impl Cpu {
-    pub(crate) fn vi_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn vi_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         // Control requests. Use `ipc_is_control_request`, not `type == 5`:
         // `nnSdk` sends the with-context encoding (type 7).
         if self.ipc_is_control_request(tls) {
@@ -140,7 +140,7 @@ impl Cpu {
 
     /// The `vi` commands that answer with data, identical across the display
     /// services and dialects. Returns `None` for anything not answered here.
-    fn vi_common_command(&mut self, tls: u32, cmd_id: Option<u32>) -> Option<Result<()>> {
+    fn vi_common_command(&mut self, tls: u64, cmd_id: Option<u32>) -> Option<Result<()>> {
         let (width, height) = self.operation_mode().display_size();
         let raw: Vec<u8> = match cmd_id? {
             // ListDisplays: one display.
@@ -236,7 +236,7 @@ impl Cpu {
 
     /// `ISystemDisplayService`'s shared-buffer commands: applets acquire a slot
     /// of one shared buffer, render into it and present it.
-    fn vi_shared_buffer(&mut self, tls: u32, cmd_id: u32) -> Result<()> {
+    fn vi_shared_buffer(&mut self, tls: u64, cmd_id: u32) -> Result<()> {
         use crate::cpu::{SHARED_BUFFER_SLOTS, SHARED_BUFFER_USABLE_SLOTS};
         // See [`crate::cpu::SHARED_BUFFER_GEOMETRY`]; does not follow the dock.
         let mode = crate::cpu::SHARED_BUFFER_GEOMETRY;
@@ -297,7 +297,11 @@ impl Cpu {
             // so the crop is at 0x24 and the transform at 0x34.
             8255 => {
                 let data = self.ipc_request_data(tls);
-                let word = |at: u32| self.mem.read_u32(data.wrapping_add(at)).unwrap_or(0);
+                let word = |at: u32| {
+                    self.mem
+                        .read_u32(data.wrapping_add(u64::from(at)))
+                        .unwrap_or(0)
+                };
                 let slot = self.mem.read_u64(data.wrapping_add(0x48)).unwrap_or(0) as u32;
                 let crop = crate::gpu::Crop {
                     left: word(0x24) as i32,
@@ -347,7 +351,7 @@ impl Cpu {
         self.shared_buffer_object();
         if let Some(pages) = self.shared_buffer_pages.clone() {
             self.mem
-                .map_shared(crate::cpu::SHARED_BUFFER_ADDR, &pages)?;
+                .map_shared(u64::from(crate::cpu::SHARED_BUFFER_ADDR), &pages)?;
         }
         self.process_mut().shared_buffer_mapped = true;
         Ok(())
@@ -361,7 +365,7 @@ impl Cpu {
         }
         // Sized for the docked geometry, since docking can happen later.
         let size = crate::cpu::SHARED_BUFFER_RESERVED_SIZE;
-        let addr = crate::cpu::SHARED_BUFFER_ADDR;
+        let addr = u64::from(crate::cpu::SHARED_BUFFER_ADDR);
         let handle = self.nv.gpu.nvmap.create(size);
         let _ = self.nv.gpu.nvmap.alloc(handle, 0, 0, 0x1000, 0, addr);
         let id = self.nv.gpu.nvmap.get(handle).map(|h| h.id).unwrap_or(0);
@@ -373,17 +377,17 @@ impl Cpu {
     }
 
     /// Write one element into the out buffer if it fits.
-    fn vi_fill_out_buffer(&mut self, tls: u32, entry: &[u8]) {
+    fn vi_fill_out_buffer(&mut self, tls: u64, entry: &[u8]) {
         let Some((addr, size)) = self.ipc_output_buffer(tls, 0) else {
             return;
         };
         for (i, &b) in entry.iter().take(size as usize).enumerate() {
-            let _ = self.mem.write_u8(addr.wrapping_add(i as u32), b);
+            let _ = self.mem.write_u8(addr.wrapping_add(u64::from(i as u32)), b);
         }
     }
 
     /// An empty success, traced under `TRACE_IPC` in case the command had an out parameter.
-    fn vi_unhandled(&mut self, tls: u32, iface: &str, cmd_id: Option<u32>) -> Result<()> {
+    fn vi_unhandled(&mut self, tls: u64, iface: &str, cmd_id: Option<u32>) -> Result<()> {
         if crate::trace::enabled(crate::trace::Trace::Ipc) {
             crate::traceln!("[ipc] no implementation: {iface} cmd={cmd_id:?}");
         }
@@ -391,7 +395,7 @@ impl Cpu {
     }
 
     /// Hand out a non-domain vi session as a move handle.
-    pub(crate) fn vi_out_session(&mut self, tls: u32, iface: &str) -> Result<()> {
+    pub(crate) fn vi_out_session(&mut self, tls: u64, iface: &str) -> Result<()> {
         let h = self.alloc_handle();
         self.record_handle(h, "vi:m");
         self.vi_ifaces.insert(h, iface.to_owned());
@@ -402,7 +406,7 @@ impl Cpu {
     /// transaction. Request data is `{ s32 session_id, u32 code, u32 flags }`
     /// with the parcel in a map-alias send buffer; the reply goes to the
     /// receive buffer.
-    pub(crate) fn vi_transact_parcel(&mut self, tls: u32) -> Result<()> {
+    pub(crate) fn vi_transact_parcel(&mut self, tls: u64) -> Result<()> {
         let data = self.ipc_request_data(tls);
         let code = self.mem.read_u32(data.wrapping_add(4)).unwrap_or(0);
         let (send, recv) = self.ipc_buffers(tls);
@@ -428,7 +432,8 @@ impl Cpu {
 
         if let Some(&(addr, size)) = recv.first() {
             for (i, &byte) in reply.iter().take(size as usize).enumerate() {
-                self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
+                self.mem
+                    .write_u8(addr.wrapping_add(u64::from(i as u32)), byte)?;
             }
         }
         self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -438,7 +443,7 @@ impl Cpu {
     /// return: a full 0x28-byte `flat_binder_object` naming the layer's
     /// `IGraphicBufferProducer` (`nnSdk` checks the interface name), then the
     /// object offset table. `out_size` is the reply data word count.
-    pub(crate) fn vi_native_window(&mut self, tls: u32, out_size: usize) -> Result<()> {
+    pub(crate) fn vi_native_window(&mut self, tls: u64, out_size: usize) -> Result<()> {
         /// The one `IGraphicBufferProducer` every layer shares.
         const BINDER_ID: u64 = 1;
 
@@ -474,7 +479,7 @@ impl Cpu {
 
         if let Some(buf) = self.ipc_output_buffer_addr(tls, 0) {
             for (i, &b) in parcel.iter().enumerate() {
-                let _ = self.mem.write_u8(buf.wrapping_add(i as u32), b);
+                let _ = self.mem.write_u8(buf.wrapping_add(u64::from(i as u32)), b);
             }
         }
         self.write_ipc_response(tls, 0, &[], &raw, &[])

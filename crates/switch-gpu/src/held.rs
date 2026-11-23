@@ -780,7 +780,7 @@ impl Gpu {
                 let page = 1usize << PAGE_BITS;
                 let mut guest = vec![0u8; kept.len() * page];
                 for (bytes, &at) in guest.chunks_exact_mut(page).zip(kept) {
-                    ctx.mem.read_into(at << PAGE_BITS, bytes)?;
+                    ctx.mem.read_into(u64::from(at) << PAGE_BITS, bytes)?;
                 }
                 let unpadded = || {
                     let mut rows = Vec::with_capacity((row_bytes * target.rows) as usize);
@@ -799,7 +799,9 @@ impl Gpu {
                     guest
                         .chunks_exact(page)
                         .zip(kept)
-                        .try_for_each(|(bytes, &at)| ctx.mem.write_bytes(at << PAGE_BITS, bytes))
+                        .try_for_each(|(bytes, &at)| {
+                            ctx.mem.write_bytes(u64::from(at) << PAGE_BITS, bytes)
+                        })
                 })
             }
             Readback::Global { addr, original, .. } => {
@@ -900,7 +902,7 @@ impl Gpu {
             }
             held.watched = guest_pages(ctx, span.start, span.end - span.start);
             for &page in &held.watched {
-                ctx.mem.mark_gpu_page(page << PAGE_BITS);
+                ctx.mem.mark_gpu_page(u64::from(page) << PAGE_BITS);
             }
         }
     }
@@ -987,7 +989,7 @@ impl Gpu {
     pub(super) fn submit_frame_inner(
         &mut self,
         ctx: &mut ExecCtx,
-        scanout: Option<u32>,
+        scanout: Option<u64>,
     ) -> Result<Submit> {
         if self.give_up() {
             return Ok(Submit::Done);
@@ -1211,12 +1213,13 @@ fn gpu_pages(ctx: &ExecCtx, span: std::ops::Range<u64>) -> Vec<(std::ops::Range<
             break;
         };
         // To the end of this CPU page, the mapped run, or the span, whichever is first.
-        let in_page = page - u64::from(cpu) % page;
+        let in_page = page - cpu % page;
         let take = in_page.min(run).min(span.end - at);
         if take == 0 {
             break;
         }
-        pages.push((at..at + take, cpu >> PAGE_BITS));
+        // Page numbers of the 39-bit space fit a `u32`, as `Memory` keeps them.
+        pages.push((at..at + take, (cpu >> PAGE_BITS) as u32));
         at += take;
     }
     pages

@@ -320,10 +320,6 @@ impl Func {
         self.op(0x45);
     }
 
-    pub(super) fn i32_lt_u(&mut self) {
-        self.op(0x49);
-    }
-
     pub(super) fn i32_gt_u(&mut self) {
         self.op(0x4B);
     }
@@ -396,6 +392,10 @@ impl Func {
 
     pub(super) fn i64_lt_u(&mut self) {
         self.op(0x54);
+    }
+
+    pub(super) fn i64_gt_u(&mut self) {
+        self.op(0x56);
     }
 
     pub(super) fn i64_extend8_s(&mut self) {

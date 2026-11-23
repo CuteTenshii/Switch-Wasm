@@ -36,14 +36,14 @@ fn ldr_ro_maps_a_module_where_nothing_else_lives() {
     let base = base as u32;
 
     // The three segments in file order, then a zero-filled BSS.
-    assert_eq!(cpu.mem.read_u32(base).unwrap(), 0x1400_0010);
-    assert_eq!(cpu.mem.read_u8(base + 0x1000).unwrap(), 0xAA);
-    assert_eq!(cpu.mem.read_u8(base + 0x2000).unwrap(), 0xBB);
-    assert_eq!(cpu.mem.read_u8(base + 0x3000).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u32(u64::from(base)).unwrap(), 0x1400_0010);
+    assert_eq!(cpu.mem.read_u8(u64::from(base + 0x1000)).unwrap(), 0xAA);
+    assert_eq!(cpu.mem.read_u8(u64::from(base + 0x2000)).unwrap(), 0xBB);
+    assert_eq!(cpu.mem.read_u8(u64::from(base + 0x3000)).unwrap(), 0);
 
     // `.text` is read-only; `.data` is writable for relocations.
-    assert!(cpu.mem.write_u32(base, 0).is_err());
-    assert!(cpu.mem.write_u32(base + 0x2000, 0).is_ok());
+    assert!(cpu.mem.write_u32(u64::from(base), 0).is_err());
+    assert!(cpu.mem.write_u32(u64::from(base + 0x2000), 0).is_ok());
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn ldr_ro_unload_frees_the_address_space_and_the_protection() {
     let base = cpu.mem.read_u64(tls + 0x20).unwrap();
     ldr_ro_request(&mut cpu, handle, 1, &[base]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
-    assert!(cpu.mem.write_u32(base as u32, 0).is_ok());
+    assert!(cpu.mem.write_u32(u64::from(base as u32), 0).is_ok());
 
     // The address space is reused by the next load.
     ldr_ro_request(&mut cpu, handle, 0, &[NRO_SOURCE, 0x3000, NRO_BSS, 0x1000]);
@@ -125,7 +125,7 @@ fn ldr_ro_module_info_is_registered_before_it_is_unregistered() {
     ldr_ro_request(&mut cpu, handle, 2, &[NRR, 0x1000]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), INVALID_NRR);
 
-    cpu.mem.map(NRR as u32, b"NRR0").unwrap();
+    cpu.mem.map(u64::from(NRR as u32), b"NRR0").unwrap();
     ldr_ro_request(&mut cpu, handle, 2, &[NRR, 0x1000]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
     ldr_ro_request(&mut cpu, handle, 3, &[NRR]);

@@ -265,7 +265,7 @@ fn closing_a_domain_object_is_not_command_zero() {
 
     // A close: domain header type byte 2, no CmifInHeader.
     for i in (0..0x100u32).step_by(4) {
-        cpu.mem.write_u32(tls + i, 0).unwrap();
+        cpu.mem.write_u32(tls + u64::from(i), 0).unwrap();
     }
     cpu.mem.write_u32(tls, 4).unwrap();
     cpu.mem.write_u32(tls + 4, 8).unwrap();
@@ -329,7 +329,9 @@ fn an_unfilled_out_parameter_reads_as_zero_not_as_the_request() {
     // CloseDisplay is unimplemented; poison the out-parameter bytes first.
     build_ipc_request(&mut cpu, 4, None, 1020);
     for i in 0..4u32 {
-        cpu.mem.write_u32(tls + 0x20 + i * 4, 0xDEAD_BEEF).unwrap();
+        cpu.mem
+            .write_u32(tls + 0x20 + u64::from(i) * 4, 0xDEAD_BEEF)
+            .unwrap();
     }
     run_ipc_request(&mut cpu, display);
 
@@ -340,7 +342,7 @@ fn an_unfilled_out_parameter_reads_as_zero_not_as_the_request() {
     );
     for i in 0..4u32 {
         assert_eq!(
-            cpu.mem.read_u32(tls + 0x20 + i * 4).unwrap(),
+            cpu.mem.read_u32(tls + 0x20 + u64::from(i) * 4).unwrap(),
             0,
             "word {i} of the reply is a leftover of the request"
         );

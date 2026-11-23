@@ -446,7 +446,7 @@ fn tpidr_el0_roundtrips_and_tpidrro_el0_does_not() {
     assert_eq!(cpu.read_x(2), VALUE, "TPIDR_EL0 is the guest's to write");
     assert_eq!(
         cpu.read_x(3),
-        u64::from(tls),
+        tls,
         "a guest write to TPIDRRO_EL0 must not displace the thread's TLS base"
     );
 }
@@ -793,13 +793,13 @@ fn dc_zva_zeroes_64_bytes() {
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(3, 0x3040);
     cpu.mem.map_zero(0x3000, 0x100).unwrap();
-    for i in 0..0x40u32 {
+    for i in 0..0x40u64 {
         cpu.mem.write_u8(0x3040 + i, 0xAA).unwrap();
     }
     cpu.mem.write_u8(0x3080, 0xBB).unwrap();
     let code = [0xd50b7423, nop()];
     let cpu = run_program(cpu, 0x1000, &code);
-    for i in 0..0x40u32 {
+    for i in 0..0x40u64 {
         assert_eq!(cpu.mem.read_u8(0x3040 + i).unwrap(), 0);
     }
     assert_eq!(cpu.mem.read_u8(0x3080).unwrap(), 0xBB);

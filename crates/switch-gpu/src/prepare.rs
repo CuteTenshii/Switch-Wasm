@@ -624,8 +624,7 @@ impl Gpu {
         // Watch the CPU page behind each virtual page the decode read.
         for &page in &reads.pages {
             if let Some((cpu, _)) = ctx.vmm.translate(page << PAGE_BITS) {
-                self.shader_to_watch
-                    .push(((u64::from(cpu) >> PAGE_BITS) as u32, key));
+                self.shader_to_watch.push(((cpu >> PAGE_BITS) as u32, key));
             }
         }
         // Whole-cache eviction, as for textures.

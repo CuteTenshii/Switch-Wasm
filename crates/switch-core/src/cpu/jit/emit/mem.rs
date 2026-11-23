@@ -23,8 +23,21 @@ impl Emitter<'_> {
                 _ => self.f.local_get(L_W),
             }
         }
+        self.set_addr64();
+    }
+
+    /// Take the `i64` address on the stack as the access's, whole and in its low bits.
+    pub(super) fn set_addr64(&mut self) {
+        self.f.local_tee(L_ADDR64);
         self.f.i32_wrap_i64();
         self.f.local_set(L_ADDR);
+    }
+
+    /// The same for an `i32` address: an A32 one, or a literal below 4 GiB.
+    pub(super) fn set_addr32(&mut self) {
+        self.f.local_tee(L_ADDR);
+        self.f.i64_extend_i32_u();
+        self.f.local_set(L_ADDR64);
     }
 
     /// The same for the register-offset form, per
@@ -42,8 +55,7 @@ impl Emitter<'_> {
             self.f.i64_shl();
         }
         self.f.i64_add();
-        self.f.i32_wrap_i64();
-        self.f.local_set(L_ADDR);
+        self.set_addr64();
     }
 
     /// Write `L_W` back to the base register, for the modes that have one.
@@ -95,41 +107,53 @@ impl Emitter<'_> {
         self.page_or_defer(retired);
     }
 
-    /// Leave the guest page `L_ADDR` is on in `L_IDX`.
+    /// Leave the table block the access is in in `L_BLOCK`, and the page's index within it
+    /// in `L_IDX`. Address bits above the 39-bit space are dropped, as `Memory` drops them;
+    /// a block nothing was backed in is a real, empty one, so this needs no test.
     pub(super) fn page_number(&mut self) {
+        self.env(self.layout.blocks);
+        self.f.local_get(L_ADDR64);
+        self.f.i64_const(i64::from(PAGE_BITS + BLOCK_BITS));
+        self.f.i64_shr_u();
+        self.f.i32_wrap_i64();
+        self.f.i32_const((BLOCK_COUNT - 1) as i32);
+        self.f.i32_and();
+        self.f.i32_const(PAGE_ENTRY_SHIFT);
+        self.f.i32_shl();
+        self.f.i32_add();
+        self.f.i32_load(ALIGN_4, 0);
+        self.f.local_set(L_BLOCK);
         self.f.local_get(L_ADDR);
         self.f.i32_const(PAGE_BITS as i32);
         self.f.i32_shr_u();
+        self.f.i32_const((BLOCK_PAGES - 1) as i32);
+        self.f.i32_and();
         self.f.local_set(L_IDX);
     }
 
     /// Leave that page's storage in `L_PAGE`, or leave the block if it is null.
     pub(super) fn page_or_defer(&mut self, retired: usize) {
-        self.env(self.layout.pages);
+        self.f.local_get(L_BLOCK);
         self.f.local_get(L_IDX);
         self.f.i32_const(PAGE_ENTRY_SHIFT);
         self.f.i32_shl();
         self.f.i32_add();
-        self.f.i32_load(ALIGN_4, 0);
+        self.f.i32_load(ALIGN_4, self.layout.block_pages);
         self.f.local_tee(L_PAGE);
         self.f.i32_eqz();
         self.deopt_if(retired);
     }
 
-    /// Leave the block if anything has cached page `L_IDX`'s contents, when
-    /// the bitmap exists.
+    /// Leave the block if anything has cached page `L_IDX`'s contents.
     pub(super) fn owes_a_report(&mut self, retired: usize) {
-        self.env(self.layout.watched);
-        self.f.local_tee(L_WP);
-        self.f.if_void();
-        self.f.local_get(L_WP);
+        self.f.local_get(L_BLOCK);
         self.f.local_get(L_IDX);
         self.f.i32_const(6);
         self.f.i32_shr_u();
         self.f.i32_const(3);
         self.f.i32_shl();
         self.f.i32_add();
-        self.f.i64_load(ALIGN_8, 0);
+        self.f.i64_load(ALIGN_8, self.layout.block_watched);
         // The shift is taken modulo 64, masking the bit index.
         self.f.i64_const(1);
         self.f.local_get(L_IDX);
@@ -139,7 +163,6 @@ impl Emitter<'_> {
         self.f.i64_const(0);
         self.f.i64_ne();
         self.deopt_if(retired);
-        self.f.end();
     }
 
     /// Push whether the `n` bytes at `L_ADDR` run past the end of their page.
@@ -152,17 +175,24 @@ impl Emitter<'_> {
     }
 
     /// Push whether the watchpoint at `lo`/`hi` overlaps the `n` bytes at
-    /// `L_ADDR`, wrapping included.
+    /// `L_ADDR64`, wrapping included. Only regions emitted while one is armed test it.
     pub(super) fn covers(&mut self, n: u32, lo: u32, hi: u32) {
-        self.f.local_get(L_ADDR);
-        self.env(hi);
-        self.f.i32_lt_u();
-        self.f.local_get(L_ADDR);
-        self.f.i32_const(n as i32);
-        self.f.i32_add();
-        self.env(lo);
-        self.f.i32_gt_u();
+        self.f.local_get(L_ADDR64);
+        self.memory_u64(hi);
+        self.f.i64_lt_u();
+        self.f.local_get(L_ADDR64);
+        self.f.i64_const(i64::from(n));
+        self.f.i64_add();
+        self.memory_u64(lo);
+        self.f.i64_gt_u();
         self.f.i32_and();
+    }
+
+    /// Push the `u64` at `offset` in the running process's `Memory`.
+    fn memory_u64(&mut self, offset: u32) {
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, self.layout.memory);
+        self.f.i64_load(ALIGN_8, offset);
     }
 
     /// Push the host address of the access: page plus offset.
@@ -303,8 +333,8 @@ impl Emitter<'_> {
     pub(super) fn arm_monitor(&mut self, value1: Option<u32>) {
         let at = self.layout.exclusive;
         self.f.local_get(STATE);
-        self.f.local_get(L_ADDR);
-        self.f.i32_store(ALIGN_4, at + MONITOR_ADDR);
+        self.f.local_get(L_ADDR64);
+        self.f.i64_store(ALIGN_8, at + MONITOR_ADDR);
         self.f.local_get(STATE);
         self.f.i32_const(1);
         self.f.i32_store(ALIGN_4, at + MONITOR_ARMED);
@@ -361,9 +391,9 @@ impl Emitter<'_> {
         self.f.local_get(STATE);
         self.f.i32_load(ALIGN_4, at + MONITOR_ARMED);
         self.f.local_get(STATE);
-        self.f.i32_load(ALIGN_4, at + MONITOR_ADDR);
-        self.f.local_get(L_ADDR);
-        self.f.i32_eq();
+        self.f.i64_load(ALIGN_8, at + MONITOR_ADDR);
+        self.f.local_get(L_ADDR64);
+        self.f.i64_eq();
         self.f.i32_and();
         self.f.local_set(L_C);
     }

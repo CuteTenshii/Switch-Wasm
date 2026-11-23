@@ -214,8 +214,11 @@ fn the_loads_and_stores_move_singles_and_doubles() {
     code.push(0xED90_1B00); // vldr d1, [r0]
     code.push(0xEC53_2B11); // vmov r2, r3, d1
     let cpu = run(&code);
-    assert_eq!(cpu.mem.read_u32(SCRATCH).unwrap(), 0x1111_1111);
-    assert_eq!(cpu.mem.read_u32(SCRATCH + 4).unwrap(), 0x2222_2222);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(), 0x1111_1111);
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(SCRATCH + 4)).unwrap(),
+        0x2222_2222
+    );
     assert_eq!((r(&cpu, 2), r(&cpu, 3)), (0x1111_1111, 0x2222_2222));
 }
 

@@ -216,7 +216,7 @@ fn random_mii_index(gender: u8, sequence: u32) -> Option<u32> {
 
 impl Cpu {
     /// `mii:e`/`mii:u`: an empty database.
-    pub(crate) fn mii_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn mii_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 // ConvertCurrentObjectToDomain; `nnSdk` needs the object id back.
@@ -283,8 +283,10 @@ impl Cpu {
                         if element > MII_CHAR_INFO_LEN {
                             bytes[MII_CHAR_INFO_LEN..].copy_from_slice(&1u32.to_le_bytes());
                         }
-                        self.mem
-                            .write_bytes(address.wrapping_add((index * element) as u32), &bytes)?;
+                        self.mem.write_bytes(
+                            address.wrapping_add(u64::from((index * element) as u32)),
+                            &bytes,
+                        )?;
                     }
                     self.write_ipc_response(tls, 0, &[], &(count as u32).to_le_bytes(), &[])
                 }
@@ -293,7 +295,9 @@ impl Cpu {
                     let data = self.ipc_request_data(tls);
                     let mut info = [0u8; MII_CHAR_INFO_LEN];
                     for (offset, byte) in info.iter_mut().enumerate() {
-                        *byte = self.mem.read_u8(data.wrapping_add(offset as u32))?;
+                        *byte = self
+                            .mem
+                            .read_u8(data.wrapping_add(u64::from(offset as u32)))?;
                     }
                     self.write_ipc_response(tls, 0, &[], &info, &[])
                 }
@@ -340,7 +344,7 @@ impl Cpu {
     }
 
     /// `miiimg`: the rendered Mii image database, empty.
-    pub(crate) fn miiimg_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn miiimg_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
@@ -420,7 +424,7 @@ mod tests {
             assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "result");
             let mut info = [0u8; super::MII_CHAR_INFO_LEN];
             for (offset, byte) in info.iter_mut().enumerate() {
-                *byte = cpu.mem.read_u8(TLS + 0x30 + offset as u32).unwrap();
+                *byte = cpu.mem.read_u8(TLS + 0x30 + offset as u64).unwrap();
             }
             assert_eq!(info[0x28], 1, "a female Mii was asked for");
             create_ids.push(info[..super::MII_CREATE_ID_LEN].to_vec());
@@ -462,7 +466,7 @@ mod tests {
         assert_eq!(cpu.mem.read_u8(TLS + 0x30 + 0x28).unwrap(), 1, "gender");
         let expected = super::default_mii_char_info(3).unwrap();
         for (offset, &byte) in expected.iter().enumerate() {
-            let at = TLS + 0x30 + offset as u32;
+            let at = TLS + 0x30 + offset as u64;
             assert_eq!(
                 cpu.mem.read_u8(at).unwrap(),
                 byte,
@@ -480,20 +484,21 @@ mod tests {
     }
 
     /// A domain `Get`-style request with one receive buffer at `buffer`.
-    fn get_request(command_id: u32, flag: u32, buffer: u32, size: u32) -> super::Cpu {
-        const OUT: u32 = 0x3000;
+    fn get_request(command_id: u32, flag: u32, buffer: u64, size: u32) -> super::Cpu {
+        const OUT: u64 = 0x3000;
         let mut cpu = request(true, command_id, &flag.to_le_bytes());
         cpu.mem.map_zero(OUT, 0x1000).unwrap();
         cpu.record_domain_object(9, 7, "mii:database");
         assert_eq!(buffer, OUT);
         // One receive buffer ahead of the data area, which moves it to 0x20.
-        for offset in (0..0x200u32).step_by(4) {
+        for offset in (0..0x200u64).step_by(4) {
             cpu.mem.write_u32(TLS + offset, 0).unwrap();
         }
         cpu.mem.write_u32(TLS, 4 | (1 << 24)).unwrap();
         cpu.mem.write_u32(TLS + 4, 8).unwrap();
-        cpu.mem.write_u32(TLS + 8, size).unwrap();
-        cpu.mem.write_u32(TLS + 12, buffer).unwrap();
+        for (word, value) in map_descriptor(buffer, size).into_iter().enumerate() {
+            cpu.mem.write_u32(TLS + 8 + 4 * word as u64, value).unwrap();
+        }
         cpu.mem.write_u8(TLS + 0x20, 1).unwrap();
         cpu.mem.write_u32(TLS + 0x24, 7).unwrap();
         cpu.mem.write_u32(TLS + 0x30, SFCI).unwrap();
@@ -504,7 +509,7 @@ mod tests {
 
     #[test]
     fn mii_get_lists_the_default_miis_for_the_default_source_only() {
-        const OUT: u32 = 0x3000;
+        const OUT: u64 = 0x3000;
         let element = super::MII_CHAR_INFO_ELEMENT_LEN as u32;
 
         // The six defaults as CharInfoElements, the source after each CharInfo.
@@ -515,18 +520,18 @@ mod tests {
         for index in 0..6u32 {
             let expected = super::default_mii_char_info(index).unwrap();
             for (offset, &byte) in expected.iter().enumerate() {
-                let at = OUT + index * element + offset as u32;
+                let at = OUT + u64::from(index * element) + offset as u64;
                 assert_eq!(
                     cpu.mem.read_u8(at).unwrap(),
                     byte,
                     "Mii {index} byte {offset:#x}"
                 );
             }
-            let source = OUT + index * element + super::MII_CHAR_INFO_LEN as u32;
+            let source = OUT + u64::from(index * element) + super::MII_CHAR_INFO_LEN as u64;
             assert_eq!(cpu.mem.read_u32(source).unwrap(), 1, "Source::Default");
         }
         assert_eq!(
-            cpu.mem.read_u32(OUT + 6 * element).unwrap(),
+            cpu.mem.read_u32(OUT + 6 * u64::from(element)).unwrap(),
             0,
             "no seventh"
         );
@@ -546,7 +551,7 @@ mod tests {
         let second = super::default_mii_char_info(1).unwrap();
         assert_eq!(
             cpu.mem
-                .read_u8(OUT + super::MII_CHAR_INFO_LEN as u32 + 0x28)
+                .read_u8(OUT + super::MII_CHAR_INFO_LEN as u64 + 0x28)
                 .unwrap(),
             second[0x28]
         );
@@ -575,7 +580,7 @@ mod tests {
         cpu.mii_request(TLS, 9, Some(5)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "result");
         for (offset, &byte) in info.iter().enumerate() {
-            let at = TLS + 0x30 + offset as u32;
+            let at = TLS + 0x30 + offset as u64;
             assert_eq!(cpu.mem.read_u8(at).unwrap(), byte, "byte {offset:#x}");
         }
     }

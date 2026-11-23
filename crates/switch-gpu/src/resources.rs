@@ -24,8 +24,8 @@ pub(super) fn guest_pages(ctx: &ExecCtx, addr: u64, len: u64) -> Vec<u32> {
         if take == 0 {
             break;
         }
-        let first = u64::from(cpu) >> PAGE_BITS;
-        let last = (u64::from(cpu) + take - 1) >> PAGE_BITS;
+        let first = cpu >> PAGE_BITS;
+        let last = (cpu + take - 1) >> PAGE_BITS;
         pages.extend((first..=last).map(|p| p as u32));
         at += take;
     }
@@ -194,8 +194,8 @@ impl Gpu {
         let out = write(&mut self.software, ctx);
         let dirty = ctx.mem.dirty_gpu_pages();
         for held in self.space.held.values() {
-            for page in held.watched.iter().filter(|page| dirty.contains(page)) {
-                ctx.mem.mark_gpu_page(page << PAGE_BITS);
+            for &page in held.watched.iter().filter(|page| dirty.contains(page)) {
+                ctx.mem.mark_gpu_page(u64::from(page) << PAGE_BITS);
             }
         }
         self.evict_pages(dirty);
@@ -241,7 +241,7 @@ impl Gpu {
         self.forget_input(key);
         // Watched before the read, so a store racing it is reported.
         for &page in &pages {
-            ctx.mem.mark_gpu_page(page << PAGE_BITS);
+            ctx.mem.mark_gpu_page(u64::from(page) << PAGE_BITS);
         }
         let mut bytes = vec![0u8; len];
         ctx.vmm
@@ -304,7 +304,7 @@ impl Gpu {
     /// Keep what this draw read and watch its pages; textures with no watchable pages are not kept.
     pub(super) fn remember_textures(&mut self, ctx: &mut ExecCtx) {
         for (page, key) in std::mem::take(&mut self.shader_to_watch) {
-            ctx.mem.mark_gpu_page(page << PAGE_BITS);
+            ctx.mem.mark_gpu_page(u64::from(page) << PAGE_BITS);
             self.space.shader_pages.entry(page).or_default().push(key);
         }
         for (key, bytes, source_len) in std::mem::take(&mut self.to_remember) {
@@ -335,7 +335,7 @@ impl Gpu {
                 self.cached_bytes = 0;
             }
             for &page in &pages {
-                ctx.mem.mark_gpu_page(page << PAGE_BITS);
+                ctx.mem.mark_gpu_page(u64::from(page) << PAGE_BITS);
                 self.space.page_owners.entry(page).or_default().push(key);
             }
             self.space.texture_cache.insert(key, bytes);

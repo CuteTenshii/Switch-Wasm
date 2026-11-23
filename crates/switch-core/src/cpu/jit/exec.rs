@@ -227,7 +227,8 @@ impl Cpu {
         }
         let block = Rc::new(translate(&self.mem, pc));
         for &page in &block.pages {
-            self.mem.mark_code_page(page << crate::mem::PAGE_BITS);
+            self.mem
+                .mark_code_page(u64::from(page) << crate::mem::PAGE_BITS);
         }
         self.jit.translated += 1;
         self.jit.insert(block.clone());
@@ -1039,7 +1040,7 @@ impl Cpu {
                 acc,
             } => {
                 let offset = self.reg_offset(rm, ext, shift);
-                let addr = (self.reg_at(rn) as i64).wrapping_add(offset) as u32;
+                let addr = (self.reg_at(rn) as i64).wrapping_add(offset) as u64;
                 if !self.access_fast(addr, rt, acc) {
                     return self.exec_op_slow(op);
                 }
@@ -1060,7 +1061,7 @@ impl Cpu {
                 wb,
             } => {
                 let (addr, wb_val) = Self::indexed(self.reg_at(rn), offset, wb);
-                let Some(bytes) = self.mem.peek::<16>(addr as u32) else {
+                let Some(bytes) = self.mem.peek::<16>(addr) else {
                     return self.exec_op_slow(op);
                 };
                 let (first, second) = bytes.split_at(8);
@@ -1080,7 +1081,7 @@ impl Cpu {
                 let (addr, wb_val) = Self::indexed(self.reg_at(rn), offset, wb);
                 let first = self.reg_at(rt).to_le_bytes();
                 let second = self.reg_at(rt2).to_le_bytes();
-                if !self.mem.poke_pair(addr as u32, first, second) {
+                if !self.mem.poke_pair(addr, first, second) {
                     return self.exec_op_slow(op);
                 }
                 if let Some(v) = wb_val {
@@ -1088,7 +1089,7 @@ impl Cpu {
                 }
             }
             Op::LoadLiteral { rt, addr, acc } => {
-                if !self.access_fast(addr, rt, acc) {
+                if !self.access_fast(u64::from(addr), rt, acc) {
                     return self.exec_op_slow(op);
                 }
             }
@@ -1106,7 +1107,7 @@ impl Cpu {
             } => self.store_exclusive_pair(rs, rt, rt2, rn, wide)?,
             Op::Ordered { rt, rn, acc } => {
                 fence(SeqCst);
-                self.access(self.reg_at(rn) as u32, rt, acc)?;
+                self.access(self.reg_at(rn), rt, acc)?;
                 fence(SeqCst);
             }
         }
@@ -1126,7 +1127,7 @@ impl Cpu {
         offset: i64,
     ) -> Result<()> {
         let (addr, wb_val) = Self::indexed(self.reg_at(rn), offset, wb);
-        if !self.access_fast(addr as u32, rt, acc) {
+        if !self.access_fast(addr, rt, acc) {
             return self.exec_op_slow(op);
         }
         if let Some(v) = wb_val {
@@ -1137,7 +1138,7 @@ impl Cpu {
 
     /// [`Cpu::access`] via `peek`/`poke`; declining leaves all state unchanged.
     #[inline(always)]
-    fn access_fast(&mut self, addr: u32, rt: u8, acc: Acc) -> bool {
+    fn access_fast(&mut self, addr: u64, rt: u8, acc: Acc) -> bool {
         let mem = &self.mem;
         let loaded = match acc {
             Acc::Load8 => mem.peek(addr).map(|[b]: [u8; 1]| u64::from(b)),
@@ -1194,10 +1195,10 @@ impl Cpu {
                 acc,
             } => {
                 let offset = self.reg_offset(rm, ext, shift);
-                let addr = (self.reg_at(rn) as i64).wrapping_add(offset) as u32;
+                let addr = (self.reg_at(rn) as i64).wrapping_add(offset) as u64;
                 self.access(addr, rt, acc)
             }
-            Op::LoadLiteral { rt, addr, acc } => self.access(addr, rt, acc),
+            Op::LoadLiteral { rt, addr, acc } => self.access(u64::from(addr), rt, acc),
             Op::Load64 { rt, rn, wb, offset } => {
                 self.load_store_imm(rt, rn, Acc::Load64, wb, offset)
             }
@@ -1237,7 +1238,7 @@ impl Cpu {
     fn load_store_imm(&mut self, rt: u8, rn: u8, acc: Acc, wb: Wb, offset: i64) -> Result<()> {
         let base = self.reg_at(rn);
         let (addr, wb_val) = Self::indexed(base, offset, wb);
-        self.access(addr as u32, rt, acc)?;
+        self.access(addr, rt, acc)?;
         if let Some(v) = wb_val {
             self.set_reg_at(rn, v);
         }
@@ -1260,16 +1261,16 @@ impl Cpu {
                 self.write_zr(30, u64::from(ret_pc));
                 self.pc = target;
             }
-            Term::Br { rn } => self.pc = self.read_zr(rn) as u32,
+            Term::Br { rn } => self.pc = self.branch_target(self.read_zr(rn))?,
             Term::Blr { rn, ret_pc } => {
                 // Read the target first: `blr x30` would otherwise jump to itself.
-                let target = self.read_zr(rn) as u32;
+                let target = self.branch_target(self.read_zr(rn))?;
                 self.write_zr(30, u64::from(ret_pc));
                 self.pc = target;
             }
             Term::Ret { rn } => {
                 // A return to 0 is homebrew's exit; route it through the trampoline.
-                let target = self.read_zr(rn) as u32;
+                let target = self.branch_target(self.read_zr(rn))?;
                 self.pc = if target == 0 {
                     SELF_RETURN_TRAMPOLINE
                 } else {
@@ -1300,17 +1301,24 @@ impl Cpu {
     #[inline(always)]
     fn through_plt(&mut self, got: u32, stub: u32, room: u64) -> u64 {
         const STUB: u64 = PLT_STUB as u64;
-        let target = match self.mem.peek::<8>(got) {
-            Some(bytes) if room > STUB => u64::from_le_bytes(bytes),
+        // A slot above 4 GiB is the stub's own `br` to fault on.
+        let target = match self.mem.peek::<8>(u64::from(got)) {
+            Some(bytes) if room > STUB => match u32::try_from(u64::from_le_bytes(bytes)) {
+                Ok(target) => target,
+                Err(_) => {
+                    self.pc = stub;
+                    return 0;
+                }
+            },
             _ => {
                 self.pc = stub;
                 return 0;
             }
         };
         self.write_zr(16, u64::from(got));
-        self.write_zr(17, target);
+        self.write_zr(17, u64::from(target));
         self.record_run(stub, STUB as u32);
-        self.pc = target as u32;
+        self.pc = target;
         STUB
     }
 }

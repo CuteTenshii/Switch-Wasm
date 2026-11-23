@@ -3280,7 +3280,7 @@ fn folded_image_agrees(repeat: bool, first: impl Fn(u32) -> u32, wanted: impl Fn
         h.bindless_texture();
         let bytes = width * height * 4;
         h.mem
-            .map_zero(0x7100_0000, bytes as usize)
+            .map_zero(0x7100_0000, u64::from(bytes))
             .expect("room for the image");
         let image = h
             .vmm

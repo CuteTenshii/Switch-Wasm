@@ -8,7 +8,7 @@ impl Cpu {
     /// `ldn:m` and its `IMonitorService`: local wireless, idle with no network.
     pub(crate) fn ldn_monitor_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -57,7 +57,7 @@ impl Cpu {
     /// `lp2p:m` and its `ISfMonitorService`: no group, no link.
     pub(crate) fn lp2p_monitor_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -92,7 +92,7 @@ impl Cpu {
     /// `ovln:snd` / `ovln:rcv`: the overlay message queue, dropping sends and always empty.
     pub(crate) fn ovln_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -143,7 +143,7 @@ impl Cpu {
     /// `olsc:s`: cloud save backup, with nothing backed up.
     pub(crate) fn olsc_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -272,7 +272,7 @@ impl Cpu {
     /// `friend:u` and aliases: no friends, requests, blocks, or presence.
     pub(crate) fn friend_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -381,7 +381,7 @@ impl Cpu {
     /// `news:*` (five permission levels, not modelled) and its objects: an empty database.
     pub(crate) fn news_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -488,7 +488,7 @@ impl Cpu {
     /// `nim:eca` and its shop interfaces: every request finishes at once with `{}`, as Eden's.
     pub(crate) fn nim_eca_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -556,7 +556,7 @@ impl Cpu {
     /// `bcat:*`: delivery cache, always empty with nothing to sync.
     pub(crate) fn bcat_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn a_user_presence_and_setting_read_back_zeroed() {
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         for command in [20600, 20601, 20800, 20802] {
             let mut cpu = request_with_recv_static(command, &[0xAB; 16], BUFFER, 0x40);
             cpu.mem.map_zero(BUFFER, 0x1000).unwrap();
@@ -708,7 +708,7 @@ mod tests {
 
     #[test]
     fn a_play_history_key_is_stable_per_user_and_rejects_nobody() {
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         let uid = [0x11u8; 16];
         let mut payload = [0u8; 24];
         payload[0] = 1;
@@ -737,7 +737,7 @@ mod tests {
 
     #[test]
     fn a_shop_request_finishes_at_once_with_an_empty_json_object() {
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         let mut cpu = request(false, 4, &[0; 8]);
         cpu.register_service_handle(9, "nim:eca");
         cpu.nim_eca_request(TLS, 9, Some(4)).unwrap();

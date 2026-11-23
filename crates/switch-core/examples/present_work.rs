@@ -10,7 +10,7 @@ use switch_core::gpu::{Crop, DisplayBuffer, Gpu, NV_LAYOUT_BLOCK_LINEAR, NV_LAYO
 use switch_core::mem::Memory;
 
 /// Surface address, clear of every region a process is given.
-const BASE: u32 = 0xF400_0000;
+const BASE: u64 = 0xF400_0000;
 /// `NvColorFormat` for A8B8G8R8.
 const COLOR_FORMAT: u64 = 0x01_0053_2120;
 const BPP: u32 = 4;
@@ -74,12 +74,13 @@ fn case(name: &str, width: u32, height: u32, pitch_linear: bool, crop: Crop) {
     };
     let width_bytes = width * BPP;
     let size = layout.layer_stride(width_bytes, height);
-    mem.map_zero(BASE, size as usize).expect("map the surface");
+    mem.map_zero(BASE, u64::from(size))
+        .expect("map the surface");
     for y in 0..height {
         for x in 0..width {
             let texel =
                 ((x * 4) & 0xFF) | (((y * 4) & 0xFF) << 8) | (((x ^ y) & 0xFF) << 16) | 0xFF00_0000;
-            let at = BASE.wrapping_add(layout.offset(x * BPP, y, width_bytes));
+            let at = BASE.wrapping_add(u64::from(layout.offset(x * BPP, y, width_bytes)));
             mem.write_u32(at, texel).expect("fill the surface");
         }
     }

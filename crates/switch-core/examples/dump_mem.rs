@@ -10,8 +10,8 @@ use switch_core::nro::load_nro;
 struct Cli {
     nro: String,
     /// Hexadecimal address to start at.
-    #[arg(long, value_parser = common::hex32)]
-    addr: u32,
+    #[arg(long, value_parser = common::hex64)]
+    addr: u64,
     /// Bytes to print.
     #[arg(long, default_value_t = 64)]
     len: u32,
@@ -24,7 +24,10 @@ fn main() {
     let mem = Memory::new();
     load_nro(&mem, &data).expect("load nro");
     for i in 0..len {
-        print!("{:02x}", mem.read_u8(addr.wrapping_add(i)).unwrap_or(0));
+        print!(
+            "{:02x}",
+            mem.read_u8(addr.wrapping_add(u64::from(i))).unwrap_or(0)
+        );
     }
     println!();
 }

@@ -16,7 +16,7 @@ fn run_thumb(code: &[u8]) -> switch_core::cpu::Cpu {
     }
     bytes.extend_from_slice(code);
     bytes.extend_from_slice(&HALT.to_le_bytes());
-    cpu.mem.map(BASE, &bytes).unwrap();
+    cpu.mem.map(u64::from(BASE), &bytes).unwrap();
     cpu.run(1000).unwrap();
     cpu
 }

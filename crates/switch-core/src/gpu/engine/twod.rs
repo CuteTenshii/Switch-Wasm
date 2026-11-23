@@ -272,12 +272,15 @@ impl Engine2D {
                     for strip in columns.chunks(tile_w) {
                         for &(src_row, dst_row) in band {
                             let (src_row, dst_row) = (
-                                src_base.wrapping_add(src_row),
-                                dst_base.wrapping_add(dst_row),
+                                src_base.wrapping_add(u64::from(src_row)),
+                                dst_base.wrapping_add(u64::from(dst_row)),
                             );
                             for &(from, to) in strip {
-                                let raw = ctx.mem.read_le(src_row.wrapping_add(from), bpp)?;
-                                ctx.mem.write_le(dst_row.wrapping_add(to), bpp, raw)?;
+                                let raw = ctx
+                                    .mem
+                                    .read_le(src_row.wrapping_add(u64::from(from)), bpp)?;
+                                ctx.mem
+                                    .write_le(dst_row.wrapping_add(u64::from(to)), bpp, raw)?;
                             }
                         }
                     }
@@ -337,8 +340,8 @@ impl Engine2D {
     fn blit_staged(
         &mut self,
         ctx: &mut ExecCtx,
-        (src, src_base): (&Surface, u32),
-        (dst, dst_base): (&Surface, u32),
+        (src, src_base): (&Surface, u64),
+        (dst, dst_base): (&Surface, u64),
         rows: &[(u32, u32)],
         columns: &[(u32, u32)],
     ) -> Result<bool> {
@@ -414,8 +417,8 @@ impl Engine2D {
     fn blit_filtered(
         &mut self,
         ctx: &mut ExecCtx,
-        (src, src_base): (&Surface, u32),
-        (dst, dst_base): (&Surface, u32),
+        (src, src_base): (&Surface, u64),
+        (dst, dst_base): (&Surface, u64),
         (dst_x0, dst_y0, dst_w, dst_h): (u32, u32, u32, u32),
         (src_x0, src_y0): (f64, f64),
         (du_dx, dv_dy): (f64, f64),
@@ -532,7 +535,7 @@ impl Engine2D {
 /// What [`Engine2D::resolved`] was read from; equal keys mean the same texels.
 #[derive(Debug)]
 struct ResolvedFrom {
-    base: u32,
+    base: u64,
     size: u32,
     bpp: u32,
     rows: Vec<u32>,
@@ -540,7 +543,7 @@ struct ResolvedFrom {
 }
 
 impl ResolvedFrom {
-    fn new(base: u32, size: u32, bpp: u32, rows: &[(u32, u32)], columns: &[(u32, u32)]) -> Self {
+    fn new(base: u64, size: u32, bpp: u32, rows: &[(u32, u32)], columns: &[(u32, u32)]) -> Self {
         ResolvedFrom {
             base,
             size,
@@ -552,7 +555,7 @@ impl ResolvedFrom {
 
     fn is(
         &self,
-        base: u32,
+        base: u64,
         size: u32,
         bpp: u32,
         rows: &[(u32, u32)],
@@ -715,9 +718,8 @@ fn copy_run(to: &mut [u8], from: &[u8]) {
     }
 }
 
-fn disjoint((a, a_base): (&Surface, u32), (b, b_base): (&Surface, u32)) -> bool {
-    u64::from(a_base) + u64::from(a.size()) <= u64::from(b_base)
-        || u64::from(b_base) + u64::from(b.size()) <= u64::from(a_base)
+fn disjoint((a, a_base): (&Surface, u64), (b, b_base): (&Surface, u64)) -> bool {
+    a_base + u64::from(a.size()) <= b_base || b_base + u64::from(b.size()) <= a_base
 }
 
 fn fixed(int_part: u32, frac: u32) -> f64 {
@@ -725,7 +727,7 @@ fn fixed(int_part: u32, frac: u32) -> f64 {
 }
 
 /// Where a surface begins in guest memory, if the whole of it is one mapping.
-fn mapped(surface: &Surface, ctx: &ExecCtx) -> Option<u32> {
+fn mapped(surface: &Surface, ctx: &ExecCtx) -> Option<u64> {
     match ctx.vmm.translate(surface.addr) {
         Some((cpu, left)) if left >= u64::from(surface.size()) => Some(cpu),
         _ => None,
@@ -750,7 +752,8 @@ mod tests {
         let mut mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x2000).unwrap();
         for i in 0..16u32 {
-            mem.write_u32(0x3000_0000 + i * 4, 0xFF00_0000 | i).unwrap();
+            mem.write_u32(u64::from(0x3000_0000 + i * 4), 0xFF00_0000 | i)
+                .unwrap();
         }
         let mut vmm = AddressSpace::new();
         let base = vmm
@@ -792,7 +795,7 @@ mod tests {
 
         for i in 0..16u32 {
             assert_eq!(
-                mem.read_u32(0x3000_1000 + i * 4).unwrap(),
+                mem.read_u32(u64::from(0x3000_1000 + i * 4)).unwrap(),
                 0xFF00_0000 | i,
                 "pixel {}",
                 i
@@ -805,14 +808,14 @@ mod tests {
     /// does, padding included; a write watchpoint forces the per-texel path.
     #[test]
     fn a_staged_blit_leaves_memory_as_the_texel_walk_does() {
-        const SRC: u32 = 0x3000_0000;
-        const DST: u32 = 0x3001_0000;
+        const SRC: u64 = 0x3000_0000;
+        const DST: u64 = 0x3001_0000;
         const BLOCK_16_GOBS: u32 = 4 << 4;
         let resolve = |watch: bool| {
             let mut mem = Memory::new();
             mem.map_zero(SRC, 0x2_0000).unwrap();
-            for i in 0..0x2_0000 / 4 {
-                mem.write_u32(SRC + i * 4, i.wrapping_mul(0x9E37_79B9))
+            for i in 0..0x2_0000u32 / 4 {
+                mem.write_u32(SRC + u64::from(i) * 4, i.wrapping_mul(0x9E37_79B9))
                     .unwrap();
             }
             if watch {
@@ -845,7 +848,7 @@ mod tests {
                     SET_DST_OFFSET,
                     37,
                     45,
-                    base + u64::from(DST - SRC),
+                    base + (DST - SRC),
                 ),
             ] {
                 engine.regs.set(format, 0xD5);
@@ -880,8 +883,8 @@ mod tests {
     /// A filtered blit matches sampling each destination pixel on its own.
     #[test]
     fn a_filtered_blit_matches_per_pixel_sampling() {
-        const SRC: u32 = 0x3000_0000;
-        const DST: u32 = 0x3004_0000;
+        const SRC: u64 = 0x3000_0000;
+        const DST: u64 = 0x3004_0000;
         const BLOCK_16_GOBS: u32 = 4 << 4;
         let fixed_pair = |v: f64| {
             (
@@ -900,8 +903,8 @@ mod tests {
         {
             let mut mem = Memory::new();
             mem.map_zero(SRC, 0x8_0000).unwrap();
-            for i in 0..0x4_0000 / 4 {
-                mem.write_u32(SRC + i * 4, i.wrapping_mul(0x9E37_79B9))
+            for i in 0..0x4_0000u32 / 4 {
+                mem.write_u32(SRC + u64::from(i) * 4, i.wrapping_mul(0x9E37_79B9))
                     .unwrap();
             }
             let mut vmm = AddressSpace::new();
@@ -932,7 +935,7 @@ mod tests {
                     SET_DST_OFFSET,
                     w,
                     h,
-                    base + u64::from(DST - SRC),
+                    base + (DST - SRC),
                 ),
             ] {
                 engine.regs.set(format, 0xD5);
@@ -995,12 +998,12 @@ mod tests {
     /// Reused texels must be invalidated by a store or a new mapping.
     #[test]
     fn a_repeated_blit_sees_what_was_written_to_its_source() {
-        const SRC: u32 = 0x3000_0000;
-        const DST: u32 = 0x3001_0000;
+        const SRC: u64 = 0x3000_0000;
+        const DST: u64 = 0x3001_0000;
         let mut mem = Memory::new();
         mem.map_zero(SRC, 0x2_0000).unwrap();
         for i in 0..64 * 64 {
-            mem.write_u32(SRC + i * 4, i).unwrap();
+            mem.write_u32(SRC + u64::from(i) * 4, i).unwrap();
         }
         let mut vmm = AddressSpace::new();
         let base = vmm.map(SRC, 0x2_0000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
@@ -1026,7 +1029,7 @@ mod tests {
                 SET_DST_HEIGHT,
                 SET_DST_OFFSET,
                 32,
-                base + u64::from(DST - SRC),
+                base + (DST - SRC),
             ),
         ] {
             engine.regs.set(format, 0xD5);
@@ -1082,12 +1085,12 @@ mod tests {
         const SRC_H: u32 = 2 * 70;
         const DST_W: u32 = SRC_W / 2;
         const DST_H: u32 = SRC_H / 2;
-        const SRC: u32 = 0x3000_0000;
-        const DST: u32 = 0x3001_0000;
+        const SRC: u64 = 0x3000_0000;
+        const DST: u64 = 0x3001_0000;
         let mut mem = Memory::new();
         mem.map_zero(SRC, 0x2_0000).unwrap();
         for i in 0..SRC_W * SRC_H {
-            mem.write_u32(SRC + i * 4, i).unwrap();
+            mem.write_u32(SRC + u64::from(i) * 4, i).unwrap();
         }
         let mut vmm = AddressSpace::new();
         let base = vmm.map(SRC, 0x2_0000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
@@ -1107,7 +1110,7 @@ mod tests {
         engine.regs.set(SET_DST_PITCH, DST_W * 4);
         engine.regs.set(SET_DST_WIDTH, DST_W);
         engine.regs.set(SET_DST_HEIGHT, DST_H);
-        set_iova(&mut engine, SET_DST_OFFSET, base + u64::from(DST - SRC));
+        set_iova(&mut engine, SET_DST_OFFSET, base + (DST - SRC));
 
         engine.regs.set(SET_OPERATION, OPERATION_SRC_COPY);
         engine.regs.set(DST_WIDTH, DST_W);
@@ -1128,7 +1131,7 @@ mod tests {
         for y in 0..DST_H {
             for x in 0..DST_W {
                 assert_eq!(
-                    mem.read_u32(DST + (y * DST_W + x) * 4).unwrap(),
+                    mem.read_u32(DST + u64::from((y * DST_W + x) * 4)).unwrap(),
                     (2 * y) * SRC_W + 2 * x,
                     "texel ({x}, {y})"
                 );

@@ -3,7 +3,7 @@ use crate::kernel::ipc::testing::*;
 use crate::services::net::bsd::tests::{bsd_socket, loopback_sockaddr, place, SCRATCH};
 
 const KEY: u64 = 7 << 32;
-const BUFFER: u32 = SCRATCH + 0x400;
+const BUFFER: u64 = SCRATCH + 0x400;
 const NONBLOCKING: u32 = 2;
 
 /// A console with the network on, a socket connected to `example.com` and open on the host,
@@ -31,12 +31,12 @@ fn call(
     cpu: &mut Cpu,
     cmd: u32,
     payload: &[u8],
-    send: &[(u32, u32)],
-    recv: &[(u32, u32)],
+    send: &[(u64, u32)],
+    recv: &[(u64, u32)],
 ) -> (u32, [u32; 2]) {
     write_buffer_request(cpu, cmd, payload, send, recv);
     cpu.ssl_connection_request(TLS, KEY, Some(cmd)).unwrap();
-    let word = |at: u32| cpu.mem.read_u32(TLS + at).unwrap();
+    let word = |at: u64| cpu.mem.read_u32(TLS + at).unwrap();
     (word(0x18), [word(0x20), word(0x24)])
 }
 
@@ -364,7 +364,7 @@ fn the_server_certificate_comes_back_as_the_leaf_or_as_a_chain() {
     assert_eq!((size, count), (0x10 + 16 + 5, 2));
     assert_eq!(cpu.mem.read_u64(BUFFER).unwrap(), CERT_CHAIN_MAGIC);
     assert_eq!(cpu.mem.read_u32(BUFFER + 8).unwrap(), 2);
-    let entry = |at: u32| {
+    let entry = |at: u64| {
         (
             cpu.mem.read_u32(BUFFER + at).unwrap(),
             cpu.mem.read_u32(BUFFER + at + 4).unwrap(),
@@ -511,8 +511,8 @@ fn the_system_service_answers_as_ssl_does_and_adds_its_own_creators() {
 fn service(
     cmd: u32,
     payload: &[u8],
-    send: &[(u32, u32)],
-    recv: &[(u32, u32)],
+    send: &[(u64, u32)],
+    recv: &[(u64, u32)],
     cpu: &mut Cpu,
 ) -> (u32, u64) {
     write_buffer_request(cpu, cmd, payload, send, recv);

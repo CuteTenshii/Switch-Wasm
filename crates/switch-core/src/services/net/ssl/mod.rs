@@ -69,7 +69,7 @@ fn parse_cert_store(data: &[u8]) -> Vec<SslCertificate> {
 
 impl Cpu {
     /// `ssl`: contexts and options are real objects; connections never connect.
-    pub(crate) fn ssl_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn ssl_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
@@ -226,13 +226,13 @@ impl Cpu {
     }
 
     /// The `CaCertificateId`s a request named. A single `All`, or no buffer, means every root.
-    fn ssl_requested_ids(&mut self, tls: u32) -> Vec<i32> {
+    fn ssl_requested_ids(&mut self, tls: u64) -> Vec<i32> {
         let Some((addr, len)) = self.ipc_input_buffer(tls, 0) else {
             return vec![CERT_ID_ALL];
         };
         let mut ids = Vec::new();
         for index in 0..len / 4 {
-            match self.mem.read_u32(addr.wrapping_add(index * 4)) {
+            match self.mem.read_u32(addr.wrapping_add(u64::from(index * 4))) {
                 Ok(id) => ids.push(id as i32),
                 Err(_) => break,
             }
@@ -291,7 +291,7 @@ impl Cpu {
 
     /// Write the records and DER bodies, returning the count. A buffer too small for
     /// [`Cpu::ssl_certificate_extent`] is left alone.
-    fn ssl_write_certificates(&mut self, tls: u32, ids: &[i32]) -> Result<u32> {
+    fn ssl_write_certificates(&mut self, tls: u64, ids: &[i32]) -> Result<u32> {
         let (size, count) = self.ssl_certificate_extent(ids);
         let Some((addr, len)) = self.ipc_output_buffer(tls, 0) else {
             return Ok(0);
@@ -313,11 +313,11 @@ impl Cpu {
             info[16..24].copy_from_slice(&u64::from(der_at).to_le_bytes());
             for (index, &byte) in info.iter().enumerate() {
                 self.mem
-                    .write_u8(addr.wrapping_add(info_at + index as u32), byte)?;
+                    .write_u8(addr.wrapping_add(u64::from(info_at + index as u32)), byte)?;
             }
             for (index, &byte) in cert.der.iter().enumerate() {
                 self.mem
-                    .write_u8(addr.wrapping_add(der_at + index as u32), byte)?;
+                    .write_u8(addr.wrapping_add(u64::from(der_at + index as u32)), byte)?;
             }
             info_at += CERT_INFO_SIZE;
             der_at += (cert.der.len() as u32).next_multiple_of(4);
@@ -328,7 +328,7 @@ impl Cpu {
         end[0..4].copy_from_slice(&CERT_ID_ALL.to_le_bytes());
         for (index, &byte) in end.iter().enumerate() {
             self.mem
-                .write_u8(addr.wrapping_add(info_at + index as u32), byte)?;
+                .write_u8(addr.wrapping_add(u64::from(info_at + index as u32)), byte)?;
         }
         Ok(count)
     }

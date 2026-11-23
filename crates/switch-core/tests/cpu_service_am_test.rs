@@ -101,12 +101,14 @@ fn the_capture_image_getters_clear_the_buffer_they_fill() {
     cpu.bootstrap();
     cpu.set_pc(0x1000);
     cpu.register_service_handle(APPLET, "am:display-controller");
-    cpu.mem.map_zero(REGION, ROOM as usize).unwrap();
+    cpu.mem
+        .map_zero(u64::from(REGION), u64::from(ROOM))
+        .unwrap();
     let tls = cpu.tls_base();
 
     for cmd in [5u32, 6, 7] {
         for at in (REGION..REGION + ROOM).step_by(4) {
-            cpu.mem.write_u32(at, PATTERN).unwrap();
+            cpu.mem.write_u32(u64::from(at), PATTERN).unwrap();
         }
         ipc_request_plain_with_buffer(&mut cpu, APPLET, cmd, START, SIZE, true, &[]);
         assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "capture {cmd}");
@@ -116,18 +118,18 @@ fn the_capture_image_getters_clear_the_buffer_they_fill() {
             "capture {cmd} wrote nothing"
         );
         assert_eq!(
-            cpu.mem.dump(START, SIZE as usize).unwrap(),
+            cpu.mem.dump(u64::from(START), SIZE as usize).unwrap(),
             vec![0u8; SIZE as usize],
             "capture {cmd} left the buffer as it was"
         );
         // Nothing past the buffer is cleared.
         assert_eq!(
-            cpu.mem.read_u32(START - 4).unwrap(),
+            cpu.mem.read_u32(u64::from(START - 4)).unwrap(),
             PATTERN,
             "capture {cmd} wrote before the buffer"
         );
         assert_eq!(
-            cpu.mem.read_u32(START + SIZE).unwrap(),
+            cpu.mem.read_u32(u64::from(START + SIZE)).unwrap(),
             PATTERN,
             "capture {cmd} wrote past the buffer"
         );
@@ -146,14 +148,21 @@ fn the_caller_applet_stack_is_the_one_applet_above_this_one() {
     cpu.bootstrap();
     cpu.set_pc(0x1000);
     cpu.register_service_handle(APPLET, "am:library-applet-self-accessor");
-    cpu.mem.map_zero(STACK, 0x1000).unwrap();
+    cpu.mem.map_zero(u64::from(STACK), 0x1000).unwrap();
     let tls = cpu.tls_base();
 
     ipc_request_plain_with_buffer(&mut cpu, APPLET, 17, STACK, 4 * ENTRY, true, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "refused");
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "entries written");
-    assert_eq!(cpu.mem.read_u32(STACK).unwrap(), 3, "SystemAppletMenu");
-    assert_eq!(cpu.mem.read_u64(STACK + 8).unwrap(), QLAUNCH_TITLE_ID);
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(STACK)).unwrap(),
+        3,
+        "SystemAppletMenu"
+    );
+    assert_eq!(
+        cpu.mem.read_u64(u64::from(STACK + 8)).unwrap(),
+        QLAUNCH_TITLE_ID
+    );
 
     // No room for an entry gives a count of zero.
     ipc_request_plain_with_buffer(&mut cpu, APPLET, 17, STACK, ENTRY - 1, true, &[]);

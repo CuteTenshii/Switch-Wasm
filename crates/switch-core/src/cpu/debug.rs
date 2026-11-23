@@ -163,12 +163,17 @@ impl Cpu {
     ) -> Vec<u32> {
         // x29/x30 with 16-byte frames in A64, r11/r14 with 8-byte frames in AArch32.
         let (mut fp, lr, sp, width) = match mode {
-            ExecMode::A64 => (regs[29] as u32, regs[30] as u32, regs[SP_SLOT] as u32, 8),
-            ExecMode::A32 => (regs[11] as u32, regs[14] as u32, regs[13] as u32, 4),
+            ExecMode::A64 => (regs[29], regs[30], regs[SP_SLOT], 8),
+            ExecMode::A32 => (
+                regs[11] & 0xFFFF_FFFF,
+                regs[14] & 0xFFFF_FFFF,
+                regs[13] & 0xFFFF_FFFF,
+                4,
+            ),
         };
         let mut out = Vec::with_capacity(depth + 1);
         if self.is_return_address(lr, mode) {
-            out.push(lr);
+            out.push(lr as u32);
         }
         // The first frame is at or above SP; `next_fp <= fp` keeps later ones above it.
         if fp < sp {
@@ -178,9 +183,9 @@ impl Cpu {
             if !fp.is_multiple_of(width) {
                 break;
             }
-            let read = |at: u32| match mode {
-                ExecMode::A64 => self.mem.read_u64(at).map(|v| v as u32),
-                ExecMode::A32 => self.mem.read_u32(at),
+            let read = |at: u64| match mode {
+                ExecMode::A64 => self.mem.read_u64(at),
+                ExecMode::A32 => self.mem.read_u32(at).map(u64::from),
             };
             let (next_fp, lr) = match (read(fp), read(fp.wrapping_add(width))) {
                 (Ok(next_fp), Ok(lr)) => (next_fp, lr),
@@ -189,21 +194,25 @@ impl Cpu {
             if next_fp <= fp || !self.is_return_address(lr, mode) {
                 break;
             }
-            out.push(lr);
+            out.push(lr as u32);
             fp = next_fp;
         }
         out
     }
 
-    /// Whether `addr` follows a call instruction or is a thread/host return stub.
-    fn is_return_address(&self, addr: u32, mode: ExecMode) -> bool {
+    /// Whether `addr` follows a call instruction or is a thread/host return stub. Code is
+    /// only ever loaded below 4 GiB, so nothing above is one.
+    fn is_return_address(&self, addr: u64, mode: ExecMode) -> bool {
+        let Ok(addr) = u32::try_from(addr) else {
+            return false;
+        };
         if addr == THREAD_EXIT_TRAMPOLINE || addr == SELF_RETURN_TRAMPOLINE {
             return true;
         }
         if addr < 4 || !addr.is_multiple_of(4) {
             return false;
         }
-        let Ok(call) = self.mem.read_u32(addr - 4) else {
+        let Ok(call) = self.mem.read_u32(u64::from(addr - 4)) else {
             return false;
         };
         match mode {

@@ -23,7 +23,7 @@ pub(crate) const APM_DEFAULT_CONFIGURATION: [u32; 2] = [0x0001_0000, 0x0002_0000
 
 impl Cpu {
     /// `psm`: the battery. Control commands share ids with its own, so they are checked first.
-    pub(crate) fn psm_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
+    pub(crate) fn psm_request(&mut self, tls: u64, cmd_id: Option<u32>, handle: u64) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
@@ -72,7 +72,7 @@ impl Cpu {
     }
 
     /// `IPsmSession`: its event is never signalled; [`Cpu::set_battery`] is polled.
-    pub(crate) fn psm_session_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn psm_session_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         const BIND_STATE_CHANGE_EVENT: u32 = 0;
         const UNBIND_STATE_CHANGE_EVENT: u32 = 1;
         const SET_CHARGER_TYPE_CHANGE_EVENT_ENABLED: u32 = 2;
@@ -95,7 +95,7 @@ impl Cpu {
 
     /// `clkrst` and `pcv`, the same clock manager either side of 8.0.0.
     /// Rates a guest sets are stored and read back.
-    pub(crate) fn pcv_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn pcv_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
@@ -151,12 +151,16 @@ impl Cpu {
 
     /// `mm:u`: multimedia clock requests. Older commands (below 4) address a
     /// request by module, newer ones by the id `Initialize` returns.
-    pub(crate) fn mm_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn mm_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
         let data = self.ipc_request_data(tls);
-        let arg = |cpu: &Cpu, i: u32| cpu.mem.read_u32(data.wrapping_add(4 * i)).unwrap_or(0);
+        let arg = |cpu: &Cpu, i: u32| {
+            cpu.mem
+                .read_u32(data.wrapping_add(u64::from(4 * i)))
+                .unwrap_or(0)
+        };
         match cmd_id {
             // InitializeOld(module, priority, clear mode).
             Some(0) => {
@@ -240,7 +244,7 @@ impl Cpu {
     }
 
     /// `ts` (`IMeasurementServer`): two fixed idle sensor readings.
-    pub(crate) fn ts_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn ts_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
@@ -303,7 +307,7 @@ impl Cpu {
     /// unlike the server's command 4.
     pub(crate) fn ts_session_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         iface: &str,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -323,7 +327,7 @@ impl Cpu {
 
     /// `apm` and `apm:sys`. Reports the same performance mode as `am` and reads
     /// back configurations it was given.
-    pub(crate) fn apm_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn apm_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
@@ -412,7 +416,7 @@ impl Cpu {
 
     /// `psc:m`: power-state change notifications. Nothing here changes power
     /// state, so module events never fire.
-    pub(crate) fn psc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn psc_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(0) => {
@@ -467,7 +471,7 @@ impl Cpu {
     /// since boot2 enters maintenance mode if both active-low volume pads read Low.
     pub(crate) fn gpio_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {

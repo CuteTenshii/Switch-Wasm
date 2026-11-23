@@ -6,14 +6,13 @@ use switch_core::cpu::{Cpu, Layout, DISCARD_SLOT};
 
 pub const REGS_AT: u32 = 0;
 pub const NZCV_AT: u32 = 0x1000;
-pub const READ_WATCH_LO_AT: u32 = 0x1004;
-pub const READ_WATCH_HI_AT: u32 = 0x1008;
-/// Where the pointer to the page table is (a real `Memory` boxes its table).
-pub const PAGES_AT: u32 = 0x100C;
-pub const WATCH_LO_AT: u32 = 0x1010;
-pub const WATCH_HI_AT: u32 = 0x1014;
-/// Where the pointer to the watched-page bitmap is.
-pub const WATCHED_AT: u32 = 0x1020;
+/// Where the pointer to the top-level page table is (a real `Memory` boxes its table).
+pub const BLOCKS_AT: u32 = 0x100C;
+/// The read and write watchpoints, each a `u64` `[start, end)`.
+pub const READ_WATCH_LO_AT: u32 = 0x1090;
+pub const READ_WATCH_HI_AT: u32 = 0x1098;
+pub const WATCH_LO_AT: u32 = 0x10A0;
+pub const WATCH_HI_AT: u32 = 0x10A8;
 /// The byte that serialises 16-byte exclusive stores, zero while free.
 pub const PAIR_LOCK_AT: u32 = 0x1080;
 /// Guest `pc`, written by a taken branch.
@@ -27,7 +26,7 @@ pub const FPCR_AT: u32 = 0x1084;
 pub const FPSCR_NZCV_AT: u32 = 0x1088;
 /// A zero word: the `Memory` address, so the offsets above are absolute.
 pub const MEMORY_AT: u32 = 0x1030;
-/// The exclusive monitor: address, armed flag, then two doublewords.
+/// The exclusive monitor: the `u64` address, the armed flag, then two doublewords at 16.
 pub const EXCLUSIVE_AT: u32 = 0x1040;
 /// `TPIDRRO_EL0` and `TPIDR_EL0`, past the monitor.
 pub const TPIDR_AT: u32 = 0x1060;
@@ -40,9 +39,19 @@ pub const ORIGIN_AT: u32 = 0x1078;
 /// The `[u128; 32]` vector register file.
 pub const VREGS_AT: u32 = 0x2000;
 
-/// The page table: one four-byte entry per 4 KiB of guest space, zero if unmapped.
+/// The top-level page table: one four-byte entry per 2 MiB block, never zero.
 pub const TABLE_AT: u32 = 0x0010_0000;
-pub const TABLE_BYTES: u32 = (1 << 20) * 4;
+pub const TABLE_BYTES: u32 = (1 << 18) * 4;
+/// A block's page entries (four bytes per 4 KiB page, zero if unmapped) and its cached-pages
+/// bitmap, at a real block's wasm32 offsets; blocks are laid out a stride apart.
+pub const BLOCK_PAGES: u32 = 0;
+pub const BLOCK_WATCHED: u32 = 512 * 4;
+pub const BLOCK_STRIDE: u32 = 0x1000;
+/// The block every entry starts at, and the one the cases' window, below 2 MiB, is in.
+pub const EMPTY_BLOCK_AT: u32 = TABLE_AT + TABLE_BYTES;
+pub const WINDOW_BLOCK_AT: u32 = EMPTY_BLOCK_AT + BLOCK_STRIDE;
+/// Where the harnesses put mapped guest pages, one 4 KiB slot each.
+pub const POOL_AT: u32 = WINDOW_BLOCK_AT + BLOCK_STRIDE;
 
 pub const LAYOUT: Layout = Layout {
     regs: REGS_AT,
@@ -51,12 +60,13 @@ pub const LAYOUT: Layout = Layout {
     fpcr: FPCR_AT,
     fpscr_nzcv: FPSCR_NZCV_AT,
     memory: MEMORY_AT,
-    pages: PAGES_AT,
+    blocks: BLOCKS_AT,
+    block_pages: BLOCK_PAGES,
+    block_watched: BLOCK_WATCHED,
     read_watch_lo: READ_WATCH_LO_AT,
     read_watch_hi: READ_WATCH_HI_AT,
     watch_lo: WATCH_LO_AT,
     watch_hi: WATCH_HI_AT,
-    watched: WATCHED_AT,
     pair_lock: PAIR_LOCK_AT,
     pc: PC_AT,
     fuel: FUEL_AT,
@@ -165,8 +175,11 @@ pub fn header() -> String {
          read_watch_hi_at {READ_WATCH_HI_AT}\n\
          watch_lo_at {WATCH_LO_AT}\n\
          watch_hi_at {WATCH_HI_AT}\n\
-         watched_at {WATCHED_AT}\n\
-         pages_at {PAGES_AT}\n\
+         blocks_at {BLOCKS_AT}\n\
+         block_pages {BLOCK_PAGES}\n\
+         block_watched {BLOCK_WATCHED}\n\
+         empty_block_at {EMPTY_BLOCK_AT}\n\
+         window_block_at {WINDOW_BLOCK_AT}\n\
          discard_slot {DISCARD_SLOT}\n\
          pc_at {PC_AT}\n\
          vregs_at {VREGS_AT}\n\

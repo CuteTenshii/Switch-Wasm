@@ -1257,7 +1257,7 @@ impl Renderer for Gpu {
         result
     }
 
-    fn submit_frame(&mut self, ctx: &mut ExecCtx, scanout: Option<u32>) -> Result<Submit> {
+    fn submit_frame(&mut self, ctx: &mut ExecCtx, scanout: Option<u64>) -> Result<Submit> {
         self.enter_space(ctx.as_id);
         self.submit_frame_inner(ctx, scanout)
     }

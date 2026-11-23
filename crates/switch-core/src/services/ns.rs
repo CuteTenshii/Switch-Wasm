@@ -30,7 +30,7 @@ fn ns_async_value(name: &str) -> &'static [u8] {
 impl Cpu {
     /// `(free, total)` of the `ncm::StorageId` in the request: the built-in system and user
     /// storages and the SD card; any other storage is empty.
-    fn storage_space(&mut self, tls: u32) -> (u64, u64) {
+    fn storage_space(&mut self, tls: u64) -> (u64, u64) {
         let id = self.mem.read_u8(self.ipc_request_data(tls)).unwrap_or(0);
         match id {
             3 => self.space_of(Mount::Bis(BIS_SYSTEM)),
@@ -52,7 +52,7 @@ impl Cpu {
     /// `ns:am2` (`IServiceGetterInterface`) and the interfaces it hands out.
     /// Nothing is installed, so record lists are empty. Before 3.0.0 `ns:am`
     /// was the application manager itself; both routes land here.
-    pub(crate) fn ns_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn ns_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
@@ -191,14 +191,14 @@ impl Cpu {
     }
 
     /// Hand out one of `ns`'s sub-interfaces (no input, one out-interface).
-    fn ns_reply_with_interface(&mut self, tls: u32, handle: u64, name: &str) -> Result<()> {
+    fn ns_reply_with_interface(&mut self, tls: u64, handle: u64, name: &str) -> Result<()> {
         self.reply_with_interface(tls, handle, name)?;
         Ok(())
     }
 
     /// Answer an `…Async` command with its event, already signalled, and the finished
     /// `IAsyncValue` or `IAsyncResult` filed under `name`.
-    fn ns_reply_with_async(&mut self, tls: u32, handle: u64, name: &str) -> Result<()> {
+    fn ns_reply_with_async(&mut self, tls: u64, handle: u64, name: &str) -> Result<()> {
         let event = self.alloc_event("ns:async", false);
         self.signal_event(event);
         if self.ipc_is_domain_request(tls) {
@@ -214,7 +214,7 @@ impl Cpu {
 
     /// `IAsyncValue` and `IAsyncResult`, finished with success. Their ids 0 to 2 mean different
     /// things, and every answer here suits both, so an object of unknown kind is safe too.
-    fn ns_async_request(&mut self, tls: u32, iface: &str, cmd_id: Option<u32>) -> Result<()> {
+    fn ns_async_request(&mut self, tls: u64, iface: &str, cmd_id: Option<u32>) -> Result<()> {
         let value = ns_async_value(iface);
         match cmd_id {
             // IAsyncValue::GetSize -> u64; IAsyncResult::Get, whose answer is the result.
@@ -238,7 +238,7 @@ impl Cpu {
 
     /// `aoc:u` (`IAddOnContentManager`): the add-on content registered through
     /// [`Cpu::add_add_on_content`], empty by default.
-    pub(crate) fn aoc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn aoc_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
@@ -277,7 +277,7 @@ impl Cpu {
                 let written = listed.len().min(count).min(room);
                 for (i, index) in listed[..written].iter().enumerate() {
                     self.mem
-                        .write_u32(addr.wrapping_add(4 * i as u32), *index)?;
+                        .write_u32(addr.wrapping_add(u64::from(4 * i as u32)), *index)?;
                 }
                 self.write_ipc_response(tls, 0, &[], &(written as u32).to_le_bytes(), &[])
             }
@@ -316,7 +316,7 @@ impl Cpu {
     /// `nn::ec::IPurchaseEventManager`: nothing is ever bought, so its event never fires.
     fn aoc_purchase_events_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -337,7 +337,7 @@ impl Cpu {
     /// Reporting it unmounted would be the card-removed error.
     pub(crate) fn caps_album_accessor_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -382,7 +382,7 @@ impl Cpu {
     /// `IApplicationManagerInterface`.
     fn ns_application_manager_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         iface: &str,
         cmd_id: Option<u32>,
@@ -487,7 +487,7 @@ impl Cpu {
     }
 
     /// `GetApplicationControlData(u8 source, u64 application_id) -> u32 size`.
-    fn ns_application_control_data(&mut self, tls: u32) -> Result<()> {
+    fn ns_application_control_data(&mut self, tls: u64) -> Result<()> {
         /// ncm `ContentMetaNotFound` (2005-0007).
         const CONTENT_META_NOT_FOUND: u32 = 5 | (7 << 9);
         let application_id = self
@@ -510,7 +510,7 @@ impl Cpu {
 
     /// `prepo:u` and its privileged aliases (`IPrepoService`): play reports
     /// are accepted and dropped; the queue is always empty.
-    pub(crate) fn prepo_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn prepo_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             // Reports travel in map-alias buffers.
             return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
@@ -530,7 +530,7 @@ impl Cpu {
     }
 
     /// `es` (`IETicketService`): no ticket is ever imported.
-    pub(crate) fn es_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn es_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
         }
@@ -545,7 +545,7 @@ impl Cpu {
 
     /// `pdm:qry` (`IQueryService`): an empty play history, as on a
     /// factory-fresh console.
-    pub(crate) fn pdm_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn pdm_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
         }
@@ -790,7 +790,7 @@ mod tests {
 
     #[test]
     fn the_latest_update_check_finishes_at_once_and_finds_the_console_up_to_date() {
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         let mut cpu = request(false, 1, &[]);
         cpu.register_service_handle(9, "ns:system-update-control");
         cpu.ns_request(TLS, 9, Some(1)).unwrap();
@@ -861,12 +861,12 @@ mod tests {
 
     #[test]
     fn the_album_usage_counts_nothing_in_any_of_its_sixteen_entries() {
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         const USAGE16: u32 = 16 * 0x18;
         let mut cpu = request_with_recv_buffer(17, &[0u8; 0x10], BUFFER, USAGE16);
         cpu.mem.map_zero(BUFFER, 0x1000).unwrap();
         for at in 0..USAGE16 {
-            cpu.mem.write_u8(BUFFER + at, 0xaa).unwrap();
+            cpu.mem.write_u8(BUFFER + u64::from(at), 0xaa).unwrap();
         }
         cpu.register_service_handle(9, "caps:a");
         cpu.caps_album_accessor_request(TLS, 9, Some(17)).unwrap();
@@ -921,7 +921,7 @@ mod tests {
     #[test]
     fn registered_add_on_content_is_counted_listed_and_mountable() {
         const PROGRAM_ID: u64 = 0x0100_BEE0_17FC_0000;
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         // Just Dance 2023's two DLC containers: indices 1 and 4.
         let content = [PROGRAM_ID + 0x1001, PROGRAM_ID + 0x1004];
 

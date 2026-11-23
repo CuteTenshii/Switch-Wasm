@@ -168,7 +168,7 @@ impl Cpu {
                 0b01 => {
                     let scale = if bytes == 16 { 16u64 } else { bytes };
                     let imm = ((insn >> 10) & 0xFFF) as u64;
-                    ((self.read_x(rn).wrapping_add(imm * scale)) as u32, None)
+                    (self.read_x(rn).wrapping_add(imm * scale), None)
                 }
                 // Register offset (mode 0b00, bit 21 set): Xn plus the extended,
                 // scaled Rm, which is XZR at 31.
@@ -181,17 +181,17 @@ impl Cpu {
                         (insn >> 12) & 1,
                         bytes.trailing_zeros() as u8,
                     )?;
-                    (self.read_x(rn).wrapping_add(offset as u64) as u32, None)
+                    (self.read_x(rn).wrapping_add(offset as u64), None)
                 }
                 // Unscaled, post-index and pre-index: bits[11:10] pick which.
                 0b00 => {
                     let imm = sext_u64((insn >> 12) & 0x1FF, 9) as i64;
-                    let base = self.read_x(rn) as i64;
-                    let updated = base.wrapping_add(imm) as u64;
+                    let base = self.read_x(rn);
+                    let updated = base.wrapping_add(imm as u64);
                     match (insn >> 10) & 0b11 {
-                        0b01 => (base as u32, Some(updated)),    // post-index
-                        0b11 => (updated as u32, Some(updated)), // pre-index
-                        _ => (updated as u32, None),             // unscaled
+                        0b01 => (base, Some(updated)),    // post-index
+                        0b11 => (updated, Some(updated)), // pre-index
+                        _ => (updated, None),             // unscaled
                     }
                 }
                 _ => return Ok(false),
@@ -273,7 +273,7 @@ impl Cpu {
             let mut offs = 0u64;
             for sel in 0..selem {
                 let reg = ((u32::from(rt) + sel) % 32) as u8;
-                let addr = base.wrapping_add(offs) as u32;
+                let addr = base.wrapping_add(offs);
                 if replicate {
                     let elem = self.load_by_size(addr, scale, false)?;
                     let mask = elem_mask(esize);
@@ -331,7 +331,7 @@ impl Cpu {
             if selem == 1 {
                 // Contiguous: each register is one plain chunk of memory.
                 for i in 0..rpt {
-                    let addr = base.wrapping_add(offs) as u32;
+                    let addr = base.wrapping_add(offs);
                     let reg = ((u32::from(rt) + i) % 32) as usize;
                     if load {
                         self.vregs[reg] = if q == 1 {
@@ -356,7 +356,7 @@ impl Cpu {
                 for r in 0..rpt {
                     for lane in 0..lanes {
                         for reg in (u32::from(rt) + r..).take(selem as usize) {
-                            let addr = base.wrapping_add(offs) as u32;
+                            let addr = base.wrapping_add(offs);
                             if load {
                                 let elem = self.load_by_size(addr, size, false)?;
                                 self.write_vreg_elem((reg % 32) as u8, lane, esize, elem);
@@ -398,7 +398,7 @@ impl Cpu {
             }
             let off_sz = if is_q { 4 } else { size as u8 };
             let offset = self.offset_from_reg(rm, opt, s, off_sz)?;
-            let addr = (self.read_x(rn) as i64).wrapping_add(offset) as u32;
+            let addr = (self.read_x(rn) as i64).wrapping_add(offset) as u64;
             let elem_bytes: u32 = if is_q {
                 16
             } else if is_d {
@@ -461,17 +461,17 @@ impl Cpu {
             let base = self.read_x(rn);
             let (addr, writeback, wb_val) = if mode == 0b01 {
                 let imm = (((insn >> 10) & 0xFFF) as u64) << shift;
-                (base.wrapping_add(imm) as u32, false, 0)
+                (base.wrapping_add(imm), false, 0)
             } else if mode == 0b00 && ((insn >> 21) & 1) == 0 {
                 // Unscaled/pre/post-indexed: bits[11:10] select the mode.
                 let imm = sext_u64((insn >> 12) & 0x1FF, 9) as i64;
                 let idx = (insn >> 10) & 0b11;
                 match idx {
-                    0b00 => (base.wrapping_add(imm as u64) as u32, false, 0),
-                    0b01 => (base as u32, true, base.wrapping_add(imm as u64)),
+                    0b00 => (base.wrapping_add(imm as u64), false, 0),
+                    0b01 => (base, true, base.wrapping_add(imm as u64)),
                     0b11 => {
                         let addr = base.wrapping_add(imm as u64);
-                        (addr as u32, true, addr)
+                        (addr, true, addr)
                     }
                     _ => return Ok(false),
                 }
@@ -523,18 +523,20 @@ impl Cpu {
                 0b10 => (base.wrapping_add(scaled), false, 0),
                 _ => (base.wrapping_add(scaled), true, base.wrapping_add(scaled)),
             };
-            let addr = addr as u32;
             if l == 1 {
                 let (v0, v1) = match size {
                     0 => (
                         self.mem.read_u32(addr)? as u128,
-                        self.mem.read_u32(addr.wrapping_add(bytes))? as u128,
+                        self.mem.read_u32(addr.wrapping_add(u64::from(bytes)))? as u128,
                     ),
                     1 => (
                         self.mem.read_u64(addr)? as u128,
-                        self.mem.read_u64(addr.wrapping_add(bytes))? as u128,
+                        self.mem.read_u64(addr.wrapping_add(u64::from(bytes)))? as u128,
                     ),
-                    _ => (self.load_q(addr)?, self.load_q(addr.wrapping_add(bytes))?),
+                    _ => (
+                        self.load_q(addr)?,
+                        self.load_q(addr.wrapping_add(u64::from(bytes)))?,
+                    ),
                 };
                 self.vregs[rt as usize] = v0;
                 self.vregs[rt2 as usize] = v1;
@@ -542,17 +544,24 @@ impl Cpu {
                 match size {
                     0 => {
                         self.mem.write_u32(addr, self.vregs[rt as usize] as u32)?;
-                        self.mem
-                            .write_u32(addr.wrapping_add(bytes), self.vregs[rt2 as usize] as u32)?;
+                        self.mem.write_u32(
+                            addr.wrapping_add(u64::from(bytes)),
+                            self.vregs[rt2 as usize] as u32,
+                        )?;
                     }
                     1 => {
                         self.mem.write_u64(addr, self.vregs[rt as usize] as u64)?;
-                        self.mem
-                            .write_u64(addr.wrapping_add(bytes), self.vregs[rt2 as usize] as u64)?;
+                        self.mem.write_u64(
+                            addr.wrapping_add(u64::from(bytes)),
+                            self.vregs[rt2 as usize] as u64,
+                        )?;
                     }
                     _ => {
                         self.store_q(addr, self.vregs[rt as usize])?;
-                        self.store_q(addr.wrapping_add(bytes), self.vregs[rt2 as usize])?;
+                        self.store_q(
+                            addr.wrapping_add(u64::from(bytes)),
+                            self.vregs[rt2 as usize],
+                        )?;
                     }
                 }
             }
@@ -565,13 +574,13 @@ impl Cpu {
     }
 
     #[inline]
-    pub(super) fn load_q(&self, addr: u32) -> Result<u128> {
+    pub(super) fn load_q(&self, addr: u64) -> Result<u128> {
         Ok((self.mem.read_u64(addr)? as u128)
             | ((self.mem.read_u64(addr.wrapping_add(8))? as u128) << 64))
     }
 
     #[inline]
-    pub(super) fn store_q(&mut self, addr: u32, v: u128) -> Result<()> {
+    pub(super) fn store_q(&mut self, addr: u64, v: u128) -> Result<()> {
         self.mem.write_u64(addr, v as u64)?;
         self.mem.write_u64(addr.wrapping_add(8), (v >> 64) as u64)
     }
@@ -591,7 +600,7 @@ impl Cpu {
     /// `LDXR`/`LDAXR`: load and arm this thread's monitor.
     #[inline(always)]
     pub(super) fn load_exclusive(&mut self, rt: u8, rn: u8, sz: u8) -> Result<()> {
-        let addr = self.reg_at(rn) as u32;
+        let addr = self.reg_at(rn);
         let val = self.load_by_size(addr, u32::from(sz), false)?;
         self.exclusive.arm(addr, [val, 0]);
         self.set_reg_at(rt, val);
@@ -603,7 +612,7 @@ impl Cpu {
     /// holds what it read, which another core's store would have changed.
     pub(crate) fn store_exclusive_at(
         &mut self,
-        addr: u32,
+        addr: u64,
         size: u32,
         new: [u64; 2],
     ) -> Result<bool> {
@@ -621,7 +630,7 @@ impl Cpu {
     /// address; otherwise stores nothing and writes 1 to `rs`.
     #[inline(always)]
     pub(super) fn store_exclusive(&mut self, rs: u8, rt: u8, rn: u8, sz: u8) -> Result<()> {
-        let addr = self.reg_at(rn) as u32;
+        let addr = self.reg_at(rn);
         let stored = self.store_exclusive_at(addr, 1 << sz, [self.reg_at(rt), 0])?;
         self.set_reg_at(rs, u64::from(!stored));
         Ok(())
@@ -636,7 +645,7 @@ impl Cpu {
         rn: u8,
         wide: bool,
     ) -> Result<()> {
-        let addr = self.reg_at(rn) as u32;
+        let addr = self.reg_at(rn);
         let (v0, v1) = if wide {
             (
                 self.mem.read_u64(addr)?,
@@ -665,7 +674,7 @@ impl Cpu {
         rn: u8,
         wide: bool,
     ) -> Result<()> {
-        let addr = self.reg_at(rn) as u32;
+        let addr = self.reg_at(rn);
         let (v0, v1) = (self.reg_at(rt), self.reg_at(rt2));
         let stored = if wide {
             self.store_exclusive_at(addr, 16, [v0, v1])?
@@ -714,11 +723,11 @@ impl Cpu {
                 0b001000100 => {
                     // STLR: store-release
                     fence(SeqCst);
-                    self.store_by_size(base as u32, sz, self.read_zr(rt))?;
+                    self.store_by_size(base, sz, self.read_zr(rt))?;
                 }
                 0b001000110 => {
                     // LDAR: load-acquire
-                    let val = self.load_by_size(base as u32, sz, false)?;
+                    let val = self.load_by_size(base, sz, false)?;
                     fence(SeqCst);
                     self.write_zr(rt, val);
                 }
@@ -745,7 +754,7 @@ impl Cpu {
             let opt = ((insn >> 13) & 0b111) as u8;
             let s = (insn >> 12) & 1;
             let offset = self.offset_from_reg(rm, opt, s, sz as u8)?;
-            let addr = (self.read_x(rn) as i64).wrapping_add(offset) as u32;
+            let addr = (self.read_x(rn) as i64).wrapping_add(offset) as u64;
             self.ld_st_opc(addr, rt, sz, opc)?;
             return Ok(true);
         }
@@ -766,7 +775,7 @@ impl Cpu {
                     0b10 => 4,
                     _ => 8,
                 };
-                let addr = self.read_x(rn).wrapping_add(imm.wrapping_mul(scale)) as u32;
+                let addr = self.read_x(rn).wrapping_add(imm.wrapping_mul(scale));
                 self.ld_st_opc(addr, rt, sz, opc)?;
                 return Ok(true);
             }
@@ -780,7 +789,7 @@ impl Cpu {
                     0b01 => (base, true),                       // post-index
                     _ => (base.wrapping_add(imm as u64), true), // pre-index
                 };
-                self.ld_st_opc(addr as u32, rt, sz, opc)?;
+                self.ld_st_opc(addr, rt, sz, opc)?;
                 if writeback {
                     let new_base = if idx == 0b01 {
                         base.wrapping_add(imm as u64)
@@ -803,13 +812,13 @@ impl Cpu {
 
     /// One load or store named by its raw `size`:`opc` fields.
     #[inline(always)]
-    pub(super) fn ld_st_opc(&mut self, addr: u32, rt: u8, sz: u32, opc: u32) -> Result<()> {
+    pub(super) fn ld_st_opc(&mut self, addr: u64, rt: u8, sz: u32, opc: u32) -> Result<()> {
         let acc = Acc::of(sz as u8, opc as u8);
         self.access(addr, rt_slot(u32::from(rt), acc), acc)
     }
 
     #[inline(always)]
-    pub(super) fn access(&mut self, addr: u32, rt: u8, acc: Acc) -> Result<()> {
+    pub(super) fn access(&mut self, addr: u64, rt: u8, acc: Acc) -> Result<()> {
         match acc {
             Acc::Load8 => {
                 let v = u64::from(self.mem.read_u8(addr)?);
@@ -894,7 +903,6 @@ impl Cpu {
     ) -> Result<()> {
         let base = self.reg_at(rn);
         let (addr, wb_val) = Self::indexed(base, offset, wb);
-        let addr = addr as u32;
         match kind {
             // Read both halves before writing, so `ldp x0, x1, [x0]` works.
             PairKind::Load64 => {
@@ -938,7 +946,7 @@ impl Cpu {
     }
 
     #[inline(always)]
-    pub(super) fn load_by_size(&self, addr: u32, sz: u32, sign: bool) -> Result<u64> {
+    pub(super) fn load_by_size(&self, addr: u64, sz: u32, sign: bool) -> Result<u64> {
         let raw = match sz {
             0b00 => self.mem.read_u8(addr)? as u64,
             0b01 => self.mem.read_u16(addr)? as u64,
@@ -959,7 +967,7 @@ impl Cpu {
     }
 
     #[inline(always)]
-    pub(super) fn store_by_size(&mut self, addr: u32, sz: u32, val: u64) -> Result<()> {
+    pub(super) fn store_by_size(&mut self, addr: u64, sz: u32, val: u64) -> Result<()> {
         match sz {
             0b00 => self.mem.write_u8(addr, val as u8),
             0b01 => self.mem.write_u16(addr, val as u16),

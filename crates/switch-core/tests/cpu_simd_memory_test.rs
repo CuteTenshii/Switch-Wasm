@@ -176,7 +176,7 @@ fn ld2_and_st2_interleave_lanes() {
     let mut cpu = cpu_at(0x1000);
     cpu.mem.map_zero(0x3000, 0x40).unwrap();
     for i in 0..16u32 {
-        cpu.mem.write_u32(0x3000 + i * 4, i).unwrap();
+        cpu.mem.write_u32(u64::from(0x3000 + i * 4), i).unwrap();
     }
     cpu.set_reg(0, 0x3000);
     let cpu = run_program(cpu, 0x1000, &[0x4cdf_0810, nop()]);

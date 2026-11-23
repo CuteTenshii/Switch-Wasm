@@ -11,17 +11,17 @@ pub enum ThreadState {
     /// Returned from its entry point or called `svcExitThread`.
     Finished,
     /// Blocked in `svcArbitrateLock` on the mutex word at this address.
-    WaitMutex(u32),
+    WaitMutex(u64),
     /// Blocked in `svcWaitProcessWideKeyAtomic`; re-acquires `mutex` when woken.
     /// `deadline` is the expiry cycle for timed waits.
     WaitKey {
-        key: u32,
-        mutex: u32,
+        key: u64,
+        mutex: u64,
         deadline: Option<u64>,
     },
     /// Blocked in `svcWaitForAddress` until signalled or `deadline` passes.
     WaitAddress {
-        addr: u32,
+        addr: u64,
         deadline: Option<u64>,
     },
     /// Asleep until `deadline` with the PC on the `svc`, which is reissued on wake.
@@ -171,15 +171,17 @@ impl Cpu {
         self.grant_handle(handle);
         let index = self.process().threads.len() as u32;
         let tls = THREAD_TLS_BASE + index * THREAD_TLS_STRIDE;
-        let _ = self.mem.map_zero(tls, THREAD_TLS_STRIDE as usize);
+        let _ = self
+            .mem
+            .map_zero(u64::from(tls), u64::from(THREAD_TLS_STRIDE));
         // ThreadVars at TLS+0x1E0: magic, handle, thread pointer, reent, tls_tp.
         const TV_MAGIC: u32 = 0x2154_5624; // "!TV$"
         let reent = tls + 0x400;
-        let _ = self.mem.write_u32(tls + 0x1E0, TV_MAGIC);
-        let _ = self.mem.write_u32(tls + 0x1E4, handle as u32);
-        let _ = self.mem.write_u32(tls + 0x1E8, 0);
-        let _ = self.mem.write_u32(tls + 0x1F0, reent);
-        let _ = self.mem.write_u32(tls + 0x1F8, tls);
+        let _ = self.mem.write_u32(u64::from(tls + 0x1E0), TV_MAGIC);
+        let _ = self.mem.write_u32(u64::from(tls + 0x1E4), handle as u32);
+        let _ = self.mem.write_u32(u64::from(tls + 0x1E8), 0);
+        let _ = self.mem.write_u32(u64::from(tls + 0x1F0), reent);
+        let _ = self.mem.write_u32(u64::from(tls + 0x1F8), tls);
 
         let mut regs = [0u64; REG_FILE];
         regs[0] = arg;
@@ -279,7 +281,7 @@ impl Cpu {
     }
 
     /// Fill the 0x320-byte `ThreadContext` for `svcGetThreadContext3` from the live or saved registers.
-    pub(crate) fn write_thread_context(&mut self, out: u32, handle: u64) -> bool {
+    pub(crate) fn write_thread_context(&mut self, out: u64, handle: u64) -> bool {
         self.ensure_main_thread();
         let Some(index) = self
             .process()
@@ -299,7 +301,7 @@ impl Cpu {
         };
         let sp = regs[SP_SLOT];
         let put64 = |cpu: &mut Self, off: u32, v: u64| {
-            let _ = cpu.mem.write_u64(out.wrapping_add(off), v);
+            let _ = cpu.mem.write_u64(out.wrapping_add(u64::from(off)), v);
         };
         for (i, &r) in regs.iter().take(29).enumerate() {
             put64(self, i as u32 * 8, r);
@@ -308,15 +310,15 @@ impl Cpu {
         put64(self, 0xF0, regs[30]); // lr
         put64(self, 0xF8, sp);
         put64(self, 0x100, u64::from(pc));
-        let _ = self.mem.write_u32(out.wrapping_add(0x108), nzcv);
-        let _ = self.mem.write_u32(out.wrapping_add(0x10C), 0);
+        let _ = self.mem.write_u32(out + 0x108, nzcv);
+        let _ = self.mem.write_u32(out + 0x10C, 0);
         for (i, &v) in vregs.iter().enumerate() {
             let at = 0x110 + i as u32 * 16;
             put64(self, at, v as u64);
             put64(self, at + 8, (v >> 64) as u64);
         }
-        let _ = self.mem.write_u32(out.wrapping_add(0x310), fpcr);
-        let _ = self.mem.write_u32(out.wrapping_add(0x314), fpsr);
+        let _ = self.mem.write_u32(out + 0x310, fpcr);
+        let _ = self.mem.write_u32(out + 0x314, fpsr);
         put64(self, 0x318, tpidr);
         true
     }

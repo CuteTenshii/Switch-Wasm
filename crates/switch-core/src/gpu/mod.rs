@@ -381,7 +381,7 @@ impl Gpu {
             .nvmap
             .by_id(buffer.nvmap_id)
             .filter(|handle| handle.allocated)
-            .map(|handle| handle.cpu_addr.wrapping_add(buffer.offset));
+            .map(|handle| handle.cpu_addr.wrapping_add(u64::from(buffer.offset)));
         self.on_flush_channel(owner, mem, renderer::Submit::Done, |three_d, ctx| {
             three_d.submit_frame(ctx, scanout)
         })
@@ -444,10 +444,10 @@ impl Gpu {
                 buffer.nvmap_id
             )));
         }
-        let base = handle.cpu_addr.wrapping_add(buffer.offset);
+        let base = handle.cpu_addr.wrapping_add(u64::from(buffer.offset));
         self.activity.note(
             activity::Kind::Present,
-            u64::from(base),
+            base,
             u64::from(buffer.nvmap_id),
             1,
             false,
@@ -557,7 +557,7 @@ impl Gpu {
             let mut x = 0;
             while x < out_width {
                 let (offset, run) = layout.run_at((crop_x + x) * bpp, y, width_bytes);
-                let addr = base.wrapping_add(offset);
+                let addr = base.wrapping_add(u64::from(offset));
                 let count = (run / bpp).clamp(1, out_width - x);
                 let run_bytes = offset as usize..(offset + count * bpp) as usize;
                 if let Some(shuffle) = shuffle.filter(|_| held && run_bytes.end <= swizzled) {
@@ -581,7 +581,7 @@ impl Gpu {
                         (true, true) if bpp == 2 => u128::from(u16::from_le_bytes(
                             raw_bytes[at..at + 2].try_into().expect("two bytes"),
                         )),
-                        _ => mem.read_le(addr.wrapping_add(i * bpp), bpp)?,
+                        _ => mem.read_le(addr.wrapping_add(u64::from(i * bpp)), bpp)?,
                     };
                     // Shuffle formats are already the canvas word; others decode through linear light.
                     if let Some(shuffle) = shuffle {
@@ -649,7 +649,7 @@ impl Gpu {
         };
         let crop = buffer.crop.window(buffer.width, buffer.height);
         let shot = renderer::ScanOut {
-            addr: handle.cpu_addr.wrapping_add(buffer.offset),
+            addr: handle.cpu_addr.wrapping_add(u64::from(buffer.offset)),
             format,
             layout,
             width: buffer.width,
@@ -1034,7 +1034,8 @@ mod tests {
             0,
         ];
         for (index, &word) in words.iter().enumerate() {
-            mem.write_u32(0x3000_0000 + index as u32 * 4, word).unwrap();
+            mem.write_u32(u64::from(0x3000_0000 + index as u32 * 4), word)
+                .unwrap();
         }
 
         let flushes = std::rc::Rc::new(std::cell::Cell::new(0));
@@ -1146,7 +1147,8 @@ mod tests {
             increment,
         ];
         for (index, &word) in words.iter().enumerate() {
-            mem.write_u32(0x3000_0000 + index as u32 * 4, word).unwrap();
+            mem.write_u32(u64::from(0x3000_0000 + index as u32 * 4), word)
+                .unwrap();
         }
         gpu.set_renderer(Box::new(Landing { left: 2 }));
         let (first, second) = (
@@ -1223,7 +1225,7 @@ mod tests {
         let id = gpu.nvmap.get(handle).unwrap().id;
 
         // A 16x8 RGBA8 image is exactly one GOB.
-        let at = |x: u32, y: u32| 0x4000_0000 + surface::gob_offset(x * 4, y);
+        let at = |x: u32, y: u32| 0x4000_0000 + u64::from(surface::gob_offset(x * 4, y));
         mem.write_u32(at(1, 0), 0xFF00_0000).unwrap();
         mem.write_u32(at(0, 1), 0x0000_00FF).unwrap();
 
@@ -1273,7 +1275,7 @@ mod tests {
         for y in 0..8 {
             for x in 0..16 {
                 let at = 0x4000_0000 + surface::gob_offset(x * 4, y);
-                mem.write_u32(at, RED).unwrap();
+                mem.write_u32(u64::from(at), RED).unwrap();
             }
         }
         let buffer = DisplayBuffer {
@@ -1304,7 +1306,7 @@ mod tests {
             .alloc(handle, 0, 0, 0x1000, 0, 0x4000_0000)
             .unwrap();
         let id = gpu.nvmap.get(handle).unwrap().id;
-        let at = |x: u32, y: u32| 0x4000_0000 + surface::gob_offset(x * 4, y);
+        let at = |x: u32, y: u32| 0x4000_0000 + u64::from(surface::gob_offset(x * 4, y));
         let buffer = DisplayBuffer {
             nvmap_id: id,
             offset: 0,
@@ -1366,7 +1368,7 @@ mod tests {
             .alloc(handle, 0, 0, 0x1000, 0, 0x4000_0000)
             .unwrap();
         let id = gpu.nvmap.get(handle).unwrap().id;
-        let at = |x: u32, y: u32| 0x4000_0000 + surface::gob_offset(x * 4, y);
+        let at = |x: u32, y: u32| 0x4000_0000 + u64::from(surface::gob_offset(x * 4, y));
         // A pixel in the top row and one in the bottom row of an 8-row image.
         mem.write_u32(at(0, 0), 0xFF00_0000).unwrap();
         mem.write_u32(at(0, 7), 0x0000_00FF).unwrap();
@@ -1415,7 +1417,7 @@ mod tests {
             .alloc(handle, 0, 0, 0x1000, 0, 0x4000_0000)
             .unwrap();
         let id = gpu.nvmap.get(handle).unwrap().id;
-        let at = |x: u32, y: u32| 0x4000_0000 + surface::gob_offset(x * 4, y);
+        let at = |x: u32, y: u32| 0x4000_0000 + u64::from(surface::gob_offset(x * 4, y));
         // The corners of the window (4, 2)..(12, 6), and one pixel outside it.
         mem.write_u32(at(4, 2), 0xFF00_0000).unwrap();
         mem.write_u32(at(11, 5), 0x0000_00FF).unwrap();

@@ -260,7 +260,7 @@ impl Cpu {
         }
         let rt = (insn & 0x1F) as u8;
         let imm = sext_u64((insn >> 5) & 0x7_FFFF, 19) << 2;
-        let addr = (self.pc as i64).wrapping_add(imm as i64) as u32;
+        let addr = u64::from(self.pc).wrapping_add(imm);
         match (insn >> 30) & 0b11 {
             0b00 => {
                 let val = self.mem.read_u32(addr)? as u64;
@@ -351,19 +351,19 @@ impl Cpu {
                 match opc {
                     0b0000 => {
                         // BR
-                        self.pc = self.read_zr(rn) as u32;
+                        self.pc = self.branch_target(self.read_zr(rn))?;
                         Ok(true)
                     }
                     0b0001 => {
                         // BLR: read the target before linking, since it may be x30.
-                        let target = self.read_zr(rn) as u32;
+                        let target = self.branch_target(self.read_zr(rn))?;
                         self.write_zr(30, next_pc as u64);
                         self.pc = target;
                         Ok(true)
                     }
                     0b0010 => {
                         // RET to 0 is a homebrew exit path; redirect to the exit trampoline.
-                        let tgt = self.read_zr(rn) as u32;
+                        let tgt = self.branch_target(self.read_zr(rn))?;
                         self.pc = if tgt == 0 {
                             SELF_RETURN_TRAMPOLINE
                         } else {

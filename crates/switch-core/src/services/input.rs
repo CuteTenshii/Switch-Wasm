@@ -582,7 +582,7 @@ impl Cpu {
         self.vibration = (clamp(low), clamp(high));
     }
 
-    pub fn hid_shmem_addr(&self) -> u32 {
+    pub fn hid_shmem_addr(&self) -> u64 {
         self.process().hid_shmem_addr
     }
 }

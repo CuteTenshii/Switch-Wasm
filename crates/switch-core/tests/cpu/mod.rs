@@ -7,7 +7,7 @@ pub use switch_core::cpu::Cpu;
 
 pub fn cpu_at(pc: u32) -> Cpu {
     let mut cpu = Cpu::new();
-    cpu.mem.map_zero(pc, 0x400).unwrap();
+    cpu.mem.map_zero(u64::from(pc), 0x400).unwrap();
     cpu.set_pc(pc);
     cpu
 }
@@ -15,7 +15,7 @@ pub fn cpu_at(pc: u32) -> Cpu {
 /// Map `code` at `pc` and point the core at it.
 pub fn map_code(cpu: &mut Cpu, pc: u32, code: &[u32]) {
     let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
-    cpu.mem.map(pc, &bytes).unwrap();
+    cpu.mem.map(u64::from(pc), &bytes).unwrap();
     cpu.set_pc(pc);
 }
 
@@ -305,7 +305,7 @@ pub fn ipc_request_with_payload(
     // No buffer descriptors: domain header at 0x10, CmifInHeader at 0x20, args at 0x30.
     let tls = cpu.tls_base();
     for (i, &b) in payload.iter().enumerate() {
-        cpu.mem.write_u8(tls + 0x30 + i as u32, b).unwrap();
+        cpu.mem.write_u8(tls + 0x30 + i as u64, b).unwrap();
     }
     run_ipc_request(cpu, handle);
 }
@@ -320,7 +320,7 @@ pub fn ipc_request(cpu: &mut Cpu, handle: u64, msg_type: u32, object_id: Option<
 pub fn build_ipc_request(cpu: &mut Cpu, msg_type: u32, object_id: Option<u32>, cmd: u32) {
     let tls = cpu.tls_base();
     for i in (0..0x100u32).step_by(4) {
-        cpu.mem.write_u32(tls + i, 0).unwrap();
+        cpu.mem.write_u32(tls + u64::from(i), 0).unwrap();
     }
     cpu.mem.write_u32(tls, msg_type).unwrap();
     cpu.mem.write_u32(tls + 4, 0x0c).unwrap();
@@ -341,7 +341,9 @@ pub fn build_ipc_request(cpu: &mut Cpu, msg_type: u32, object_id: Option<u32>, c
 pub fn run_ipc_request(cpu: &mut Cpu, handle: u64) {
     cpu.set_reg(0, handle);
     let pc = cpu.get_pc();
-    cpu.mem.map(pc, &svc(0x21).to_le_bytes()).unwrap();
+    cpu.mem
+        .map(u64::from(pc), &svc(0x21).to_le_bytes())
+        .unwrap();
     cpu.run(1).unwrap();
     cpu.set_pc(pc);
 }
@@ -381,7 +383,7 @@ pub fn ipc_request_with_buffer(
 ) {
     let tls = cpu.tls_base();
     for i in (0..0x100u32).step_by(4) {
-        cpu.mem.write_u32(tls + i, 0).unwrap();
+        cpu.mem.write_u32(tls + u64::from(i), 0).unwrap();
     }
     // hdr1: type 4 (Request), one buffer; send count in bits 23:20, receive in 27:24.
     cpu.mem
@@ -399,11 +401,13 @@ pub fn ipc_request_with_buffer(
     cpu.mem.write_u32(tls + 0x38, cmd).unwrap();
     // The command's own arguments follow the 16-byte CmifInHeader.
     for (i, &b) in payload.iter().enumerate() {
-        cpu.mem.write_u8(tls + 0x40 + i as u32, b).unwrap();
+        cpu.mem.write_u8(tls + 0x40 + i as u64, b).unwrap();
     }
     cpu.set_reg(0, handle);
     let pc = cpu.get_pc();
-    cpu.mem.map(pc, &svc(0x21).to_le_bytes()).unwrap();
+    cpu.mem
+        .map(u64::from(pc), &svc(0x21).to_le_bytes())
+        .unwrap();
     cpu.run(1).unwrap();
     cpu.set_pc(pc);
 }
@@ -423,15 +427,17 @@ pub fn write_log_packet(
         payload.extend_from_slice(data);
     }
     for i in 0..0x18u32 {
-        cpu.mem.write_u8(addr + i, 0).unwrap();
+        cpu.mem.write_u8(u64::from(addr + i), 0).unwrap();
     }
-    cpu.mem.write_u8(addr + 0x10, flags).unwrap();
-    cpu.mem.write_u8(addr + 0x12, severity).unwrap();
+    cpu.mem.write_u8(u64::from(addr + 0x10), flags).unwrap();
+    cpu.mem.write_u8(u64::from(addr + 0x12), severity).unwrap();
     cpu.mem
-        .write_u32(addr + 0x14, payload.len() as u32)
+        .write_u32(u64::from(addr + 0x14), payload.len() as u32)
         .unwrap();
     for (i, &b) in payload.iter().enumerate() {
-        cpu.mem.write_u8(addr + 0x18 + i as u32, b).unwrap();
+        cpu.mem
+            .write_u8(u64::from(addr + 0x18 + i as u32), b)
+            .unwrap();
     }
     0x18 + payload.len() as u32
 }
@@ -440,13 +446,17 @@ pub fn write_log_packet(
 pub fn wait_sync(cpu: &mut Cpu, handles: &[u32], timeout: i64) -> (u64, u64) {
     const ARRAY: u32 = 0x7000;
     for (i, &h) in handles.iter().enumerate() {
-        cpu.mem.write_u32(ARRAY + (i as u32) * 4, h).unwrap();
+        cpu.mem
+            .write_u32(u64::from(ARRAY + (i as u32) * 4), h)
+            .unwrap();
     }
     cpu.set_reg(1, u64::from(ARRAY));
     cpu.set_reg(2, handles.len() as u64);
     cpu.set_reg(3, timeout as u64);
     let pc = cpu.get_pc();
-    cpu.mem.map(pc, &svc(0x18).to_le_bytes()).unwrap();
+    cpu.mem
+        .map(u64::from(pc), &svc(0x18).to_le_bytes())
+        .unwrap();
     cpu.run(1).unwrap();
     cpu.set_pc(pc);
     (cpu.read_x(0), cpu.read_x(1))
@@ -469,15 +479,21 @@ pub fn hid_server() -> (Cpu, u64, u32) {
 
 /// 64 bytes of 0x00..0x3F at `addr`, for the structure load/store tests.
 pub fn map_ramp(cpu: &mut Cpu, addr: u32, len: u32) {
-    cpu.mem.map_zero(addr, len as usize).unwrap();
+    cpu.mem.map_zero(u64::from(addr), u64::from(len)).unwrap();
     for i in 0..len {
-        cpu.mem.write_u8(addr + i, i as u8).unwrap();
+        cpu.mem.write_u8(u64::from(addr + i), i as u8).unwrap();
     }
 }
 
 /// The 16 bytes at `addr` as the u128 a `ld1 {Vt.16b}` would produce.
 pub fn mem_u128(cpu: &Cpu, addr: u32) -> u128 {
-    u128::from_le_bytes(cpu.mem.dump(addr, 16).unwrap().try_into().unwrap())
+    u128::from_le_bytes(
+        cpu.mem
+            .dump(u64::from(addr), 16)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    )
 }
 
 /// Pack four 32-bit lanes, lane 0 in the low bits.
@@ -537,7 +553,7 @@ pub fn ipc_request_plain(cpu: &mut Cpu, handle: u64, cmd: u32, payload: &[u8]) {
     build_ipc_request(cpu, 4, None, cmd);
     let tls = cpu.tls_base();
     for (i, &b) in payload.iter().enumerate() {
-        cpu.mem.write_u8(tls + 0x20 + i as u32, b).unwrap();
+        cpu.mem.write_u8(tls + 0x20 + i as u64, b).unwrap();
     }
     run_ipc_request(cpu, handle);
 }
@@ -554,7 +570,7 @@ pub fn ipc_request_plain_with_buffer(
 ) {
     let tls = cpu.tls_base();
     for i in (0..0x100u32).step_by(4) {
-        cpu.mem.write_u32(tls + i, 0).unwrap();
+        cpu.mem.write_u32(tls + u64::from(i), 0).unwrap();
     }
     // Send buffers count in bits 23:20, receive buffers in 27:24.
     cpu.mem
@@ -568,7 +584,7 @@ pub fn ipc_request_plain_with_buffer(
     cpu.mem.write_u32(tls + 0x20, 0x4943_4653).unwrap(); // "SFCI"
     cpu.mem.write_u32(tls + 0x28, cmd).unwrap();
     for (i, &b) in payload.iter().enumerate() {
-        cpu.mem.write_u8(tls + 0x30 + i as u32, b).unwrap();
+        cpu.mem.write_u8(tls + 0x30 + i as u64, b).unwrap();
     }
     run_ipc_request(cpu, handle);
 }
@@ -586,7 +602,7 @@ pub fn ipc_request_auto_recv(
     assert!(payload.len() <= 8, "the data words leave room for two");
     let tls = cpu.tls_base();
     for i in (0..0x100u32).step_by(4) {
-        cpu.mem.write_u32(tls + i, 0).unwrap();
+        cpu.mem.write_u32(tls + u64::from(i), 0).unwrap();
     }
     // One receive buffer declared both ways: map-alias count in bits 27:24, a
     // receive-static in bits 13:10 (encoded as 2).
@@ -596,7 +612,7 @@ pub fn ipc_request_auto_recv(
     cpu.mem.write_u32(tls + 0x20, 0x4943_4653).unwrap(); // "SFCI"
     cpu.mem.write_u32(tls + 0x28, cmd).unwrap();
     for (i, &b) in payload.iter().enumerate() {
-        cpu.mem.write_u8(tls + 0x30 + i as u32, b).unwrap();
+        cpu.mem.write_u8(tls + 0x30 + i as u64, b).unwrap();
     }
     // The receive-static sits past the data words, as { address, size:16 }.
     cpu.mem.write_u32(tls + 0x38, buf).unwrap();
@@ -784,7 +800,7 @@ impl AudrenUpdate {
     /// Send it as `RequestUpdateAudioRenderer` (input, then reply, as map-alias buffers).
     pub fn send(&self, cpu: &mut Cpu, renderer: u64, at: u32, out: u32, out_len: u32) {
         for (i, &b) in self.data.iter().enumerate() {
-            cpu.mem.write_u8(at + i as u32, b).unwrap();
+            cpu.mem.write_u8(u64::from(at + i as u32), b).unwrap();
         }
         let send = (at, self.data.len() as u32);
         ipc_request_plain_with_both_buffers(cpu, renderer, 10, send, (out, out_len), &[]);
@@ -843,7 +859,7 @@ pub fn ipc_request_plain_with_both_buffers(
 ) {
     let tls = cpu.tls_base();
     for i in (0..0x100u32).step_by(4) {
-        cpu.mem.write_u32(tls + i, 0).unwrap();
+        cpu.mem.write_u32(tls + u64::from(i), 0).unwrap();
     }
     // Send buffers count in bits 23:20, receive buffers in 27:24.
     cpu.mem.write_u32(tls, 4 | (1 << 20) | (1 << 24)).unwrap();
@@ -858,7 +874,7 @@ pub fn ipc_request_plain_with_both_buffers(
     cpu.mem.write_u32(tls + 0x20, 0x4943_4653).unwrap(); // "SFCI"
     cpu.mem.write_u32(tls + 0x28, cmd).unwrap();
     for (i, &b) in payload.iter().enumerate() {
-        cpu.mem.write_u8(tls + 0x30 + i as u32, b).unwrap();
+        cpu.mem.write_u8(tls + 0x30 + i as u64, b).unwrap();
     }
     run_ipc_request(cpu, handle);
 }
@@ -889,7 +905,9 @@ pub fn binder_parcel(body: &[u8]) -> Vec<u8> {
 pub fn reset_signal(cpu: &mut Cpu, handle: u32) -> u64 {
     cpu.set_reg(0, u64::from(handle));
     let pc = cpu.get_pc();
-    cpu.mem.map(pc, &svc(0x17).to_le_bytes()).unwrap();
+    cpu.mem
+        .map(u64::from(pc), &svc(0x17).to_le_bytes())
+        .unwrap();
     cpu.run(1).unwrap();
     cpu.set_pc(pc);
     cpu.read_x(0)
@@ -951,7 +969,7 @@ pub fn ldr_ro_request(cpu: &mut Cpu, handle: u64, cmd: u32, args: &[u64]) {
     let data = cpu.tls_base() + 0x20;
     cpu.mem.write_u64(data, 0).unwrap();
     for (i, &arg) in args.iter().enumerate() {
-        cpu.mem.write_u64(data + 8 + 8 * i as u32, arg).unwrap();
+        cpu.mem.write_u64(data + 8 + 8 * i as u64, arg).unwrap();
     }
     run_ipc_request(cpu, handle);
 }

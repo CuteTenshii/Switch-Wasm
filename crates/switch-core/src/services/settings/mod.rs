@@ -661,7 +661,7 @@ const ALARM_SETTING_ID: usize = 0;
 const ALARM_PARAMETER_MAX: u32 = 0x400;
 
 impl Cpu {
-    pub(crate) fn set_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn set_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         // Control requests first: `set` has its own command 3, which collided
         // with `QueryPointerBufferSize`.
@@ -708,8 +708,10 @@ impl Cpu {
                     if addr != 0 {
                         written = (size as usize / 8).min(available);
                         for index in 0..written {
-                            self.mem
-                                .write_u64(addr.wrapping_add((index * 8) as u32), code(index))?;
+                            self.mem.write_u64(
+                                addr.wrapping_add(u64::from((index * 8) as u32)),
+                                code(index),
+                            )?;
                         }
                     }
                 }

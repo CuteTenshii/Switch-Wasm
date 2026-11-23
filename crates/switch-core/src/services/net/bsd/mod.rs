@@ -289,7 +289,7 @@ const BSD_MAX_OPTION: u32 = 16;
 impl Cpu {
     /// `bsd:u`/`bsd:s`, the socket service. The only peer is this console: loopback
     /// connections work, everything else is refused immediately. Errnos are Linux's.
-    pub(crate) fn bsd_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn bsd_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
@@ -302,8 +302,11 @@ impl Cpu {
             };
         }
         let data = self.ipc_request_data(tls);
-        let word =
-            |cpu: &Cpu, index: u32| cpu.mem.read_u32(data.wrapping_add(index * 4)).unwrap_or(0);
+        let word = |cpu: &Cpu, index: u32| {
+            cpu.mem
+                .read_u32(data.wrapping_add(u64::from(index * 4)))
+                .unwrap_or(0)
+        };
         match cmd_id {
             // RegisterClient(BsdInitConfig, pid, tmem_size, tmem) -> u64, and
             // RegisterClientShared, the same without the transfer memory.
@@ -379,13 +382,22 @@ impl Cpu {
                 ) {
                     // struct pollfd { s32 fd; s16 events; s16 revents; }
                     for offset in (0..src_size.min(dst_size)).step_by(8) {
-                        let fd = self.mem.read_u32(src.wrapping_add(offset)).unwrap_or(0);
-                        let events = self.mem.read_u16(src.wrapping_add(offset + 4)).unwrap_or(0);
+                        let fd = self
+                            .mem
+                            .read_u32(src.wrapping_add(u64::from(offset)))
+                            .unwrap_or(0);
+                        let events = self
+                            .mem
+                            .read_u16(src.wrapping_add(u64::from(offset + 4)))
+                            .unwrap_or(0);
                         let revents = self.bsd_poll_revents(fd as i32, events);
                         ready += u32::from(revents != 0);
-                        self.mem.write_u32(dst.wrapping_add(offset), fd)?;
-                        self.mem.write_u16(dst.wrapping_add(offset + 4), events)?;
-                        self.mem.write_u16(dst.wrapping_add(offset + 6), revents)?;
+                        self.mem
+                            .write_u32(dst.wrapping_add(u64::from(offset)), fd)?;
+                        self.mem
+                            .write_u16(dst.wrapping_add(u64::from(offset + 4)), events)?;
+                        self.mem
+                            .write_u16(dst.wrapping_add(u64::from(offset + 6)), revents)?;
                     }
                 }
                 if ready == 0 {
@@ -525,7 +537,8 @@ impl Cpu {
                 if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
                     if size as usize >= value.len() {
                         for (offset, &byte) in value.iter().enumerate() {
-                            self.mem.write_u8(addr.wrapping_add(offset as u32), byte)?;
+                            self.mem
+                                .write_u8(addr.wrapping_add(u64::from(offset as u32)), byte)?;
                         }
                         written = value.len() as u32;
                     }
@@ -685,7 +698,7 @@ impl Cpu {
     }
 
     /// Reply `{ s32 ret, s32 errno }`: `ret` is -1 on failure, `errno` 0 on success.
-    fn bsd_reply(&mut self, tls: u32, ret: i32, errno: i32) -> Result<()> {
+    fn bsd_reply(&mut self, tls: u64, ret: i32, errno: i32) -> Result<()> {
         let mut raw = [0u8; 8];
         raw[..4].copy_from_slice(&ret.to_le_bytes());
         raw[4..].copy_from_slice(&errno.to_le_bytes());
@@ -703,7 +716,7 @@ impl Cpu {
     }
 
     /// Reply with a third word: bytes written into the caller's output buffer.
-    fn bsd_reply_len(&mut self, tls: u32, ret: i32, errno: i32, len: u32) -> Result<()> {
+    fn bsd_reply_len(&mut self, tls: u64, ret: i32, errno: i32, len: u32) -> Result<()> {
         let mut raw = [0u8; 12];
         raw[..4].copy_from_slice(&ret.to_le_bytes());
         raw[4..8].copy_from_slice(&errno.to_le_bytes());
@@ -761,7 +774,7 @@ impl Cpu {
 
     /// Put an address in the caller's `index`-th output buffer, returning how much fitted.
     /// No buffer is a length of zero.
-    fn bsd_write_address(&mut self, tls: u32, index: u32, address: &[u8]) -> Result<u32> {
+    fn bsd_write_address(&mut self, tls: u64, index: u32, address: &[u8]) -> Result<u32> {
         let Some((addr, size)) = self.ipc_output_buffer(tls, index) else {
             return Ok(0);
         };
@@ -770,7 +783,8 @@ impl Cpu {
         }
         let mut written = 0;
         for (offset, &byte) in address.iter().take(size as usize).enumerate() {
-            self.mem.write_u8(addr.wrapping_add(offset as u32), byte)?;
+            self.mem
+                .write_u8(addr.wrapping_add(u64::from(offset as u32)), byte)?;
             written = offset as u32 + 1;
         }
         Ok(written)
@@ -825,7 +839,7 @@ impl Cpu {
 
     /// `Connect(fd, sockaddr)`. Completes immediately to a listener of this process;
     /// anything else is `ECONNREFUSED`.
-    fn bsd_connect(&mut self, tls: u32, fd: i32, address: &[u8]) -> Result<()> {
+    fn bsd_connect(&mut self, tls: u64, fd: i32, address: &[u8]) -> Result<()> {
         let (domain, kind) = match self.process().bsd_sockets.get(&fd) {
             None => return self.bsd_reply(tls, -1, BSD_EBADF),
             Some(socket) if socket.peer.is_some() => return self.bsd_reply(tls, -1, BSD_EISCONN),
@@ -878,7 +892,7 @@ impl Cpu {
     }
 
     /// `Send`/`SendTo`/`Write`, from the request's buffers. See [`Cpu::bsd_send_bytes`].
-    fn bsd_send(&mut self, tls: u32, fd: i32, flags: u32, destination: Option<u32>) -> Result<()> {
+    fn bsd_send(&mut self, tls: u64, fd: i32, flags: u32, destination: Option<u32>) -> Result<()> {
         let data = match self.ipc_input_buffer(tls, 0) {
             Some((addr, size)) => self.read_bytes(addr, size),
             None => Vec::new(),
@@ -957,7 +971,7 @@ impl Cpu {
     /// `Recv`/`RecvFrom`/`Read`, with the sender's address when `address_buffer` names one.
     fn bsd_receive(
         &mut self,
-        tls: u32,
+        tls: u64,
         fd: i32,
         flags: u32,
         address_buffer: Option<u32>,
@@ -970,7 +984,8 @@ impl Cpu {
         };
         self.bsd_end_wait(fd);
         for (offset, &byte) in receipt.data.iter().enumerate() {
-            self.mem.write_u8(addr.wrapping_add(offset as u32), byte)?;
+            self.mem
+                .write_u8(addr.wrapping_add(u64::from(offset as u32)), byte)?;
         }
         let Some(index) = address_buffer else {
             return self.bsd_reply(tls, receipt.ret, receipt.errno);
@@ -1277,7 +1292,7 @@ impl Cpu {
 
     /// One of `select`'s descriptor sets: read it, write back the ready ones, count them.
     /// Descriptor n is bit n of the byte array for both 32- and 64-bit `fd_mask`.
-    fn bsd_select_set(&mut self, tls: u32, index: u32, nfds: u32) -> Result<i32> {
+    fn bsd_select_set(&mut self, tls: u64, index: u32, nfds: u32) -> Result<i32> {
         let Some((dst, dst_size)) = self.ipc_output_buffer(tls, index) else {
             return Ok(0);
         };
@@ -1286,7 +1301,7 @@ impl Cpu {
             .map(|(addr, size)| self.read_bytes(addr, size))
             .unwrap_or_default();
         for offset in 0..dst_size {
-            self.mem.write_u8(dst.wrapping_add(offset), 0)?;
+            self.mem.write_u8(dst.wrapping_add(u64::from(offset)), 0)?;
         }
         let mut ready = 0;
         for fd in 0..nfds {
@@ -1303,7 +1318,7 @@ impl Cpu {
             if !is_ready {
                 continue;
             }
-            let at = dst.wrapping_add(byte as u32);
+            let at = dst.wrapping_add(u64::from(byte as u32));
             let already = self.mem.read_u8(at)?;
             self.mem.write_u8(at, already | bit)?;
             ready += 1;

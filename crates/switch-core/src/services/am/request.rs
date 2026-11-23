@@ -6,7 +6,7 @@ impl Cpu {
     /// `appletOE`/`appletAE` and the sub-interfaces they hand out.
     pub(crate) fn applet_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -306,7 +306,7 @@ impl Cpu {
                     let at = self.ipc_request_data(tls);
                     let mut user = [0u8; 16];
                     for (index, byte) in user.iter_mut().enumerate() {
-                        *byte = self.mem.read_u8(at.wrapping_add(index as u32))?;
+                        *byte = self.mem.read_u8(at.wrapping_add(index as u64))?;
                     }
                     if user != [0; 16] {
                         let id = self.program_id();
@@ -533,12 +533,12 @@ impl Cpu {
                 // Get*CaptureImageEx: a black 1280x720 RGBA8888 image into the out buffer.
                 Some(5) | Some(6) | Some(7) => {
                     if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
-                        let page = crate::mem::PAGE_SIZE as u32;
-                        let end = addr.saturating_add(size);
+                        let page = crate::mem::PAGE_SIZE as u64;
+                        let end = addr.saturating_add(u64::from(size));
                         let mut at = addr;
                         while at < end {
                             let run = (page - at % page).min(end - at);
-                            if self.mem.fill_le(at, 1, 0, run).is_err() {
+                            if self.mem.fill_le(at, 1, 0, run as u32).is_err() {
                                 break;
                             }
                             at += run;
@@ -772,7 +772,8 @@ impl Cpu {
                     let count = room.min(1);
                     if count == 1 {
                         for (index, &byte) in info.iter().enumerate() {
-                            self.mem.write_u8(addr.wrapping_add(index as u32), byte)?;
+                            self.mem
+                                .write_u8(addr.wrapping_add(u64::from(index as u32)), byte)?;
                         }
                     }
                     self.write_ipc_response(tls, 0, &[], &(count as i32).to_le_bytes(), &[])
@@ -1130,7 +1131,7 @@ impl Cpu {
                         };
                         let mut bytes = Vec::with_capacity(len as usize);
                         for i in 0..len {
-                            bytes.push(self.mem.read_u8(addr.wrapping_add(i))?);
+                            bytes.push(self.mem.read_u8(addr.wrapping_add(u64::from(i)))?);
                         }
                         let data = self.process_mut().am_storages.entry(storage).or_default();
                         if data.len() < offset + bytes.len() {
@@ -1155,7 +1156,8 @@ impl Cpu {
                                 &[][..]
                             };
                             for (i, &b) in chunk.iter().enumerate() {
-                                self.mem.write_u8(addr.wrapping_add(i as u32), b)?;
+                                self.mem
+                                    .write_u8(addr.wrapping_add(u64::from(i as u32)), b)?;
                             }
                         }
                         self.write_ipc_response(tls, 0, &[], &[], &[])

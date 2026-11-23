@@ -401,7 +401,7 @@ impl Emitter<'_> {
             } => {
                 self.a32_read(rn, pc);
                 self.f.i32_wrap_i64();
-                self.f.local_set(L_ADDR);
+                self.set_addr32();
                 if load {
                     self.load_exclusive_at(rd, size, i);
                 } else {
@@ -971,7 +971,7 @@ impl Emitter<'_> {
         self.f.local_set(L_W);
         self.f.local_get(if a.pre { L_W } else { L_A });
         self.f.i32_wrap_i64();
-        self.f.local_set(L_ADDR);
+        self.set_addr32();
     }
 
     /// A single or extra load or store: the address into `L_ADDR` and the
@@ -1050,7 +1050,7 @@ impl Emitter<'_> {
                 self.f.i64_const(offset);
                 self.f.i64_add();
                 self.f.i32_wrap_i64();
-                self.f.local_set(L_ADDR);
+                self.set_addr32();
                 match (check, a.load) {
                     (true, true) if reg == 15 => self.load_branch_target(at),
                     (false, true) if reg == 15 => {}

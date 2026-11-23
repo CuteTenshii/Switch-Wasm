@@ -589,7 +589,7 @@ impl Cpu {
     /// Pop the front storage an applet pushed out, or 2128-0002 if there is none.
     fn pop_library_applet_storage(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         accessor: u64,
         interactive: bool,
@@ -641,7 +641,7 @@ impl Cpu {
     }
 
     /// Pop the front of a library applet's queue as an `IStorage`, or 2128-0002 if empty.
-    fn pop_applet_storage(&mut self, tls: u32, handle: u64, queue: AppletQueue) -> Result<()> {
+    fn pop_applet_storage(&mut self, tls: u64, handle: u64, queue: AppletQueue) -> Result<()> {
         let data = match queue {
             AppletQueue::InData => self.process_mut().am_in_data.pop_front(),
             AppletQueue::InteractiveInData => self.process_mut().am_interactive_in.pop_front(),

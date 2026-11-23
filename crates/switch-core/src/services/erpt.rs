@@ -248,7 +248,7 @@ impl Cpu {
     /// `erpt:c`, "nn::erpt::sf::IContext", the error-report collector.
     pub(crate) fn erpt_context_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -337,7 +337,7 @@ impl Cpu {
     }
 
     /// Journal the `ContextEntry` array and its field data; returns the categories submitted.
-    fn erpt_submit_context(&mut self, tls: u32, entries: u32, fields: u32) -> Vec<u32> {
+    fn erpt_submit_context(&mut self, tls: u64, entries: u32, fields: u32) -> Vec<u32> {
         let array = match self.ipc_input_buffer(tls, entries) {
             Some((addr, size)) => {
                 let max = ERPT_CONTEXT_ENTRIES_MAX * ERPT_CONTEXT_ENTRY_SIZE as u32;
@@ -372,7 +372,7 @@ impl Cpu {
     }
 
     /// The same for `SubmitMultipleCategoryContext`, unpacked into one entry per category.
-    fn erpt_submit_multiple_context(&mut self, tls: u32) {
+    fn erpt_submit_multiple_context(&mut self, tls: u64) {
         let Some((addr, size)) = self.ipc_input_buffer(tls, 0) else {
             return;
         };
@@ -556,7 +556,7 @@ impl Cpu {
     /// `erpt:r`, "nn::erpt::sf::ISession".
     pub(crate) fn erpt_session_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -587,7 +587,7 @@ impl Cpu {
     /// `IReport` and `IAttachment`, the same commands over two journals.
     fn erpt_reader_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
         attachment: bool,
@@ -725,7 +725,7 @@ impl Cpu {
     }
 
     /// `IManager`: report lists, storage statistics and the new-report event.
-    fn erpt_manager_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    fn erpt_manager_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         match cmd_id {
             // GetReportList(out ReportList, ReportType filter); the count is in the buffer.
             Some(0) => {
@@ -874,18 +874,18 @@ mod tests {
         entry
     }
 
-    fn erpt_submit(cpu: &mut Cpu, buffer: u32, category: u32, marker: u8) {
+    fn erpt_submit(cpu: &mut Cpu, buffer: u64, category: u32, marker: u8) {
         let entry = erpt_context_entry(category, marker);
         write_send_buffer_request(cpu, 0, &[], &[(buffer, entry.len() as u32), (0, 0)]);
         for (index, &byte) in entry.iter().enumerate() {
-            cpu.mem.write_u8(buffer + index as u32, byte).unwrap();
+            cpu.mem.write_u8(buffer + index as u64, byte).unwrap();
         }
         cpu.erpt_context_request(TLS, 9, Some(0)).unwrap();
     }
 
     #[test]
     fn erpt_journals_one_context_record_per_category() {
-        const CONTEXT: u32 = 0x4000;
+        const CONTEXT: u64 = 0x4000;
         let mut cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         cpu.mem.map_zero(CONTEXT, 0x1000).unwrap();
@@ -910,9 +910,9 @@ mod tests {
 
     #[test]
     fn erpt_files_the_journal_as_a_report_and_reads_it_back() {
-        const CONTEXT: u32 = 0x4000;
-        const META: u32 = 0x6000;
-        const OUT: u32 = 0x8000;
+        const CONTEXT: u64 = 0x4000;
+        const META: u64 = 0x6000;
+        const OUT: u64 = 0x8000;
         let mut cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         cpu.mem.map_zero(CONTEXT, 0x1000).unwrap();
@@ -923,9 +923,9 @@ mod tests {
 
         let entry = erpt_context_entry(1, 0x22);
         for (index, &byte) in entry.iter().enumerate() {
-            cpu.mem.write_u8(CONTEXT + index as u32, byte).unwrap();
+            cpu.mem.write_u8(CONTEXT + index as u64, byte).unwrap();
         }
-        for index in 0..super::ERPT_META_SIZE as u32 {
+        for index in 0..super::ERPT_META_SIZE as u64 {
             cpu.mem.write_u8(META + index, 0x7E).unwrap();
         }
         write_send_buffer_request(
@@ -1007,10 +1007,10 @@ mod tests {
 
     #[test]
     fn an_attachment_is_claimed_by_the_report_that_names_it() {
-        const NAME: u32 = 0x4000;
-        const DATA: u32 = 0x5000;
-        const IDS: u32 = 0x6000;
-        const OUT: u32 = 0x8000;
+        const NAME: u64 = 0x4000;
+        const DATA: u64 = 0x5000;
+        const IDS: u64 = 0x6000;
+        const OUT: u64 = 0x8000;
         let mut cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         cpu.mem.map_zero(NAME, 0x1000).unwrap();
@@ -1020,7 +1020,7 @@ mod tests {
         cpu.register_service_handle(9, "erpt:c");
 
         for (index, &byte) in b"log.bin\0".iter().enumerate() {
-            cpu.mem.write_u8(NAME + index as u32, byte).unwrap();
+            cpu.mem.write_u8(NAME + index as u64, byte).unwrap();
         }
         cpu.mem.write_u32(DATA, 0xDEAD_BEEF).unwrap();
         write_send_buffer_request(&mut cpu, 9, &[], &[(NAME, 8), (DATA, 4)]);
@@ -1038,7 +1038,7 @@ mod tests {
         );
 
         for (index, &byte) in id.iter().enumerate() {
-            cpu.mem.write_u8(IDS + index as u32, byte).unwrap();
+            cpu.mem.write_u8(IDS + index as u64, byte).unwrap();
         }
         write_send_buffer_request(
             &mut cpu,

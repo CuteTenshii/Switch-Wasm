@@ -126,6 +126,16 @@ The emulator thread was saturated while retiring tens of millions of instruction
 
 It counted instructions and jumped over idle time, so a busy title's vsync cost 17M core-0 instructions whatever it needed, and an idle one ran ahead (appstore produced 152 s of audio in about 60 s and the page dropped the rest). Pacing to real time ([multicore.md](multicore.md)) keeps audio level (1.0 s produced per 1.0 s taken), and A Short Hike drew about 690 frames in 140 s against 325. Waiting out an idle jump in full hung A Short Hike at 349M instructions: its threads hold timeouts of over a thousand hours, and nothing serves the other cores during the wait.
 
+## A 39-bit guest address space (November 2026)
+
+Guest addresses were `u32`, so every region shared 4 GiB, and titles that reserve tens of GiB of address space needed their startup rewritten at load, one instruction pattern per title (the SDK's Vamm arena, Paper Mario's 62 GiB, Tears of the Kingdom's heap beside Vamm). Pokémon Legends: Z-A's 12 GiB `StandardAllocator::Initialize` matched no pattern and panicked (162-0001). Addresses are now `u64` over 39 bits, with a console's heap and alias regions above 4 GiB, and the patches are gone.
+
+- **A flat table for 39 bits would be 512 MiB on wasm32**, so the page table has two levels (2 MiB blocks), with the watch bitmaps inside the blocks. Untouched entries share an empty block, so emitted code pays one load more and no branch.
+- **Truncation hid in many places**: a 64-bit wave-buffer address read as `u32` (audren), audio-out buffers, nvmap and `ldr:ro` rejecting addresses above 4 GiB, IPC descriptors read as their low 32 bits, `ThreadType` pointers (thread names read as garbage once threads lived in the heap). None showed while everything fit below 4 GiB.
+- **`svcQueryMemory` past the end of the space** answered one page at a time; with a 4 GiB space the walk wrapped almost at once, with 39 bits retail `rtld` walked for billions of instructions. Horizon answers one `Inaccessible` region to 2^64.
+- **Video engines take 32-bit device addresses** from `MAP_BUFFER`, so buffers above 4 GiB get room in a window a 64-bit process leaves unused, translated back when a method names them.
+- The emitter selftest classified a faulting `ret` (register seeds put `x30` above 4 GiB) as must-hand-back-at-zero; the emitted block rightly runs the instruction under test first, so the harness learned an `upto` mode.
+
 ## Tuning the IR executor
 
 Emitted regions sit on top of the IR executor (`exec_block`/`exec_op`), which still runs every cold or refused block. About seventy experiments on it (September 2026, `wasm_bench` under V8, hbmenu around 290M instructions/s) came down to this.

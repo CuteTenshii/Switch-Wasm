@@ -162,14 +162,16 @@ fn simd_zip1_interleave() {
         nop(),
     ];
     for i in 0..16u32 {
-        cpu.mem.write_u8(0x3000 + i, i as u8).unwrap();
-        cpu.mem.write_u8(0x3010 + i, (0x10 + i) as u8).unwrap();
+        cpu.mem.write_u8(u64::from(0x3000 + i), i as u8).unwrap();
+        cpu.mem
+            .write_u8(u64::from(0x3010 + i), (0x10 + i) as u8)
+            .unwrap();
     }
     let cpu = run_program(cpu, 0x1000, &code);
     for i in 0..8u32 {
-        assert_eq!(cpu.mem.read_u8(0x3020 + 2 * i).unwrap(), i as u8);
+        assert_eq!(cpu.mem.read_u8(u64::from(0x3020 + 2 * i)).unwrap(), i as u8);
         assert_eq!(
-            cpu.mem.read_u8(0x3020 + 2 * i + 1).unwrap(),
+            cpu.mem.read_u8(u64::from(0x3020 + 2 * i + 1)).unwrap(),
             0x10u8 + i as u8
         );
     }
@@ -184,17 +186,23 @@ fn simd_table_lookup_gathers_bytes_and_zeroes_misses() {
     cpu.mem.map_zero(0x3000, 0x100).unwrap();
     // Two table registers: v0 = 0x10..0x1f, v1 = 0x20..0x2f.
     for i in 0..16u32 {
-        cpu.mem.write_u8(0x3000 + i, 0x10 + i as u8).unwrap();
-        cpu.mem.write_u8(0x3010 + i, 0x20 + i as u8).unwrap();
+        cpu.mem
+            .write_u8(u64::from(0x3000 + i), 0x10 + i as u8)
+            .unwrap();
+        cpu.mem
+            .write_u8(u64::from(0x3010 + i), 0x20 + i as u8)
+            .unwrap();
     }
     // v2: the low half reverses the first eight table bytes; the high half (0x40) is out of range.
     for i in 0..8u32 {
-        cpu.mem.write_u8(0x3020 + i, 7 - i as u8).unwrap();
-        cpu.mem.write_u8(0x3028 + i, 0x40).unwrap();
+        cpu.mem
+            .write_u8(u64::from(0x3020 + i), 7 - i as u8)
+            .unwrap();
+        cpu.mem.write_u8(u64::from(0x3028 + i), 0x40).unwrap();
     }
     // v3 starts as 0xaa so TBX keeping a byte differs from TBL zeroing it.
     for i in 0..16u32 {
-        cpu.mem.write_u8(0x3030 + i, 0xaa).unwrap();
+        cpu.mem.write_u8(u64::from(0x3030 + i), 0xaa).unwrap();
     }
     let code = [
         ldr_q(0, 0x00),
@@ -212,15 +220,24 @@ fn simd_table_lookup_gathers_bytes_and_zeroes_misses() {
     let cpu = run_program(cpu, 0x1000, &code);
     for i in 0..8u32 {
         // Indices in range gather from the table...
-        assert_eq!(cpu.mem.read_u8(0x3040 + i).unwrap(), 0x17 - i as u8);
-        assert_eq!(cpu.mem.read_u8(0x3050 + i).unwrap(), 0x17 - i as u8);
-        assert_eq!(cpu.mem.read_u8(0x3060 + i).unwrap(), 0x17 - i as u8);
+        assert_eq!(
+            cpu.mem.read_u8(u64::from(0x3040 + i)).unwrap(),
+            0x17 - i as u8
+        );
+        assert_eq!(
+            cpu.mem.read_u8(u64::from(0x3050 + i)).unwrap(),
+            0x17 - i as u8
+        );
+        assert_eq!(
+            cpu.mem.read_u8(u64::from(0x3060 + i)).unwrap(),
+            0x17 - i as u8
+        );
         // ...and out-of-range ones read zero from TBL, but leave TBX's
         // destination byte as it was.
-        assert_eq!(cpu.mem.read_u8(0x3048 + i).unwrap(), 0);
-        assert_eq!(cpu.mem.read_u8(0x3058 + i).unwrap(), 0xaa);
+        assert_eq!(cpu.mem.read_u8(u64::from(0x3048 + i)).unwrap(), 0);
+        assert_eq!(cpu.mem.read_u8(u64::from(0x3058 + i)).unwrap(), 0xaa);
         // The 8-byte form zeroes the top half of the destination.
-        assert_eq!(cpu.mem.read_u8(0x3068 + i).unwrap(), 0);
+        assert_eq!(cpu.mem.read_u8(u64::from(0x3068 + i)).unwrap(), 0);
     }
 }
 
@@ -273,13 +290,17 @@ fn simd_table_lookup_spans_several_registers() {
     cpu.set_reg(0, 0x3000);
     cpu.mem.map_zero(0x3000, 0x100).unwrap();
     for i in 0..16u32 {
-        cpu.mem.write_u8(0x3000 + i, 0x10 + i as u8).unwrap();
-        cpu.mem.write_u8(0x3010 + i, 0x20 + i as u8).unwrap();
+        cpu.mem
+            .write_u8(u64::from(0x3000 + i), 0x10 + i as u8)
+            .unwrap();
+        cpu.mem
+            .write_u8(u64::from(0x3010 + i), 0x20 + i as u8)
+            .unwrap();
     }
     // A {v0, v1} table is 32 bytes, so 31 is the last index that hits and 32
     // is the first that misses.
     for (i, idx) in [0u8, 15, 16, 31, 32].into_iter().enumerate() {
-        cpu.mem.write_u8(0x3020 + i as u32, idx).unwrap();
+        cpu.mem.write_u8(u64::from(0x3020 + i as u32), idx).unwrap();
     }
     let code = [
         ldr_q(0, 0x00),
@@ -304,7 +325,9 @@ fn simd_across_lanes_reduce() {
     cpu.set_reg(0, 0x3000);
     cpu.mem.map_zero(0x3000, 0x20).unwrap();
     for (i, v) in [3u32, 7, 2, 0xFFFF_FFFF].into_iter().enumerate() {
-        cpu.mem.write_u32(0x3000 + 4 * i as u32, v).unwrap();
+        cpu.mem
+            .write_u32(u64::from(0x3000 + 4 * i as u32), v)
+            .unwrap();
     }
     // smaxv s1, v0.4s = 0x4eb0a801 ; sminv s2, v0.4s = 0x4eb1a802
     let smaxv = across_lanes(1, 0, 0b10, 0b01010, 1, 0);
@@ -326,7 +349,9 @@ fn simd_across_lanes_reduce() {
     cpu.set_reg(0, 0x3000);
     cpu.mem.map_zero(0x3000, 0x20).unwrap();
     for (i, v) in [1u32, 2, 3, 4].into_iter().enumerate() {
-        cpu.mem.write_u32(0x3000 + 4 * i as u32, v).unwrap();
+        cpu.mem
+            .write_u32(u64::from(0x3000 + 4 * i as u32), v)
+            .unwrap();
     }
     let uaddlv = across_lanes(1, 1, 0b10, 0b00011, 5, 0);
     let code = [ldr_q(0, 0), uaddlv, umov_d0(6, 5), nop()];

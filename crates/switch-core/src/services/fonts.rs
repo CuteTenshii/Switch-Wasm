@@ -159,7 +159,7 @@ impl Cpu {
     }
 
     /// Copy the shared fonts into pl's shared memory at `addr`.
-    pub(crate) fn write_shared_font(&mut self, addr: u32) {
+    pub(crate) fn write_shared_font(&mut self, addr: u64) {
         self.build_shared_fonts();
         let image = std::mem::take(&mut self.pl_shmem_image);
         let _ = self.mem.map(addr, &image);

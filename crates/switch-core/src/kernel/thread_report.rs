@@ -173,14 +173,13 @@ impl Cpu {
     /// The name `nn::os` gave thread `index`: found via the first word in its
     /// `ThreadType` that points back into the struct at readable text.
     fn thread_name(&self, index: usize) -> Option<String> {
-        let base = u32::try_from(self.process().threads.get(index)?.arg).ok()?;
+        let base = self.process().threads.get(index)?.arg;
         if base == 0 {
             return None;
         }
-        let end = base.checked_add(THREAD_TYPE_SIZE)?;
+        let end = base.checked_add(u64::from(THREAD_TYPE_SIZE))?;
         (0..THREAD_TYPE_SIZE).step_by(8).find_map(|offset| {
-            let word = self.mem.read_u64(base + offset).ok()?;
-            let target = u32::try_from(word).ok()?;
+            let target = self.mem.read_u64(base + u64::from(offset)).ok()?;
             if !(base..end).contains(&target) {
                 return None;
             }
@@ -201,10 +200,10 @@ impl Cpu {
     }
 
     /// Printable NUL-terminated text at `at` that could be a name.
-    fn read_name(&self, at: u32) -> Option<String> {
+    fn read_name(&self, at: u64) -> Option<String> {
         let mut name = String::new();
         for i in 0..NAME_MAX {
-            match self.mem.read_u8(at.checked_add(i)?).ok()? {
+            match self.mem.read_u8(at.checked_add(u64::from(i))?).ok()? {
                 0 => break,
                 byte @ 0x20..=0x7E => name.push(char::from(byte)),
                 _ => return None,
@@ -254,11 +253,11 @@ impl Cpu {
             ThreadState::Sleeping { deadline } => format!("asleep, wakes in {}", until(deadline)),
             ThreadState::WaitEvent { .. } => {
                 // Parked on `svcWaitSynchronization`: handles are in its saved registers.
-                let list = thread.regs[1] as u32;
+                let list = thread.regs[1];
                 let count = (thread.regs[2] as u32).min(0x40);
                 let waits: Vec<String> = (0..count)
                     .map(|i| {
-                        let at = list.wrapping_add(i * 4);
+                        let at = list.wrapping_add(u64::from(i) * 4);
                         let handle = u64::from(self.mem.read_u32(at).unwrap_or(0));
                         match (self.event_name(handle), self.service_name(handle)) {
                             (Some(name), _) => format!("{name} ({handle:#x})"),
@@ -402,20 +401,26 @@ mod tests {
         cpu.mem.write_u32(0x0800_0100, BL).unwrap();
         cpu.mem.write_u32(0x0800_0200, BLR_X8).unwrap();
         cpu.mem.write_u32(0x0800_0300, NOP).unwrap();
-        cpu.mem.map_zero(STACK - 0x1000, 0x2000).unwrap();
+        cpu.mem.map_zero(u64::from(STACK - 0x1000), 0x2000).unwrap();
         // Two good frames, then one whose return address follows a nop.
         cpu.mem
-            .write_u64(STACK + 0x10, u64::from(STACK + 0x40))
+            .write_u64(u64::from(STACK + 0x10), u64::from(STACK + 0x40))
             .unwrap();
-        cpu.mem.write_u64(STACK + 0x18, 0x0800_0204).unwrap();
         cpu.mem
-            .write_u64(STACK + 0x40, u64::from(STACK + 0x80))
+            .write_u64(u64::from(STACK + 0x18), 0x0800_0204)
             .unwrap();
-        cpu.mem.write_u64(STACK + 0x48, 0x0800_0104).unwrap();
         cpu.mem
-            .write_u64(STACK + 0x80, u64::from(STACK + 0xC0))
+            .write_u64(u64::from(STACK + 0x40), u64::from(STACK + 0x80))
             .unwrap();
-        cpu.mem.write_u64(STACK + 0x88, 0x0800_0304).unwrap();
+        cpu.mem
+            .write_u64(u64::from(STACK + 0x48), 0x0800_0104)
+            .unwrap();
+        cpu.mem
+            .write_u64(u64::from(STACK + 0x80), u64::from(STACK + 0xC0))
+            .unwrap();
+        cpu.mem
+            .write_u64(u64::from(STACK + 0x88), 0x0800_0304)
+            .unwrap();
 
         cpu.regs[SP_SLOT] = u64::from(STACK);
         cpu.regs[29] = u64::from(STACK + 0x10);
@@ -469,20 +474,24 @@ mod tests {
     fn a_thread_is_named_from_the_pointer_its_thread_type_keeps_to_itself() {
         const TYPE: u32 = 0x3096_5000;
         let mut cpu = Cpu::new();
-        cpu.mem.map_zero(TYPE, 0x1000).unwrap();
+        cpu.mem.map_zero(u64::from(TYPE), 0x1000).unwrap();
         // A pointer out of the struct, at text, before the real one: skipped.
         cpu.mem
-            .write_u64(TYPE + 0x08, u64::from(TYPE + 0x400))
+            .write_u64(u64::from(TYPE + 0x08), u64::from(TYPE + 0x400))
             .unwrap();
         for (i, &b) in b"NotMine\0".iter().enumerate() {
-            cpu.mem.write_u8(TYPE + 0x400 + i as u32, b).unwrap();
+            cpu.mem
+                .write_u8(u64::from(TYPE + 0x400 + i as u32), b)
+                .unwrap();
         }
         // The name buffer, and the pointer to it.
         for (i, &b) in b"LoadingThread\0".iter().enumerate() {
-            cpu.mem.write_u8(TYPE + 0x188 + i as u32, b).unwrap();
+            cpu.mem
+                .write_u8(u64::from(TYPE + 0x188 + i as u32), b)
+                .unwrap();
         }
         cpu.mem
-            .write_u64(TYPE + 0x1A8, u64::from(TYPE + 0x188))
+            .write_u64(u64::from(TYPE + 0x1A8), u64::from(TYPE + 0x188))
             .unwrap();
 
         let handle = cpu.create_thread(0x0800_0100, u64::from(TYPE), 0x1000_0000, 44, 0);
@@ -493,7 +502,9 @@ mod tests {
         // An SDK default name prints its function's address instead.
         cpu.record_module_name(0x0800_4000, 0x0900_0000, "main");
         for (i, &b) in b"Thread_0x00000000086563A8\0".iter().enumerate() {
-            cpu.mem.write_u8(TYPE + 0x188 + i as u32, b).unwrap();
+            cpu.mem
+                .write_u8(u64::from(TYPE + 0x188 + i as u32), b)
+                .unwrap();
         }
         let (threads, _, _) = cpu.take_thread_report();
         assert_eq!(
@@ -502,7 +513,7 @@ mod tests {
         );
 
         // An inward pointer to non-text yields no name.
-        cpu.mem.write_u8(TYPE + 0x188, 0x01).unwrap();
+        cpu.mem.write_u8(u64::from(TYPE + 0x188), 0x01).unwrap();
         let (threads, _, _) = cpu.take_thread_report();
         assert_eq!(threads[1].name, None);
     }

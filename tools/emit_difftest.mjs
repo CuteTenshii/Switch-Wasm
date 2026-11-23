@@ -23,7 +23,8 @@ for (let at = 0; at < raw.length;) {
 
 const HEADER_KEYS = new Set([
   'regs_at', 'nzcv_at', 'read_watch_lo_at', 'read_watch_hi_at', 'watch_lo_at',
-  'watch_hi_at', 'watched_at', 'pages_at', 'table_at', 'bitmap_at', 'slots',
+  'watch_hi_at', 'blocks_at', 'block_pages', 'block_watched', 'empty_block_at',
+  'window_block_at', 'table_at', 'slots',
   'code_at', 'read_watch', 'watch', 'watched_page', 'wasm_pages', 'pc_at',
   'discard_slot', 'vregs_at',
   'fpsr_at', 'fpcr_at', 'fpscr_nzcv_at', 'exclusive_at', 'tpidr_at', 'tpidr_rw_at', 'tpidr_values', 'origin_at',
@@ -58,8 +59,11 @@ const RW_LO_AT = need('read_watch_lo_at');
 const RW_HI_AT = need('read_watch_hi_at');
 const WATCH_LO_AT = need('watch_lo_at');
 const WATCH_HI_AT = need('watch_hi_at');
-const WATCHED_AT = need('watched_at');
-const PAGES_AT = need('pages_at');
+const BLOCKS_AT = need('blocks_at');
+const BLOCK_PAGES = need('block_pages');
+const BLOCK_WATCHED = need('block_watched');
+const EMPTY_BLOCK_AT = need('empty_block_at');
+const WINDOW_BLOCK_AT = need('window_block_at');
 const VREGS = need('vregs_at');
 // The harnesses' `vreg_seed`.
 const M64 = (1n << 64n) - 1n;
@@ -114,12 +118,27 @@ const NO_PC = 0xdead0000;
 const DISCARD = header.discard_slot ? header.discard_slot[0] : -1;
 const TABLE_AT = need('table_at');
 const PAGE_BYTES = 4096;
+// The two-level table of `crate::mem::Memory`: 2^18 block entries, 512 pages a block.
+const BLOCK_COUNT = 1 << 18;
+const BLOCK_SHIFT = 21;
+const pageInBlock = (guest) => (guest >>> 12) & 511;
 
 const memory = new WebAssembly.Memory({ initial: need('wasm_pages') });
 const view = new DataView(memory.buffer);
 const bytes = new Uint8Array(memory.buffer);
 
-view.setUint32(PAGES_AT, TABLE_AT, true);
+view.setUint32(BLOCKS_AT, TABLE_AT, true);
+// An entry is never null: untouched blocks are one empty block with no pages and no bits.
+for (let i = 0; i < BLOCK_COUNT; i++) view.setUint32(TABLE_AT + i * 4, EMPTY_BLOCK_AT, true);
+// Every guest page a manifest names is in the first block, the one the window is in.
+const windowBlock = (guest) => {
+  if (Math.floor(guest / 2 ** BLOCK_SHIFT) !== 0) {
+    console.error(`guest ${guest.toString(16)} is past the window's block`);
+    process.exit(1);
+  }
+  view.setUint32(TABLE_AT, WINDOW_BLOCK_AT, true);
+  return WINDOW_BLOCK_AT;
+};
 if (header.tpidr_values) {
   const [tpidr, tpidrRw] = header.tpidr_values;
   view.setBigUint64(header.tpidr_at[0], BigInt(tpidr), true);
@@ -127,21 +146,17 @@ if (header.tpidr_values) {
 }
 // `(1, 0)` disarms a watchpoint.
 const [readLo, readHi] = header.read_watch ?? [1, 0];
-view.setUint32(RW_LO_AT, readLo, true);
-view.setUint32(RW_HI_AT, readHi, true);
+view.setBigUint64(RW_LO_AT, BigInt(readLo), true);
+view.setBigUint64(RW_HI_AT, BigInt(readHi), true);
 const [writeLo, writeHi] = header.watch ?? [1, 0];
-view.setUint32(WATCH_LO_AT, writeLo, true);
-view.setUint32(WATCH_HI_AT, writeHi, true);
+view.setBigUint64(WATCH_LO_AT, BigInt(writeLo), true);
+view.setBigUint64(WATCH_HI_AT, BigInt(writeHi), true);
 
-// Pages whose contents something has cached or that are write-protected; null when none are.
-if (header.watched_page) {
-  const bitmap = need('bitmap_at');
-  view.setUint32(WATCHED_AT, bitmap, true);
-  for (const guest of header.watched_page) {
-    const idx = guest >>> 12;
-    const at = bitmap + (idx >>> 6) * 8;
-    view.setBigUint64(at, view.getBigUint64(at, true) | (1n << BigInt(idx & 63)), true);
-  }
+// Pages whose contents something has cached or that are write-protected.
+for (const guest of header.watched_page ?? []) {
+  const idx = pageInBlock(guest);
+  const at = windowBlock(guest) + BLOCK_WATCHED + (idx >>> 6) * 8;
+  view.setBigUint64(at, view.getBigUint64(at, true) | (1n << BigInt(idx & 63)), true);
 }
 
 const codeAt = header.code_at ? header.code_at[0] : -1;
@@ -153,7 +168,7 @@ if (pages.length) {
     process.exit(1);
   }
   for (const [guest, wasm] of pages) {
-    view.setUint32(TABLE_AT + (guest >>> 12) * 4, wasm, true);
+    view.setUint32(windowBlock(guest) + BLOCK_PAGES + pageInBlock(guest) * 4, wasm, true);
   }
 }
 
@@ -245,10 +260,10 @@ for (const line of manifest.slice(first)) {
     view.setBigUint64(need('tpidr_rw_at'), tpidrRw, true);
   }
   if (excl && EXCL_AT >= 0) {
-    view.setUint32(EXCL_AT, Number(excl[0]), true);
-    view.setUint32(EXCL_AT + 4, Number(excl[1]), true);
-    view.setBigUint64(EXCL_AT + 8, excl[2], true);
-    view.setBigUint64(EXCL_AT + 16, excl[3], true);
+    view.setBigUint64(EXCL_AT, excl[0], true);
+    view.setUint32(EXCL_AT + 8, Number(excl[1]), true);
+    view.setBigUint64(EXCL_AT + 16, excl[2], true);
+    view.setBigUint64(EXCL_AT + 24, excl[3], true);
   }
   if (PC_AT >= 0) view.setUint32(PC_AT, NO_PC, true);
 
@@ -267,11 +282,16 @@ for (const line of manifest.slice(first)) {
   // Allowed retired counts: `exact` all, `maybe` all or none, `none` none (the
   // interpreter's watchpoint fired). `left:<target>` retired all with `LEFT`
   // set and the target in the pc; `maybe-left:<target>` that or none.
+  // `upto:<n>` retired the first n and handed back a terminator the interpreter
+  // faults on; `maybe-upto:<n>` that or none.
   const leftMode = /^(maybe-)?left:(.+)$/.exec(mode);
   const leftTo = leftMode ? Number(leftMode[2]) : null;
+  const uptoMode = /^(maybe-)?upto:(\d+)$/.exec(mode);
   const allowed = leftMode
     ? (leftMode[1] ? [Number(ops) | LEFT, 0] : [Number(ops) | LEFT])
-    : { exact: [Number(ops)], maybe: [Number(ops), 0], none: [0] }[mode];
+    : uptoMode
+      ? (uptoMode[1] ? [Number(uptoMode[2]), 0] : [Number(uptoMode[2])])
+      : { exact: [Number(ops)], maybe: [Number(ops), 0], none: [0] }[mode];
   if (!allowed) {
     console.error(`${name}: manifest asks for an unknown mode ${mode}`);
     process.exit(1);
@@ -332,10 +352,10 @@ for (const line of manifest.slice(first)) {
     if (excl && EXCL_AT >= 0) {
       const wantExcl = want === after ? excl.slice(4) : excl.slice(0, 4);
       const gotExcl = [
-        BigInt(view.getUint32(EXCL_AT, true)),
-        BigInt(view.getUint32(EXCL_AT + 4, true)),
-        view.getBigUint64(EXCL_AT + 8, true),
+        view.getBigUint64(EXCL_AT, true),
+        BigInt(view.getUint32(EXCL_AT + 8, true)),
         view.getBigUint64(EXCL_AT + 16, true),
+        view.getBigUint64(EXCL_AT + 24, true),
       ];
       if (gotExcl.some((v, i) => v !== wantExcl[i])) {
         bad.push(`monitor: emitted ${gotExcl.map((v) => v.toString(16)).join(':')}, interpreted ${wantExcl.map((v) => v.toString(16)).join(':')}`);

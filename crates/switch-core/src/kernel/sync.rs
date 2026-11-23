@@ -26,7 +26,7 @@ impl Cpu {
     // libnx re-reads it, so ownership must really move.
 
     /// `svcArbitrateLock`: block until the owner releases, unless the word already changed.
-    pub(crate) fn arbitrate_lock(&mut self, owner: u32, addr: u32, _self_handle: u32) {
+    pub(crate) fn arbitrate_lock(&mut self, owner: u32, addr: u64, _self_handle: u32) {
         self.ensure_main_thread();
         let word = self.mem.read_u32(addr).unwrap_or(0);
         // Without the listeners bit the owner's unlock would never come here,
@@ -40,7 +40,7 @@ impl Cpu {
     }
 
     /// `svcArbitrateUnlock`: hand the mutex to a waiter, or clear it.
-    pub(crate) fn arbitrate_unlock(&mut self, addr: u32) {
+    pub(crate) fn arbitrate_unlock(&mut self, addr: u64) {
         self.ensure_main_thread();
         let waiters: Vec<usize> = (0..self.process().threads.len())
             .filter(|&i| self.process().threads[i].state == ThreadState::WaitMutex(addr))
@@ -64,8 +64,8 @@ impl Cpu {
     /// marking the condvar word so `nn::os` signals it.
     pub(crate) fn wait_process_wide_key(
         &mut self,
-        mutex: u32,
-        key: u32,
+        mutex: u64,
+        key: u64,
         _self_handle: u32,
         timeout: i64,
     ) {
@@ -133,7 +133,7 @@ impl Cpu {
     }
 
     /// Dequeue a condvar waiter holding (or queued for) its mutex, as the kernel does on every wake.
-    pub(crate) fn wake_condvar_waiter(&mut self, index: usize, mutex: u32) {
+    pub(crate) fn wake_condvar_waiter(&mut self, index: usize, mutex: u64) {
         let handle = self.process().threads[index].handle as u32;
         // Contended: queue up and mark the word so the owner arbitrates its unlock.
         let owner = self.update_word(mutex, |owner| {
@@ -152,7 +152,7 @@ impl Cpu {
     /// against guest code on the other cores; `None` from `f` leaves it.
     /// Returns the word it acted on, or `None` if `f` declined or the word
     /// cannot be read.
-    fn update_word(&self, addr: u32, f: impl Fn(u32) -> Option<u32>) -> Option<u32> {
+    fn update_word(&self, addr: u64, f: impl Fn(u32) -> Option<u32>) -> Option<u32> {
         loop {
             let current = self.mem.read_u32(addr).ok()?;
             let updated = f(current)?;
@@ -168,7 +168,7 @@ impl Cpu {
     }
 
     /// `svcSignalProcessWideKey`: wake up to `count` waiters (all if negative).
-    pub(crate) fn signal_process_wide_key(&mut self, key: u32, count: i32) {
+    pub(crate) fn signal_process_wide_key(&mut self, key: u64, count: i32) {
         self.ensure_main_thread();
         let mut woken = 0;
         for i in 0..self.process().threads.len() {
@@ -214,7 +214,7 @@ impl Cpu {
     /// written before switching threads.
     pub(crate) fn arbitrate_address(
         &mut self,
-        addr: u32,
+        addr: u64,
         arb_type: u32,
         value: i32,
         timeout: i64,
@@ -246,7 +246,7 @@ impl Cpu {
     }
 
     /// Park on the arbiter word at `addr`, after [`Cpu::arbitrate_address`] decided to wait.
-    pub(crate) fn block_on_address(&mut self, addr: u32, timeout: i64) {
+    pub(crate) fn block_on_address(&mut self, addr: u64, timeout: i64) {
         let deadline = self.wait_deadline(timeout);
         self.machine.process_mut(self.pid).threads[self.current_thread].state =
             ThreadState::WaitAddress { addr, deadline };
@@ -257,7 +257,7 @@ impl Cpu {
     /// signal type's compare-and-modify. Reports whether the word held `value`.
     pub(crate) fn signal_to_address(
         &mut self,
-        addr: u32,
+        addr: u64,
         signal_type: u32,
         value: i32,
         count: i32,
@@ -330,7 +330,7 @@ mod tests {
     /// wait for an unlock that never comes to the kernel.
     #[test]
     fn arbitrating_a_word_without_the_listeners_bit_does_not_block() {
-        const MUTEX: u32 = 0x6100;
+        const MUTEX: u64 = 0x6100;
         let mut cpu = Cpu::new();
         cpu.bootstrap();
         cpu.mem.map_zero(0x6000, 0x1000).unwrap();
@@ -357,7 +357,7 @@ mod tests {
     /// the no-deadline wake-up must not release it while another thread owns it.
     #[test]
     fn waking_all_waiters_leaves_a_queued_thread_off_a_held_mutex() {
-        const MUTEX: u32 = 0x6100;
+        const MUTEX: u64 = 0x6100;
         let mut cpu = Cpu::new();
         cpu.bootstrap();
         cpu.mem.map_zero(0x6000, 0x1000).unwrap();

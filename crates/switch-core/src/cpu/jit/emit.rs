@@ -22,7 +22,7 @@ use crate::cpu::loadstore::{Acc, Ext, PairKind, Wb};
 use crate::cpu::power::CLOCK_RATES_HZ;
 use crate::cpu::system::{SysOp, SysReg, TICK_HZ};
 use crate::cpu::{Cpu, CONDITION_MASKS, REG_SLOTS, SELF_RETURN_TRAMPOLINE};
-use crate::mem::{PAGE_BITS, PAGE_SIZE};
+use crate::mem::{BLOCK_BITS, BLOCK_COUNT, BLOCK_PAGES, PAGE_BITS, PAGE_SIZE};
 
 mod a32;
 mod a32_neon;
@@ -85,6 +85,7 @@ fn scratch_func() -> Func {
     f.locals(1, 2, F32);
     f.locals(1, 2, F64);
     f.locals(1, ENV_SLOTS, I32);
+    f.locals(1, 1, I64);
     f
 }
 
@@ -98,12 +99,13 @@ const SCRATCH: Layout = Layout {
     pc: 0,
     fuel: 0,
     memory: 0,
-    pages: 0,
+    blocks: 0,
+    block_pages: 0,
+    block_watched: 0,
     read_watch_lo: 0,
     read_watch_hi: 0,
     watch_lo: 0,
     watch_hi: 0,
-    watched: 0,
     pair_lock: 0,
     vregs: 0,
     exclusive: 0,
@@ -138,17 +140,19 @@ pub struct Layout {
     /// Where the running process's `Memory` address is kept; the fields below are
     /// offsets from that address.
     pub memory: u32,
-    /// Where the page table's pointer is kept (the table itself is boxed).
-    pub pages: u32,
-    /// The read watchpoint, as the two `u32`s of its `[start, end)`.
+    /// Where the pointer to the top-level page table is kept (the table itself is boxed):
+    /// one entry per 2 MiB block, never null.
+    pub blocks: u32,
+    /// From a block's address: its page pointers (null where unbacked), and its
+    /// cached-pages bitmap, where write-protected pages are set too.
+    pub block_pages: u32,
+    pub block_watched: u32,
+    /// The read watchpoint, as the two `u64`s of its `[start, end)`.
     pub read_watch_lo: u32,
     pub read_watch_hi: u32,
     /// The write watchpoint, likewise.
     pub watch_lo: u32,
     pub watch_hi: u32,
-    /// Where the pointer to the cached-pages bitmap is kept; null until
-    /// something watches a page. Write-protected pages are set in it too.
-    pub watched: u32,
     /// Where the byte that serialises 16-byte exclusive stores is kept.
     pub pair_lock: u32,
     /// The exclusive monitor, `Monitor`'s `addr`, `armed` and `value` at fixed offsets from here.
@@ -180,12 +184,13 @@ impl Layout {
                 + std::mem::offset_of!(Chain, fuel)) as u32,
             vregs: std::mem::offset_of!(Cpu, vregs) as u32,
             memory: std::mem::offset_of!(Cpu, mem) as u32 + crate::mem::AddressSpace::MEMORY_AT,
-            pages: m.pages,
+            blocks: m.blocks,
+            block_pages: m.block_pages,
+            block_watched: m.block_watched,
             read_watch_lo: m.read_watch_lo,
             read_watch_hi: m.read_watch_hi,
             watch_lo: m.watch_lo,
             watch_hi: m.watch_hi,
-            watched: m.watched,
             pair_lock: m.pair_lock,
             exclusive: std::mem::offset_of!(Cpu, exclusive) as u32,
             tpidr: std::mem::offset_of!(Cpu, tpidr) as u32,
@@ -199,7 +204,7 @@ impl Layout {
     }
 }
 
-/// Log2 bytes per page-table entry, an `AtomicPtr` that is null when unmapped; only `wasm32` runs emitted code.
+/// Log2 bytes per entry of either table level, an `AtomicPtr`; only `wasm32` runs emitted code.
 const PAGE_ENTRY_SHIFT: i32 = 2;
 #[cfg(target_arch = "wasm32")]
 const _: () = assert!(
@@ -250,8 +255,8 @@ const STATE: u32 = 0;
 
 /// Offsets inside `Monitor`, which is `#[repr(C)]`.
 const MONITOR_ADDR: u32 = 0;
-const MONITOR_ARMED: u32 = 4;
-const MONITOR_VALUE: u32 = 8;
+const MONITOR_ARMED: u32 = 8;
+const MONITOR_VALUE: u32 = 16;
 const _: () = {
     assert!(std::mem::offset_of!(crate::cpu::Monitor, addr) as u32 == MONITOR_ADDR);
     assert!(std::mem::offset_of!(crate::cpu::Monitor, armed) as u32 == MONITOR_ARMED);
@@ -268,14 +273,15 @@ const L_S: u32 = 5;
 /// The base register's writeback value, computed before the access.
 const L_W: u32 = 6;
 const L_C: u32 = 7;
-/// The guest address of an access.
+/// The low 32 bits of an access's guest address, which place it in its page; the
+/// whole address is in `L_ADDR64`.
 const L_ADDR: u32 = 8;
 /// The host address of the guest page that address is on.
 const L_PAGE: u32 = 9;
-/// The guest page index, for the page table and the watched-pages bitmap.
+/// The page's index within its table block, for the page pointers and the bitmap.
 const L_IDX: u32 = 10;
-/// The watched-pages bitmap.
-const L_WP: u32 = 11;
+/// The host address of the table block the page is in.
+const L_BLOCK: u32 = 11;
 /// `run`'s result, set before branching to the epilogue.
 const L_RET: u32 = 12;
 /// The block a branch to the loop head goes to.
@@ -296,8 +302,10 @@ const L_F64B: u32 = 23;
 /// Memory state only the host changes, loaded once per run instead of per access.
 const L_ENV: u32 = 24;
 const ENV_SLOTS: u32 = 8;
+/// An access's whole guest address, for the top-level table, watchpoints and the monitor.
+const L_ADDR64: u32 = L_ENV + ENV_SLOTS;
 /// The first register local; slots get theirs in the order the region touches them.
-const L_REGS: u32 = L_ENV + ENV_SLOTS;
+const L_REGS: u32 = L_ADDR64 + 1;
 
 /// Reads as zero and is never written.
 const ZR_SLOT: u8 = 31;
@@ -747,7 +755,7 @@ impl Cpu {
     }
 
     /// Arm the exclusive monitor at `addr` as having read `value`, or disarm it.
-    pub fn set_exclusive(&mut self, armed: bool, addr: u32, value: [u64; 2]) {
+    pub fn set_exclusive(&mut self, armed: bool, addr: u64, value: [u64; 2]) {
         if armed {
             self.exclusive.arm(addr, value);
         } else {
@@ -756,7 +764,7 @@ impl Cpu {
     }
 
     /// The monitor as `(address, armed, doublewords)`, which the difftests compare.
-    pub fn exclusive_state(&self) -> (u32, bool, [u64; 2]) {
+    pub fn exclusive_state(&self) -> (u64, bool, [u64; 2]) {
         (
             self.exclusive.addr,
             self.exclusive.armed != 0,

@@ -310,7 +310,7 @@ impl Engine3D {
     pub fn submit_frame(
         &mut self,
         ctx: &mut ExecCtx,
-        scanout: Option<u32>,
+        scanout: Option<u64>,
     ) -> Result<crate::gpu::renderer::Submit> {
         self.with_renderer(ctx, |renderer, _, ctx| renderer.submit_frame(ctx, scanout))
     }

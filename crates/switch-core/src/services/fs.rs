@@ -393,7 +393,7 @@ impl Cpu {
 
     pub(crate) fn fsp_srv_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         cmd_id: Option<u32>,
         handle: u64,
     ) -> Result<()> {
@@ -413,7 +413,7 @@ impl Cpu {
         )
     }
 
-    fn fsp_srv_dispatch(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
+    fn fsp_srv_dispatch(&mut self, tls: u64, cmd_id: Option<u32>, handle: u64) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
@@ -506,8 +506,14 @@ impl Cpu {
                 let id = self.save_data_key(data);
                 crate::trace!(Trace::Fs, "[fs] save data {id}");
                 if id.cache.is_some() {
-                    let size = self.mem.read_u64(data.wrapping_add(CREATION_INFO))? as i64;
-                    let journal = self.mem.read_u64(data.wrapping_add(CREATION_INFO + 8))? as i64;
+                    let size = self
+                        .mem
+                        .read_u64(data.wrapping_add(u64::from(CREATION_INFO)))?
+                        as i64;
+                    let journal = self
+                        .mem
+                        .read_u64(data.wrapping_add(u64::from(CREATION_INFO + 8)))?
+                        as i64;
                     self.create_cache_storage(id, size, journal);
                 } else {
                     self.save_data_mut(id);
@@ -633,7 +639,7 @@ impl Cpu {
     /// Fill the Manual filesystem for a Manual request: the root title's `HtmlDocument`, or for
     /// homebrew the SD card's `/atmosphere/hbl_html`, where Atmosphere redirects it. False if
     /// the request is for something else or there is nothing to serve.
-    fn open_manual(&mut self, tls: u32) -> bool {
+    fn open_manual(&mut self, tls: u64) -> bool {
         const HTML_DOCUMENT: u8 = 4;
         let data = self.ipc_request_data(tls);
         if self.mem.read_u8(data).unwrap_or(0) != HTML_DOCUMENT {
@@ -691,7 +697,7 @@ impl Cpu {
 
     /// Log which content a refused `Open*` asked for, assuming `nn::fs`'s layout
     /// (proxy type, program id), with the raw words alongside.
-    fn report_refused_open(&mut self, tls: u32, cmd_id: Option<u32>) {
+    fn report_refused_open(&mut self, tls: u64, cmd_id: Option<u32>) {
         let data = self.ipc_request_data(tls);
         let first = self.mem.read_u64(data).unwrap_or(0);
         let second = self.mem.read_u64(data.wrapping_add(8)).unwrap_or(0);
@@ -721,7 +727,7 @@ impl Cpu {
     /// ends the caller's scan.
     pub(crate) fn fs_save_data_info_reader_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -733,8 +739,10 @@ impl Cpu {
                 let infos = self.process_mut().fs_save_infos.entry(key).or_default();
                 let batch: Vec<_> = infos.drain(..room.min(infos.len())).collect();
                 for (i, info) in batch.iter().enumerate() {
-                    self.mem
-                        .write_bytes(addr.wrapping_add((i * SAVE_DATA_INFO_SIZE) as u32), info)?;
+                    self.mem.write_bytes(
+                        addr.wrapping_add(u64::from((i * SAVE_DATA_INFO_SIZE) as u32)),
+                        info,
+                    )?;
                 }
                 let count = batch.len() as i64;
                 self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
@@ -787,9 +795,17 @@ impl Cpu {
     }
 
     /// A `FsSaveDataFilter` at `addr`.
-    fn save_data_filter(&self, addr: u32) -> SaveDataFilter {
-        let byte = |offset: u32| self.mem.read_u8(addr.wrapping_add(offset)).unwrap_or(0);
-        let word = |offset: u32| self.mem.read_u64(addr.wrapping_add(offset)).unwrap_or(0);
+    fn save_data_filter(&self, addr: u64) -> SaveDataFilter {
+        let byte = |offset: u32| {
+            self.mem
+                .read_u8(addr.wrapping_add(u64::from(offset)))
+                .unwrap_or(0)
+        };
+        let word = |offset: u32| {
+            self.mem
+                .read_u64(addr.wrapping_add(u64::from(offset)))
+                .unwrap_or(0)
+        };
         let attr = 8;
         let mut user = [0u8; 16];
         for (i, b) in user.iter_mut().enumerate() {
@@ -808,7 +824,7 @@ impl Cpu {
     /// `IDeviceOperator`: SD card, eMMC and game card queries.
     pub(crate) fn fs_device_operator_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
         const CID_SIZE: usize = 0x10;
@@ -873,7 +889,7 @@ impl Cpu {
     /// never fires. One event per slot, shared by every caller.
     pub(crate) fn fs_detection_notifier_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -901,7 +917,7 @@ impl Cpu {
     }
 
     /// Fill an out buffer, clamped to its size and the requested width.
-    fn write_out_buffer(&mut self, tls: u32, bytes: &[u8], requested: u64) -> Result<()> {
+    fn write_out_buffer(&mut self, tls: u64, bytes: &[u8], requested: u64) -> Result<()> {
         let Some((addr, len)) = self.ipc_output_buffer(tls, 0) else {
             return Ok(());
         };
@@ -912,7 +928,7 @@ impl Cpu {
     /// Which save the `SaveDataAttribute` at `attribute` names: system saves by system save
     /// id, applications by title id (none means the running title), per user by uid, cache
     /// storage by index.
-    fn save_data_key(&mut self, attribute: u32) -> SaveKey {
+    fn save_data_key(&mut self, attribute: u64) -> SaveKey {
         const USER_ID: u32 = 0x8;
         const SYSTEM_SAVE_DATA_ID: u32 = 0x18;
         const TYPE: u32 = 0x20;
@@ -922,23 +938,26 @@ impl Cpu {
         for (index, byte) in user.iter_mut().enumerate() {
             *byte = self
                 .mem
-                .read_u8(attribute.wrapping_add(USER_ID + index as u32))
+                .read_u8(attribute.wrapping_add(u64::from(USER_ID + index as u32)))
                 .unwrap_or(0);
         }
         let system_save_id = self
             .mem
-            .read_u64(attribute.wrapping_add(SYSTEM_SAVE_DATA_ID))
+            .read_u64(attribute.wrapping_add(u64::from(SYSTEM_SAVE_DATA_ID)))
             .unwrap_or(0);
         let id = match (system_save_id, application_id) {
             (0, 0) => self.program_id(),
             (0, application) => application,
             (system, _) => system,
         };
-        let cache = (self.mem.read_u8(attribute.wrapping_add(TYPE)).unwrap_or(0)
+        let cache = (self
+            .mem
+            .read_u8(attribute.wrapping_add(u64::from(TYPE)))
+            .unwrap_or(0)
             == SAVE_TYPE_CACHE)
             .then(|| {
                 self.mem
-                    .read_u16(attribute.wrapping_add(INDEX))
+                    .read_u16(attribute.wrapping_add(u64::from(INDEX)))
                     .unwrap_or(0)
             });
         SaveKey { id, user, cache }
@@ -948,7 +967,7 @@ impl Cpu {
     /// Cmd 0 = Read(u64 offset, u64 size), cmd 4 = GetSize.
     pub(crate) fn fs_storage_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -968,7 +987,7 @@ impl Cpu {
         )
     }
 
-    fn fs_storage_dispatch(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    fn fs_storage_dispatch(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         // The process's RomFS (200) or a system data archive (202).
         let archive = self
             .process()
@@ -1010,7 +1029,7 @@ impl Cpu {
                             break;
                         }
                         self.mem
-                            .write_bytes(addr.wrapping_add(written), &buf[..got])?;
+                            .write_bytes(addr.wrapping_add(u64::from(written)), &buf[..got])?;
                         written += got as u32;
                         pos += got as u64;
                     }
@@ -1063,7 +1082,7 @@ impl Cpu {
     }
 
     /// `IFileSystem` over the SD card or a save in [`crate::vfs`].
-    pub(crate) fn fs_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
+    pub(crate) fn fs_request(&mut self, tls: u64, cmd_id: Option<u32>, handle: u64) -> Result<()> {
         self.fs_traced(
             "fs",
             cmd_id,
@@ -1078,7 +1097,7 @@ impl Cpu {
         )
     }
 
-    fn fs_dispatch(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
+    fn fs_dispatch(&mut self, tls: u64, cmd_id: Option<u32>, handle: u64) -> Result<()> {
         /// Horizon `fs` result: path already exists.
         const PATH_ALREADY_EXISTS: u32 = 2 | (2 << 9);
         let path = self.ipc_request_path(tls);
@@ -1152,7 +1171,7 @@ impl Cpu {
     }
 
     /// `IDirectory`: cmd 0 = Read, cmd 1 = GetEntryCount.
-    pub(crate) fn fs_dir_request(&mut self, tls: u32, cmd_id: Option<u32>, key: u64) -> Result<()> {
+    pub(crate) fn fs_dir_request(&mut self, tls: u64, cmd_id: Option<u32>, key: u64) -> Result<()> {
         self.fs_traced(
             "dir",
             cmd_id,
@@ -1166,7 +1185,7 @@ impl Cpu {
         )
     }
 
-    fn fs_dir_dispatch(&mut self, tls: u32, cmd_id: Option<u32>, key: u64) -> Result<()> {
+    fn fs_dir_dispatch(&mut self, tls: u64, cmd_id: Option<u32>, key: u64) -> Result<()> {
         /// `sizeof(FsDirectoryEntry)`.
         const ENTRY_SIZE: u32 = 0x310;
         match cmd_id {
@@ -1181,11 +1200,11 @@ impl Cpu {
                 });
                 if let Some(buf) = self.ipc_output_buffer_addr(tls, 0) {
                     for (i, entry) in taken.iter().enumerate() {
-                        let base = buf.wrapping_add(i as u32 * ENTRY_SIZE);
+                        let base = buf.wrapping_add(u64::from(i as u32 * ENTRY_SIZE));
                         let name = entry.name.as_bytes();
                         for j in 0..0x301u32 {
                             let byte = name.get(j as usize).copied().unwrap_or(0);
-                            self.mem.write_u8(base.wrapping_add(j), byte)?;
+                            self.mem.write_u8(base.wrapping_add(u64::from(j)), byte)?;
                         }
                         self.mem.write_u8(base.wrapping_add(0x304), entry.kind)?;
                         self.mem.write_u64(base.wrapping_add(0x308), entry.size)?;
@@ -1210,7 +1229,7 @@ impl Cpu {
     /// `IFile`: cmd 0 = Read, 1 = Write, 2 = Flush, 3 = SetSize, 4 = GetSize.
     pub(crate) fn fs_file_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         cmd_id: Option<u32>,
         key: u64,
     ) -> Result<()> {
@@ -1227,7 +1246,7 @@ impl Cpu {
         )
     }
 
-    fn fs_file_dispatch(&mut self, tls: u32, cmd_id: Option<u32>, key: u64) -> Result<()> {
+    fn fs_file_dispatch(&mut self, tls: u64, cmd_id: Option<u32>, key: u64) -> Result<()> {
         let path = self
             .process()
             .fs_files
@@ -1310,7 +1329,7 @@ impl Cpu {
     /// Reply with a save-data (size, journal) pair of s64s.
     pub(crate) fn write_save_data_pair(
         &mut self,
-        tls: u32,
+        tls: u64,
         size: i64,
         journal_size: i64,
     ) -> Result<()> {
@@ -1421,7 +1440,9 @@ mod tests {
 
         // fsFileWrite { u32 option, u32 pad, s64 offset, u64 size }
         for (i, &byte) in br#"{"v":5}"#.iter().enumerate() {
-            cpu.mem.write_u8(0x3000 + i as u32, byte).unwrap();
+            cpu.mem
+                .write_u8(u64::from(0x3000 + i as u32), byte)
+                .unwrap();
         }
         let mut payload = [0u8; 0x18];
         payload[8..16].copy_from_slice(&0u64.to_le_bytes());
@@ -1444,7 +1465,9 @@ mod tests {
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 7);
 
         for (i, &byte) in b"!!".iter().enumerate() {
-            cpu.mem.write_u8(0x3000 + i as u32, byte).unwrap();
+            cpu.mem
+                .write_u8(u64::from(0x3000 + i as u32), byte)
+                .unwrap();
         }
         let mut payload = [0u8; 0x18];
         payload[8..16].copy_from_slice(&7u64.to_le_bytes());
@@ -1712,7 +1735,7 @@ mod tests {
                 1 => {
                     let mut info = [0u8; 0x60];
                     for (i, byte) in info.iter_mut().enumerate() {
-                        *byte = cpu.mem.read_u8(0x3000 + i as u32).unwrap();
+                        *byte = cpu.mem.read_u8(u64::from(0x3000 + i as u32)).unwrap();
                     }
                     infos.push(info);
                 }
@@ -2021,7 +2044,7 @@ mod tests {
 
     #[test]
     fn save_extra_data_reads_are_zeroes_not_what_the_buffer_held() {
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         for cmd in [57u32, 58, 69] {
             let mut cpu = request_with_recv_buffer(cmd, &[0; 8], BUFFER, 0x40);
             cpu.mem.map_zero(BUFFER, 0x100).unwrap();
@@ -2038,7 +2061,7 @@ mod tests {
     #[test]
     fn a_device_operator_register_is_written_over_whatever_the_buffer_held() {
         // GetSdCardCid writes the full 0x10 bytes.
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         let mut cpu = request_with_recv_buffer(2, &0x10u64.to_le_bytes(), BUFFER, 0x10);
         cpu.mem.map_zero(BUFFER, 0x100).unwrap();
         for offset in 0..0x20 {
@@ -2165,11 +2188,11 @@ mod tests {
 
     /// The whole of an opened storage, read through `IStorage`.
     fn read_storage(cpu: &mut Cpu, session: u64) -> Vec<u8> {
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         write_request(cpu, 4, &[]);
         cpu.fs_storage_request(TLS, session, Some(4)).unwrap();
         let size = cpu.mem.read_u64(TLS + 0x20).unwrap();
-        cpu.mem.map_zero(BUFFER, size as usize).unwrap();
+        cpu.mem.map_zero(BUFFER, size).unwrap();
         let mut payload = [0u8; 0x10];
         payload[8..].copy_from_slice(&size.to_le_bytes());
         write_map_buffer_request(cpu, 0, &payload, BUFFER, size as u32, false);
@@ -2237,7 +2260,7 @@ mod tests {
     /// `IStorage::Read` refuses a range past the end.
     #[test]
     fn a_storage_read_past_the_end_is_refused_rather_than_clamped() {
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         const OUT_OF_RANGE: u32 = 2 | (3005 << 9);
         let romfs: Vec<u8> = (0..=0xFFu8).collect();
 

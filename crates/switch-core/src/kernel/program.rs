@@ -99,6 +99,7 @@ impl Cpu {
             return Err(Error::Cpu("no 'main' executable in this ExeFS".into()));
         }
         self.set_program_id(program.program_id);
+        self.set_64_bit(program.is_64_bit());
         let system_resource = program.system_resource_size();
         self.log(
             Level::Debug,

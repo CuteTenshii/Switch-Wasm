@@ -14,7 +14,7 @@ impl Cpu {
     /// `usb:ds`, its `IDsService`, `IDsInterface` and `IDsEndpoint`.
     pub(crate) fn usb_ds_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -110,7 +110,7 @@ impl Cpu {
     /// `usb:hs` (`IClientRootSession`): no device is ever plugged in.
     pub(crate) fn usb_hs_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {

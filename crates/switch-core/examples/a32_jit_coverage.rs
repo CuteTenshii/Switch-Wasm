@@ -59,7 +59,7 @@ fn main() {
 
     let mut seen: HashMap<u32, u64> = HashMap::new();
     let run = common::drive(&mut cpu, Pace::Instructions, cli.window, |cpu, _| {
-        if let Ok(word) = cpu.mem.read_u32(cpu.get_pc()) {
+        if let Ok(word) = cpu.mem.read_u32(u64::from(cpu.get_pc())) {
             *seen.entry(word).or_default() += 1;
         }
         Flow::Continue

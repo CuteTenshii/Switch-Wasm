@@ -15,9 +15,9 @@ fn the_block_transfers_all_run_lowest_register_to_lowest_address() {
         0xE880_000E, // stmia r0, {r1, r2, r3}
         0xE890_0070, // ldmia r0, {r4, r5, r6}
     ]);
-    assert_eq!(cpu.mem.read_u32(SCRATCH).unwrap(), 1);
-    assert_eq!(cpu.mem.read_u32(SCRATCH + 4).unwrap(), 2);
-    assert_eq!(cpu.mem.read_u32(SCRATCH + 8).unwrap(), 3);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(), 1);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH + 4)).unwrap(), 2);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH + 8)).unwrap(), 3);
     assert_eq!((r(&cpu, 4), r(&cpu, 5), r(&cpu, 6)), (1, 2, 3));
 }
 
@@ -29,8 +29,8 @@ fn a_decrementing_store_writes_below_its_base_and_leaves_it_there() {
         0xE3A0_6006, // mov r6, #6
         0xE920_0060, // stmdb r0!, {r5, r6}
     ]);
-    assert_eq!(cpu.mem.read_u32(SCRATCH - 8).unwrap(), 5);
-    assert_eq!(cpu.mem.read_u32(SCRATCH - 4).unwrap(), 6);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH - 8)).unwrap(), 5);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH - 4)).unwrap(), 6);
     assert_eq!(r(&cpu, 0), SCRATCH - 8);
 }
 
@@ -42,7 +42,7 @@ fn a_store_of_its_own_base_transfers_the_value_it_started_with() {
         0xE3A0_1001, // mov r1, #1
         0xE8A0_0003, // stmia r0!, {r0, r1}
     ]);
-    assert_eq!(cpu.mem.read_u32(SCRATCH).unwrap(), SCRATCH);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(), SCRATCH);
     assert_eq!(
         r(&cpu, 0),
         SCRATCH + 8,
@@ -113,9 +113,9 @@ fn a_scaled_register_offset_subtracts_when_the_encoding_says_down() {
         0xE280_0020, // add r0, r0, #32
         0xE710_3101, // ldr r3, [r0, -r1, lsl #2]
     ]);
-    assert_eq!(cpu.mem.read_u32(SCRATCH + 8).unwrap(), 7);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH + 8)).unwrap(), 7);
     assert_eq!(r(&cpu, 3), 0, "0x8020 - 8 is not where the 7 went");
-    assert_eq!(cpu.mem.read_u32(SCRATCH + 0x18).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH + 0x18)).unwrap(), 0);
 }
 
 #[test]
@@ -128,7 +128,7 @@ fn an_exclusive_store_fails_without_a_matching_load() {
         0xE181_2F93, // strex r2, r3, [r1]
     ]);
     assert_eq!(r(&cpu, 2), 0);
-    assert_eq!(cpu.mem.read_u32(SCRATCH).unwrap(), 7);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(), 7);
 
     // Without it, the store reports failure and writes nothing.
     let cpu = run(&[
@@ -137,7 +137,7 @@ fn an_exclusive_store_fails_without_a_matching_load() {
         0xE181_2F93, // strex r2, r3, [r1]
     ]);
     assert_eq!(r(&cpu, 2), 1);
-    assert_eq!(cpu.mem.read_u32(SCRATCH).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(), 0);
 }
 
 /// `STL`/`LDA` are plain accesses: no monitor, no status, and `Rd` (1111) untouched.
@@ -152,7 +152,7 @@ fn a_store_release_is_not_an_exclusive_store() {
         0xE1D1_5C9F, // ldab  r5, [r1]
         0xE181_2F93, // strex r2, r3, [r1]
     ]);
-    assert_eq!(cpu.mem.read_u16(SCRATCH).unwrap(), 0x8765);
+    assert_eq!(cpu.mem.read_u16(u64::from(SCRATCH)).unwrap(), 0x8765);
     assert_eq!(r(&cpu, 0), 0x8765);
     assert_eq!(r(&cpu, 4), 0x8765);
     assert_eq!(r(&cpu, 5), 0x65);
@@ -165,7 +165,7 @@ fn a_store_release_is_not_an_exclusive_store() {
         0xE3A0_3007, // mov  r3, #7
         0xE1C1_FC93, // stlb r3, [r1]
     ]);
-    assert_eq!(cpu.mem.read_u32(SCRATCH).unwrap(), 0x8707);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(), 0x8707);
 }
 
 /// Decrement-after puts the highest register at the base address.
@@ -179,10 +179,10 @@ fn a_decrement_after_transfer_ends_at_the_base() {
         0xE804_000C, // stmda r4, {r2, r3}
         0xE834_0003, // ldmda r4!, {r0, r1}
     ]);
-    assert_eq!(cpu.mem.read_u32(SCRATCH + 4).unwrap(), 0x22);
-    assert_eq!(cpu.mem.read_u32(SCRATCH + 8).unwrap(), 0x33);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH + 4)).unwrap(), 0x22);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH + 8)).unwrap(), 0x33);
     assert_eq!(
-        cpu.mem.read_u32(SCRATCH).unwrap(),
+        cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(),
         0,
         "nothing below the lowest"
     );
@@ -204,5 +204,5 @@ fn a_byte_swap_exchanges_memory_and_a_register() {
         0xE101_0093, // swp r0, r3, [r1]
     ]);
     assert_eq!(r(&cpu, 0), 0x63, "the old value comes back");
-    assert_eq!(cpu.mem.read_u32(SCRATCH).unwrap(), 7);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(), 7);
 }

@@ -961,7 +961,7 @@ impl Emitter<'_> {
         self.a32_read(rn, pc);
         self.f.local_tee(L_A);
         self.f.i32_wrap_i64();
-        self.f.local_set(L_ADDR);
+        self.set_addr32();
     }
 
     /// `Rm` 15 leaves the base alone; 13 advances it by the transfer size; any other adds it.

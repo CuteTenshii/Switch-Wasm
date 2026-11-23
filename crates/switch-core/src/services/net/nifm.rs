@@ -100,7 +100,7 @@ impl Cpu {
     /// `nifm`'s root session (`nifm:u`, `nifm:s`, `nifm:a`), handing out `IGeneralService`.
     pub(crate) fn nifm_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         cmd_id: Option<u32>,
         handle: u64,
     ) -> Result<()> {
@@ -130,7 +130,7 @@ impl Cpu {
     /// `IGeneralService`: a Wi-Fi link that is up with internet access.
     pub(crate) fn nifm_general_service_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -218,7 +218,7 @@ impl Cpu {
     /// and they are auto-clear, so the first signal is gone by then.
     pub(crate) fn nifm_request_object_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -358,7 +358,7 @@ mod tests {
         );
     }
 
-    const OUT: u32 = 0x3000;
+    const OUT: u64 = 0x3000;
 
     /// A console whose `IGeneralService` is session 9, with an output buffer.
     fn console() -> Cpu {

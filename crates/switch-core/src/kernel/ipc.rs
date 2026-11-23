@@ -48,7 +48,7 @@ const PROCESS_ID: u64 = 1;
 pub(crate) const DEFAULT_PROGRAM_ID: u64 = 0x0100_0000_0000_1000;
 
 /// A request's buffers, as `(address, length)` pairs in descriptor order.
-pub(crate) type Buffers = Vec<(u32, u32)>;
+pub(crate) type Buffers = Vec<(u64, u32)>;
 /// The `DeviceId` `spl:` reports.
 const SPL_DEVICE_ID: u64 = 0x0000_5357_4153_4D00;
 
@@ -56,7 +56,7 @@ const SPL_DEVICE_ID: u64 = 0x0000_5357_4153_4D00;
 pub const POINTER_BUFFER_SIZE: u16 = 0x8000;
 
 /// Pick between the static and map-alias descriptors of an AutoSelect buffer.
-fn ipc_pick_buffer(map: Option<(u32, u32)>, pointer: Option<(u32, u32)>) -> Option<(u32, u32)> {
+fn ipc_pick_buffer(map: Option<(u64, u32)>, pointer: Option<(u64, u32)>) -> Option<(u64, u32)> {
     match (map, pointer) {
         (Some((_, 0)), Some(pointer)) => Some(pointer),
         (map, pointer) => map.or(pointer),
@@ -79,16 +79,16 @@ pub(crate) struct HipcHeader {
 }
 
 impl Cpu {
-    pub(crate) fn ipc_message_type(&self, tls: u32) -> u32 {
+    pub(crate) fn ipc_message_type(&self, tls: u64) -> u32 {
         self.mem.read_u32(tls).unwrap_or(0) & 0xFFFF
     }
 
     /// Whether the request is TIPC (command id in the type field as `16 + cmd`).
-    pub(crate) fn ipc_is_tipc_request(&self, tls: u32) -> bool {
+    pub(crate) fn ipc_is_tipc_request(&self, tls: u64) -> bool {
         self.ipc_message_type(tls) >= 16
     }
 
-    pub(crate) fn ipc_header(&self, tls: u32) -> HipcHeader {
+    pub(crate) fn ipc_header(&self, tls: u64) -> HipcHeader {
         let hdr1 = self.mem.read_u32(tls).unwrap_or(0);
         let hdr2 = self.mem.read_u32(tls.wrapping_add(4)).unwrap_or(0);
         HipcHeader {
@@ -106,7 +106,7 @@ impl Cpu {
     }
 
     /// Offset of the descriptor area, past the header and optional special header.
-    pub(crate) fn ipc_descriptor_start(&self, tls: u32) -> u32 {
+    pub(crate) fn ipc_descriptor_start(&self, tls: u64) -> u32 {
         let hdr2 = self.mem.read_u32(tls.wrapping_add(4)).unwrap_or(0);
         let mut off = 8u32;
         if (hdr2 >> 31) & 1 != 0 {
@@ -122,8 +122,12 @@ impl Cpu {
     }
 
     /// The copy handles a request carries.
-    pub(crate) fn ipc_request_copy_handles(&self, tls: u32) -> Vec<u64> {
-        let word = |at: u32| self.mem.read_u32(tls.wrapping_add(at)).unwrap_or(0);
+    pub(crate) fn ipc_request_copy_handles(&self, tls: u64) -> Vec<u64> {
+        let word = |at: u32| {
+            self.mem
+                .read_u32(tls.wrapping_add(u64::from(at)))
+                .unwrap_or(0)
+        };
         if (word(4) >> 31) & 1 == 0 {
             return Vec::new();
         }
@@ -135,7 +139,7 @@ impl Cpu {
     }
 
     /// The data area past the descriptors, where TIPC arguments begin.
-    pub(crate) fn ipc_data_area(&self, tls: u32) -> u32 {
+    pub(crate) fn ipc_data_area(&self, tls: u64) -> u32 {
         let header = self.ipc_header(tls);
         self.ipc_descriptor_start(tls)
             + 8 * header.send_statics
@@ -143,126 +147,188 @@ impl Cpu {
     }
 
     /// Start of a CMIF reply: the data area aligned to 16 bytes.
-    pub(crate) fn ipc_reply_start(&self, tls: u32) -> u32 {
+    pub(crate) fn ipc_reply_start(&self, tls: u64) -> u32 {
         (self.ipc_data_area(tls) + 15) & !15
     }
 
     /// Offset of a CMIF request's `SFCI` header in the TLS buffer.
-    pub(crate) fn ipc_cmif_header_offset(&self, tls: u32) -> Option<u32> {
+    pub(crate) fn ipc_cmif_header_offset(&self, tls: u64) -> Option<u32> {
         const SFCI: u32 = 0x4943_4653;
         // The data area, or 0x10 further in for a domain request.
         let start = self.ipc_reply_start(tls);
         for candidate in [start, start.wrapping_add(0x10)] {
-            if self.mem.read_u32(tls.wrapping_add(candidate)).unwrap_or(0) == SFCI {
+            if self
+                .mem
+                .read_u32(tls.wrapping_add(u64::from(candidate)))
+                .unwrap_or(0)
+                == SFCI
+            {
                 return Some(candidate);
             }
         }
         // Otherwise scan the whole message buffer.
-        (0..0x100u32)
-            .step_by(4)
-            .find(|&i| self.mem.read_u32(tls.wrapping_add(i)).unwrap_or(0) == SFCI)
+        (0..0x100u32).step_by(4).find(|&i| {
+            self.mem
+                .read_u32(tls.wrapping_add(u64::from(i)))
+                .unwrap_or(0)
+                == SFCI
+        })
     }
 
     /// The request's command id, or `None` if it isn't a recognized request.
-    pub(crate) fn ipc_command_id(&self, tls: u32) -> Option<u32> {
+    pub(crate) fn ipc_command_id(&self, tls: u64) -> Option<u32> {
         if self.ipc_is_tipc_request(tls) {
             return Some(self.ipc_message_type(tls) - 16);
         }
         if let Some(offset) = self.ipc_cmif_header_offset(tls) {
-            return self.mem.read_u32(tls.wrapping_add(offset + 8)).ok();
+            return self
+                .mem
+                .read_u32(tls.wrapping_add(u64::from(offset + 8)))
+                .ok();
         }
         // Pre-CMIF sessions: {type=2, object_id, cmd_id, ...} with no SFCI magic.
         let start = self.ipc_reply_start(tls);
-        if self.mem.read_u32(tls.wrapping_add(start)).unwrap_or(0) == 2 {
-            return self.mem.read_u32(tls.wrapping_add(start + 8)).ok();
+        if self
+            .mem
+            .read_u32(tls.wrapping_add(u64::from(start)))
+            .unwrap_or(0)
+            == 2
+        {
+            return self
+                .mem
+                .read_u32(tls.wrapping_add(u64::from(start + 8)))
+                .ok();
         }
         None
     }
 
     /// Address of a request's payload, past the `CmifInHeader` and any domain header.
-    pub(crate) fn ipc_request_data(&self, tls: u32) -> u32 {
+    pub(crate) fn ipc_request_data(&self, tls: u64) -> u64 {
         if self.ipc_is_tipc_request(tls) {
-            return tls.wrapping_add(self.ipc_data_area(tls));
+            return tls.wrapping_add(u64::from(self.ipc_data_area(tls)));
         }
         match self.ipc_cmif_header_offset(tls) {
-            Some(offset) => tls.wrapping_add(offset + 0x10),
-            None => tls.wrapping_add(self.ipc_reply_start(tls) + 0x10),
+            Some(offset) => tls.wrapping_add(u64::from(offset + 0x10)),
+            None => tls.wrapping_add(u64::from(self.ipc_reply_start(tls) + 0x10)),
         }
     }
 
     /// The `u8` argument at `offset` bytes into a request's payload.
-    pub(crate) fn ipc_arg_u8(&self, tls: u32, offset: u32) -> u8 {
+    pub(crate) fn ipc_arg_u8(&self, tls: u64, offset: u32) -> u8 {
         let data = self.ipc_request_data(tls);
-        self.mem.read_u8(data.wrapping_add(offset)).unwrap_or(0)
+        self.mem
+            .read_u8(data.wrapping_add(u64::from(offset)))
+            .unwrap_or(0)
     }
 
     /// The `u32` argument at `offset` bytes into a request's payload.
-    pub(crate) fn ipc_arg_u32(&self, tls: u32, offset: u32) -> u32 {
+    pub(crate) fn ipc_arg_u32(&self, tls: u64, offset: u32) -> u32 {
         let data = self.ipc_request_data(tls);
-        self.mem.read_u32(data.wrapping_add(offset)).unwrap_or(0)
+        self.mem
+            .read_u32(data.wrapping_add(u64::from(offset)))
+            .unwrap_or(0)
     }
 
     /// The `u64` argument at `offset` bytes into a request's payload.
-    pub(crate) fn ipc_arg_u64(&self, tls: u32, offset: u32) -> u64 {
+    pub(crate) fn ipc_arg_u64(&self, tls: u64, offset: u32) -> u64 {
         let data = self.ipc_request_data(tls);
-        self.mem.read_u64(data.wrapping_add(offset)).unwrap_or(0)
+        self.mem
+            .read_u64(data.wrapping_add(u64::from(offset)))
+            .unwrap_or(0)
     }
 
     /// The `f32` argument at `offset` bytes into a request's payload.
-    pub(crate) fn ipc_arg_f32(&self, tls: u32, offset: u32) -> f32 {
+    pub(crate) fn ipc_arg_f32(&self, tls: u64, offset: u32) -> f32 {
         let data = self.ipc_request_data(tls);
-        f32::from_bits(self.mem.read_u32(data.wrapping_add(offset)).unwrap_or(0))
+        f32::from_bits(
+            self.mem
+                .read_u32(data.wrapping_add(u64::from(offset)))
+                .unwrap_or(0),
+        )
     }
 
-    /// The `slot`-th map-alias descriptor (send, recv, then exchange), low 32 bits only.
-    fn ipc_map_descriptor(&self, tls: u32, slot: u32) -> (u32, u32) {
+    /// The `slot`-th map-alias descriptor (send, recv, then exchange). A size of 4 GiB or
+    /// more, which no service could hold, reads as `u32::MAX`.
+    fn ipc_map_descriptor(&self, tls: u64, slot: u32) -> (u64, u32) {
         let at = self.ipc_descriptor_start(tls) + 8 * self.ipc_header(tls).send_statics + 12 * slot;
-        let size = self.mem.read_u32(tls.wrapping_add(at)).unwrap_or(0);
-        let address = self.mem.read_u32(tls.wrapping_add(at + 4)).unwrap_or(0);
+        let word = |offset: u32| {
+            self.mem
+                .read_u32(tls.wrapping_add(u64::from(at + offset)))
+                .unwrap_or(0)
+        };
+        let (size_low, address_low, packed) = (word(0), word(4), word(8));
+        // `HipcBufferDescriptor`: mode:2, address bits 36..58, size bits 32..36,
+        // address bits 32..36.
+        let address = u64::from(address_low)
+            | (u64::from((packed >> 28) & 0xF) << 32)
+            | (u64::from((packed >> 2) & 0x3F_FFFF) << 36);
+        let size = if (packed >> 24) & 0xF != 0 {
+            u32::MAX
+        } else {
+            size_low
+        };
         (address, size)
     }
 
     /// The `index`-th map-alias send buffer.
-    pub(crate) fn ipc_send_buffer(&self, tls: u32, index: u32) -> Option<(u32, u32)> {
+    pub(crate) fn ipc_send_buffer(&self, tls: u64, index: u32) -> Option<(u64, u32)> {
         (index < self.ipc_header(tls).send_buffers).then(|| self.ipc_map_descriptor(tls, index))
     }
 
     /// The `index`-th map-alias receive buffer.
-    pub(crate) fn ipc_recv_buffer(&self, tls: u32, index: u32) -> Option<(u32, u32)> {
+    pub(crate) fn ipc_recv_buffer(&self, tls: u64, index: u32) -> Option<(u64, u32)> {
         let header = self.ipc_header(tls);
         (index < header.recv_buffers)
             .then(|| self.ipc_map_descriptor(tls, header.send_buffers + index))
     }
 
     /// The send-static ("pointer") buffers, as `(address, size)`.
-    pub(crate) fn ipc_static_buffers(&self, tls: u32) -> Vec<(u32, u32)> {
+    pub(crate) fn ipc_static_buffers(&self, tls: u64) -> Vec<(u64, u32)> {
         let start = self.ipc_descriptor_start(tls);
         (0..self.ipc_header(tls).send_statics)
             .map(|index| {
                 let at = start + 8 * index;
-                let packed = self.mem.read_u32(tls.wrapping_add(at)).unwrap_or(0);
-                let address = self.mem.read_u32(tls.wrapping_add(at + 4)).unwrap_or(0);
+                let packed = self
+                    .mem
+                    .read_u32(tls.wrapping_add(u64::from(at)))
+                    .unwrap_or(0);
+                let low = self
+                    .mem
+                    .read_u32(tls.wrapping_add(u64::from(at + 4)))
+                    .unwrap_or(0);
+                // `HipcStaticDescriptor`: index:6, address bits 36..42, bits 32..36, size:16.
+                let address = u64::from(low)
+                    | (u64::from((packed >> 12) & 0xF) << 32)
+                    | (u64::from((packed >> 6) & 0x3F) << 36);
                 (address, packed >> 16)
             })
             .collect()
     }
 
     /// The receive-static output buffers, which sit after the raw data.
-    pub(crate) fn ipc_recv_static_buffers(&self, tls: u32) -> Vec<(u32, u32)> {
+    pub(crate) fn ipc_recv_static_buffers(&self, tls: u64) -> Vec<(u64, u32)> {
         let header = self.ipc_header(tls);
         let start = self.ipc_data_area(tls) + 4 * header.data_words;
         (0..header.recv_statics)
             .map(|index| {
                 let at = start + 8 * index;
-                let address = self.mem.read_u32(tls.wrapping_add(at)).unwrap_or(0);
-                let packed = self.mem.read_u32(tls.wrapping_add(at + 4)).unwrap_or(0);
+                let low = self
+                    .mem
+                    .read_u32(tls.wrapping_add(u64::from(at)))
+                    .unwrap_or(0);
+                let packed = self
+                    .mem
+                    .read_u32(tls.wrapping_add(u64::from(at + 4)))
+                    .unwrap_or(0);
+                // `HipcRecvListEntry`: address bits 32..48, then the size.
+                let address = u64::from(low) | (u64::from(packed & 0xFFFF) << 32);
                 (address, packed >> 16)
             })
             .collect()
     }
 
     /// The `index`-th input buffer, sent as either a pointer or a map-alias buffer.
-    pub(crate) fn ipc_input_buffer(&self, tls: u32, index: u32) -> Option<(u32, u32)> {
+    pub(crate) fn ipc_input_buffer(&self, tls: u64, index: u32) -> Option<(u64, u32)> {
         ipc_pick_buffer(
             self.ipc_send_buffer(tls, index),
             self.ipc_static_buffers(tls).get(index as usize).copied(),
@@ -270,7 +336,7 @@ impl Cpu {
     }
 
     /// The `index`-th output buffer, either a map-alias or a receive-static buffer.
-    pub(crate) fn ipc_output_buffer(&self, tls: u32, index: u32) -> Option<(u32, u32)> {
+    pub(crate) fn ipc_output_buffer(&self, tls: u64, index: u32) -> Option<(u64, u32)> {
         ipc_pick_buffer(
             self.ipc_recv_buffer(tls, index),
             self.ipc_recv_static_buffers(tls)
@@ -280,13 +346,13 @@ impl Cpu {
     }
 
     /// Address of the `index`-th output buffer.
-    pub(crate) fn ipc_output_buffer_addr(&self, tls: u32, index: u32) -> Option<u32> {
+    pub(crate) fn ipc_output_buffer_addr(&self, tls: u64, index: u32) -> Option<u64> {
         self.ipc_output_buffer(tls, index)
             .map(|(address, _)| address)
     }
 
     /// Every input and output buffer a request carries.
-    pub(crate) fn ipc_buffers(&self, tls: u32) -> (Buffers, Buffers) {
+    pub(crate) fn ipc_buffers(&self, tls: u64) -> (Buffers, Buffers) {
         let header = self.ipc_header(tls);
         let send = (0..header.send_buffers.max(header.send_statics))
             .filter_map(|index| self.ipc_input_buffer(tls, index))
@@ -298,7 +364,7 @@ impl Cpu {
     }
 
     /// The path in the first static buffer, normalized (`sdmc:/switch/` becomes `/switch`).
-    pub(crate) fn ipc_request_path(&self, tls: u32) -> String {
+    pub(crate) fn ipc_request_path(&self, tls: u64) -> String {
         let raw = match self.ipc_static_buffers(tls).first() {
             Some(&(addr, size)) => self.read_string(addr, size.min(0x301)),
             None => return String::new(),
@@ -316,10 +382,10 @@ impl Cpu {
     }
 
     /// Read `len` bytes of guest memory, stopping at the first fault.
-    pub(crate) fn read_bytes(&self, addr: u32, len: u32) -> Vec<u8> {
+    pub(crate) fn read_bytes(&self, addr: u64, len: u32) -> Vec<u8> {
         let mut out = Vec::with_capacity(len as usize);
         for i in 0..len {
-            match self.mem.read_u8(addr.wrapping_add(i)) {
+            match self.mem.read_u8(addr.wrapping_add(u64::from(i))) {
                 Ok(byte) => out.push(byte),
                 Err(_) => break,
             }
@@ -327,30 +393,30 @@ impl Cpu {
         out
     }
 
-    pub(crate) fn read_string(&self, addr: u32, len: u32) -> String {
+    pub(crate) fn read_string(&self, addr: u64, len: u32) -> String {
         let bytes = self.read_bytes(addr, len);
         let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
         String::from_utf8_lossy(&bytes[..end]).into_owned()
     }
 
     /// Fill the `index`-th output buffer with zeros.
-    pub(crate) fn zero_output_buffer(&mut self, tls: u32, index: u32) {
+    pub(crate) fn zero_output_buffer(&mut self, tls: u64, index: u32) {
         let Some((addr, size)) = self.ipc_output_buffer(tls, index) else {
             return;
         };
         for offset in 0..size {
-            let _ = self.mem.write_u8(addr.wrapping_add(offset), 0);
+            let _ = self.mem.write_u8(addr.wrapping_add(u64::from(offset)), 0);
         }
     }
 
     /// Write `bytes` into the `index`-th output buffer, truncated; returns bytes written.
-    pub(crate) fn write_output_buffer(&mut self, tls: u32, index: u32, bytes: &[u8]) -> u32 {
+    pub(crate) fn write_output_buffer(&mut self, tls: u64, index: u32, bytes: &[u8]) -> u32 {
         let Some((addr, size)) = self.ipc_output_buffer(tls, index) else {
             return 0;
         };
         let written = bytes.len().min(size as usize);
         for (offset, &byte) in bytes.iter().take(written).enumerate() {
-            let _ = self.mem.write_u8(addr.wrapping_add(offset as u32), byte);
+            let _ = self.mem.write_u8(addr.wrapping_add(offset as u64), byte);
         }
         written as u32
     }
@@ -358,7 +424,7 @@ impl Cpu {
     /// Write a HIPC response; `domain_objects` makes it a domain reply.
     pub(crate) fn write_ipc_response(
         &mut self,
-        tls: u32,
+        tls: u64,
         result: u32,
         move_handles: &[u64],
         raw_data: &[u8],
@@ -370,7 +436,7 @@ impl Cpu {
     /// [`Cpu::write_ipc_response`] with copy handles as well as move handles.
     pub(crate) fn write_ipc_reply(
         &mut self,
-        tls: u32,
+        tls: u64,
         result: u32,
         copy_handles: &[u64],
         move_handles: &[u64],
@@ -413,11 +479,13 @@ impl Cpu {
         self.mem.write_u32(tls.wrapping_add(4), header1)?;
         let mut off = 8u32;
         if has_handles {
-            self.mem.write_u32(tls.wrapping_add(off), handle_desc)?;
+            self.mem
+                .write_u32(tls.wrapping_add(u64::from(off)), handle_desc)?;
             off += 4;
             // Copy handles come first, then move handles.
             for &h in copy_handles.iter().chain(move_handles) {
-                self.mem.write_u32(tls.wrapping_add(off), h as u32)?;
+                self.mem
+                    .write_u32(tls.wrapping_add(u64::from(off)), h as u32)?;
                 off += 4;
             }
         }
@@ -426,30 +494,40 @@ impl Cpu {
         off += pre;
         // Zero the declared section so unwritten out parameters don't leak request bytes.
         for i in 0..raw_section_words * 4 {
-            self.mem.write_u8(tls.wrapping_add(off + i), 0)?;
+            self.mem.write_u8(tls.wrapping_add(u64::from(off + i)), 0)?;
         }
         if is_domain {
+            self.mem.write_u32(
+                tls.wrapping_add(u64::from(off)),
+                domain_objects.len() as u32,
+            )?;
             self.mem
-                .write_u32(tls.wrapping_add(off), domain_objects.len() as u32)?;
-            self.mem.write_u32(tls.wrapping_add(off + 4), 0)?;
-            self.mem.write_u32(tls.wrapping_add(off + 8), 0)?;
-            self.mem.write_u32(tls.wrapping_add(off + 12), 0)?;
+                .write_u32(tls.wrapping_add(u64::from(off + 4)), 0)?;
+            self.mem
+                .write_u32(tls.wrapping_add(u64::from(off + 8)), 0)?;
+            self.mem
+                .write_u32(tls.wrapping_add(u64::from(off + 12)), 0)?;
             off += 16;
         }
         // SFCO header.
-        self.mem.write_u32(tls.wrapping_add(off), 0x4F43_4653)?;
-        self.mem.write_u32(tls.wrapping_add(off + 4), 0)?;
-        self.mem.write_u32(tls.wrapping_add(off + 8), result)?;
-        self.mem.write_u32(tls.wrapping_add(off + 12), 0)?;
+        self.mem
+            .write_u32(tls.wrapping_add(u64::from(off)), 0x4F43_4653)?;
+        self.mem
+            .write_u32(tls.wrapping_add(u64::from(off + 4)), 0)?;
+        self.mem
+            .write_u32(tls.wrapping_add(u64::from(off + 8)), result)?;
+        self.mem
+            .write_u32(tls.wrapping_add(u64::from(off + 12)), 0)?;
         off += 16;
         for (i, &b) in raw_data.iter().enumerate() {
-            self.mem.write_u8(tls.wrapping_add(off + i as u32), b)?;
+            self.mem
+                .write_u8(tls.wrapping_add(u64::from(off + i as u32)), b)?;
         }
         off += raw_data_words * 4;
         // Domain object ids.
         for (i, &obj) in domain_objects.iter().enumerate() {
             self.mem
-                .write_u32(tls.wrapping_add(off + (i as u32) * 4), obj)?;
+                .write_u32(tls.wrapping_add(u64::from(off + (i as u32) * 4)), obj)?;
         }
         Ok(())
     }
@@ -457,7 +535,7 @@ impl Cpu {
     /// A TIPC reply: the data words start with the `Result`, no SFCO header or alignment.
     fn write_tipc_reply(
         &mut self,
-        tls: u32,
+        tls: u64,
         result: u32,
         copy_handles: &[u64],
         move_handles: &[u64],
@@ -474,21 +552,24 @@ impl Cpu {
         let mut off = 8u32;
         if has_handles {
             let desc = ((copy_handles.len() as u32) << 1) | ((move_handles.len() as u32) << 5);
-            self.mem.write_u32(tls.wrapping_add(off), desc)?;
+            self.mem.write_u32(tls.wrapping_add(u64::from(off)), desc)?;
             off += 4;
             for &h in copy_handles.iter().chain(move_handles) {
-                self.mem.write_u32(tls.wrapping_add(off), h as u32)?;
+                self.mem
+                    .write_u32(tls.wrapping_add(u64::from(off)), h as u32)?;
                 off += 4;
             }
         }
         // Clear before filling, as in the CMIF path.
         for i in 0..raw_words * 4 {
-            self.mem.write_u8(tls.wrapping_add(off + i), 0)?;
+            self.mem.write_u8(tls.wrapping_add(u64::from(off + i)), 0)?;
         }
-        self.mem.write_u32(tls.wrapping_add(off), result)?;
+        self.mem
+            .write_u32(tls.wrapping_add(u64::from(off)), result)?;
         off += 4;
         for (i, &b) in raw_data.iter().enumerate() {
-            self.mem.write_u8(tls.wrapping_add(off + i as u32), b)?;
+            self.mem
+                .write_u8(tls.wrapping_add(u64::from(off + i as u32)), b)?;
         }
         Ok(())
     }
@@ -497,7 +578,7 @@ impl Cpu {
     /// Returns the key its state is filed under.
     pub(crate) fn reply_with_interface(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         name: &str,
     ) -> Result<u64> {
@@ -582,10 +663,10 @@ impl Cpu {
         self.service_handles.get(&handle).map(|s| s.as_str())
     }
 
-    pub(crate) fn read_port_name(&self, ptr: u32) -> String {
+    pub(crate) fn read_port_name(&self, ptr: u64) -> String {
         let mut name = Vec::new();
         for i in 0..16u32 {
-            match self.mem.read_u8(ptr.wrapping_add(i)) {
+            match self.mem.read_u8(ptr.wrapping_add(u64::from(i))) {
                 Ok(0) | Err(_) => break,
                 Ok(b) => name.push(b),
             }
@@ -601,7 +682,7 @@ impl Cpu {
 
     /// The interface a request is addressed to, by domain object or session handle,
     /// or `root` if nothing named it.
-    pub(crate) fn ipc_interface(&self, tls: u32, handle: u64, root: &'static str) -> String {
+    pub(crate) fn ipc_interface(&self, tls: u64, handle: u64, root: &'static str) -> String {
         if self.ipc_is_domain_request(tls) {
             let object_id = self.ipc_domain_object_id(tls);
             self.domain_interface(handle, object_id)
@@ -618,7 +699,7 @@ impl Cpu {
     }
 
     /// The state key of this request's object, as [`Cpu::reply_with_interface`] returned it.
-    pub(crate) fn ipc_object_key(&self, tls: u32, handle: u64) -> u64 {
+    pub(crate) fn ipc_object_key(&self, tls: u64, handle: u64) -> u64 {
         if self.ipc_is_domain_request(tls) {
             Self::object_key(handle, self.ipc_domain_object_id(tls))
         } else {
@@ -627,16 +708,23 @@ impl Cpu {
     }
 
     /// The key of the `index`-th object a request sends: a domain in-object or a moved session.
-    pub(crate) fn ipc_input_object_key(&self, tls: u32, handle: u64, index: u32) -> Option<u64> {
+    pub(crate) fn ipc_input_object_key(&self, tls: u64, handle: u64, index: u32) -> Option<u64> {
         if self.ipc_is_domain_request(tls) {
             let start = self.ipc_reply_start(tls);
-            let count = self.mem.read_u8(tls.wrapping_add(start + 1)).ok()?;
+            let count = self
+                .mem
+                .read_u8(tls.wrapping_add(u64::from(start + 1)))
+                .ok()?;
             if index >= u32::from(count) {
                 return None;
             }
-            let data_size = u32::from(self.mem.read_u16(tls.wrapping_add(start + 2)).ok()?);
+            let data_size = u32::from(
+                self.mem
+                    .read_u16(tls.wrapping_add(u64::from(start + 2)))
+                    .ok()?,
+            );
             let at = start + 0x10 + data_size + 4 * index;
-            let object_id = self.mem.read_u32(tls.wrapping_add(at)).ok()?;
+            let object_id = self.mem.read_u32(tls.wrapping_add(u64::from(at))).ok()?;
             Some(Self::object_key(handle, object_id))
         } else {
             if self.mem.read_u32(tls.wrapping_add(4)).ok()? >> 31 == 0 {
@@ -654,33 +742,36 @@ impl Cpu {
             }
             let session = self
                 .mem
-                .read_u32(tls.wrapping_add(at + 4 * (copies + index)))
+                .read_u32(tls.wrapping_add(u64::from(at + 4 * (copies + index))))
                 .ok()?;
             Some(Self::object_key(u64::from(session), 0))
         }
     }
 
     /// Whether the request is a control message (type 5, or 7 with context).
-    pub(crate) fn ipc_is_control_request(&self, tls: u32) -> bool {
+    pub(crate) fn ipc_is_control_request(&self, tls: u64) -> bool {
         matches!(self.ipc_message_type(tls), 5 | 7)
     }
 
     /// Whether the request is a domain message (domain header type byte 1).
-    pub(crate) fn ipc_is_domain_request(&self, tls: u32) -> bool {
+    pub(crate) fn ipc_is_domain_request(&self, tls: u64) -> bool {
         if self.ipc_is_tipc_request(tls) {
             return false;
         }
         let start = self.ipc_reply_start(tls);
-        self.mem.read_u8(tls.wrapping_add(start)).unwrap_or(0) == 1
+        self.mem
+            .read_u8(tls.wrapping_add(u64::from(start)))
+            .unwrap_or(0)
+            == 1
     }
 
     /// Whether the request is a domain close (type byte 2), which has no `CmifInHeader`.
-    pub(crate) fn ipc_is_domain_close(&self, tls: u32) -> bool {
+    pub(crate) fn ipc_is_domain_close(&self, tls: u64) -> bool {
         if self.ipc_is_tipc_request(tls) {
             return false;
         }
         self.mem
-            .read_u8(tls.wrapping_add(self.ipc_reply_start(tls)))
+            .read_u8(tls.wrapping_add(u64::from(self.ipc_reply_start(tls))))
             .unwrap_or(0)
             == 2
     }
@@ -688,7 +779,7 @@ impl Cpu {
     /// Forget one object and acknowledge the close.
     pub(crate) fn close_domain_object(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         object_id: u32,
     ) -> Result<()> {
@@ -703,10 +794,10 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
-    pub(crate) fn ipc_domain_object_id(&self, tls: u32) -> u32 {
+    pub(crate) fn ipc_domain_object_id(&self, tls: u64) -> u32 {
         let start = self.ipc_reply_start(tls);
         self.mem
-            .read_u32(tls.wrapping_add(start + 4))
+            .read_u32(tls.wrapping_add(u64::from(start + 4)))
             .unwrap_or(0xFFFFFFFF)
     }
 
@@ -734,7 +825,7 @@ impl Cpu {
     /// Answer a control message (`ConvertToDomain` and the rest); returns whether it was one.
     pub(crate) fn ipc_answer_control(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         name: &str,
         cmd_id: Option<u32>,
@@ -767,7 +858,7 @@ impl Cpu {
     /// Refuse a command with `cmif`'s unknown-command-id result, warning once.
     pub(crate) fn unimplemented_command(
         &mut self,
-        tls: u32,
+        tls: u64,
         iface: &str,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -799,7 +890,7 @@ impl Cpu {
     /// object, and an event nothing signals.
     pub(crate) fn reply_with_fabricated_object(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         name: &str,
         cmd_id: Option<u32>,
@@ -889,7 +980,7 @@ impl Cpu {
             .collect()
     }
 
-    pub(crate) fn sm_request(&mut self, tls: u32, cmd_id: Option<u32>, _handle: u64) -> Result<()> {
+    pub(crate) fn sm_request(&mut self, tls: u64, cmd_id: Option<u32>, _handle: u64) -> Result<()> {
         match cmd_id {
             Some(0) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             Some(1) => {
@@ -912,7 +1003,7 @@ impl Cpu {
     }
 
     /// `csrng`: pseudo-random bytes (splitmix64 seeded from the emulated clock).
-    pub(crate) fn csrng_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn csrng_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
         }
@@ -925,7 +1016,8 @@ impl Cpu {
                         while offset < size {
                             let word = self.next_random_u64().to_le_bytes();
                             for &byte in word.iter().take((size - offset).min(8) as usize) {
-                                self.mem.write_u8(addr.wrapping_add(offset), byte)?;
+                                self.mem
+                                    .write_u8(addr.wrapping_add(u64::from(offset)), byte)?;
                                 offset += 1;
                             }
                         }
@@ -938,7 +1030,7 @@ impl Cpu {
     }
 
     /// `spl:`: only `GetConfig`, answered as an Icosa retail unit.
-    pub(crate) fn spl_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn spl_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
         }
@@ -973,7 +1065,7 @@ impl Cpu {
     }
 
     /// `pm:*`: the process manager, answering for the single application process.
-    pub(crate) fn pm_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn pm_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
         }
@@ -1012,7 +1104,7 @@ impl Cpu {
     }
 
     /// `btm:sys` and its `IBtmSystemCore`: no radio, and nothing ever pairs.
-    pub(crate) fn btm_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn btm_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_answer_control(tls, handle, "btm:sys", cmd_id)? {
             return Ok(());
         }
@@ -1074,7 +1166,7 @@ impl Cpu {
     }
 
     /// `nfc:sys` and its `ISystem`: no reader attached; the enabled flag is a setting.
-    pub(crate) fn nfc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn nfc_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         /// `nn::nfc::State`.
         const STATE_NON_INITIALIZED: u32 = 0;
         const STATE_INITIALIZED: u32 = 1;
@@ -1136,7 +1228,7 @@ impl Cpu {
 
     /// `nfp:sys` and `nfp:user`, the amiibo service, and their `ISystem` and `IUser`:
     /// no reader attached.
-    pub(crate) fn nfp_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn nfp_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         /// `nn::nfc::State`.
         const STATE_NON_INITIALIZED: u32 = 0;
         const STATE_INITIALIZED: u32 = 1;
@@ -1199,7 +1291,7 @@ impl Cpu {
     }
 
     /// `ngc:u` and `ngct:u`, the profanity filter: nothing is profane.
-    pub(crate) fn ngc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn ngc_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         /// Nonzero, though there is no word list.
         const CONTENT_VERSION: u32 = 1;
         const NOTHING_PROFANE: u32 = 0;
@@ -1244,7 +1336,7 @@ impl Cpu {
     }
 
     /// The text a request carries in its first input buffer, as bytes.
-    fn input_text(&self, tls: u32) -> Vec<u8> {
+    fn input_text(&self, tls: u64) -> Vec<u8> {
         match self.ipc_input_buffer(tls, 0) {
             Some((addr, size)) if addr != 0 => self.read_bytes(addr, size),
             _ => Vec::new(),
@@ -1254,7 +1346,7 @@ impl Cpu {
     /// `npns:s` / `npns:u`, the push-notification client: never connected.
     pub(crate) fn npns_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -1302,8 +1394,31 @@ impl Cpu {
 pub(crate) mod testing {
     use super::Cpu;
 
-    pub(crate) const TLS: u32 = 0x2000;
+    pub(crate) const TLS: u64 = 0x2000;
     pub(crate) const SFCI: u32 = 0x4943_4653;
+
+    /// The three words of a map-alias descriptor for `size` bytes at `address`.
+    pub(crate) fn map_descriptor(address: u64, size: u32) -> [u32; 3] {
+        let packed = ((((address >> 36) as u32) & 0x3F_FFFF) << 2)
+            | ((((address >> 32) as u32) & 0xF) << 28);
+        [size, address as u32, packed]
+    }
+
+    /// The two words of a send-static descriptor for `size` bytes at `address`.
+    pub(crate) fn static_descriptor(address: u64, size: u32) -> [u32; 2] {
+        let packed = (size << 16)
+            | ((((address >> 32) as u32) & 0xF) << 12)
+            | ((((address >> 36) as u32) & 0x3F) << 6);
+        [packed, address as u32]
+    }
+
+    /// The two words of a receive-static entry for `size` bytes at `address`.
+    pub(crate) fn recv_static_entry(address: u64, size: u32) -> [u32; 2] {
+        [
+            address as u32,
+            (size << 16) | (((address >> 32) as u32) & 0xFFFF),
+        ]
+    }
 
     /// A CMIF request with no buffer descriptors, optionally on a domain.
     pub(crate) fn request(domain: bool, command_id: u32, payload: &[u8]) -> Cpu {
@@ -1315,7 +1430,7 @@ pub(crate) mod testing {
 
     /// Marshal a request into the TLS buffer.
     pub(crate) fn marshal(cpu: &mut Cpu, domain: bool, command_id: u32, payload: &[u8]) {
-        for i in (0..0x200u32).step_by(4) {
+        for i in (0..0x200u64).step_by(4) {
             cpu.mem.write_u32(TLS + i, 0).unwrap();
         }
         cpu.mem.write_u32(TLS, 4).unwrap(); // CmifCommandType_Request
@@ -1330,7 +1445,7 @@ pub(crate) mod testing {
         cpu.mem.write_u32(at + 8, command_id).unwrap();
         at += 0x10;
         for (i, &byte) in payload.iter().enumerate() {
-            cpu.mem.write_u8(at + i as u32, byte).unwrap();
+            cpu.mem.write_u8(at + i as u64, byte).unwrap();
         }
     }
 
@@ -1369,6 +1484,7 @@ pub(crate) mod testing {
         cpu.mem.write_u32(TLS + 4, 8).unwrap();
         let data_area = cpu.ipc_reply_start(TLS);
         assert_eq!(data_area, 0x30);
+        let data_area = u64::from(data_area);
         cpu.mem.write_u32(TLS + data_area, SFCI).unwrap();
         cpu.mem.write_u32(TLS + data_area + 8, 0x1b).unwrap();
         assert_eq!(cpu.ipc_command_id(TLS), Some(0x1b));
@@ -1410,25 +1526,30 @@ pub(crate) mod testing {
 
     #[test]
     fn an_auto_select_buffer_is_found_in_whichever_form_it_arrived() {
-        // AutoSelect fills both descriptor forms and nulls the unused one.
-        const BUFFER: u32 = 0x3000;
+        // AutoSelect fills both descriptor forms and nulls the unused one, above 4 GiB too.
         const SIZE: u32 = 0x40;
+        for buffer in [0x3000, 0x20_1234_5000] {
+            auto_select_finds(buffer, SIZE);
+        }
+    }
+
+    fn auto_select_finds(buffer: u64, size: u32) {
         for through_pointer in [true, false] {
-            let cpu = auto_select_request(1, &[], BUFFER, SIZE, through_pointer);
+            let cpu = auto_select_request(1, &[], buffer, size, through_pointer);
             assert_eq!(
                 cpu.ipc_input_buffer(TLS, 0),
-                Some((BUFFER, SIZE)),
-                "input, through_pointer={through_pointer}"
+                Some((buffer, size)),
+                "input at {buffer:#x}, through_pointer={through_pointer}"
             );
             assert_eq!(
                 cpu.ipc_output_buffer(TLS, 0),
-                Some((BUFFER, SIZE)),
-                "output, through_pointer={through_pointer}"
+                Some((buffer, size)),
+                "output at {buffer:#x}, through_pointer={through_pointer}"
             );
             assert_eq!(
                 cpu.ipc_buffers(TLS),
-                (vec![(BUFFER, SIZE)], vec![(BUFFER, SIZE)]),
-                "both, through_pointer={through_pointer}"
+                (vec![(buffer, size)], vec![(buffer, size)]),
+                "both at {buffer:#x}, through_pointer={through_pointer}"
             );
         }
     }
@@ -1436,13 +1557,13 @@ pub(crate) mod testing {
     #[test]
     fn a_static_buffer_is_found_past_the_handles_a_special_header_carries() {
         // The static descriptor sits past the special header's copy and move handles.
-        const PATH: u32 = 0x3000;
+        const PATH: u64 = 0x10_8765_3000;
 
         let cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         cpu.mem.map_zero(PATH, 0x100).unwrap();
         for (i, &byte) in b"/save/data.bin\0".iter().enumerate() {
-            cpu.mem.write_u8(PATH + i as u32, byte).unwrap();
+            cpu.mem.write_u8(PATH + i as u64, byte).unwrap();
         }
 
         // A Request with one send-static, and a special header carrying two
@@ -1450,16 +1571,15 @@ pub(crate) mod testing {
         cpu.mem.write_u32(TLS, 4 | (1 << 16)).unwrap();
         cpu.mem.write_u32(TLS + 4, 8 | (1 << 31)).unwrap();
         cpu.mem.write_u32(TLS + 8, (2 << 1) | (1 << 5)).unwrap();
-        for slot in 0..3 {
+        for slot in 0..3u32 {
             cpu.mem
-                .write_u32(TLS + 12 + slot * 4, 0xDEAD_0000 + slot)
+                .write_u32(TLS + 12 + u64::from(slot) * 4, 0xDEAD_0000 + slot)
                 .unwrap();
         }
-        // `{ index:6, address_high:6, address_mid:4, size:16 }`, then the
-        // low word of the address.
         let descriptor = TLS + 12 + 3 * 4;
-        cpu.mem.write_u32(descriptor, 0x10 << 16).unwrap();
-        cpu.mem.write_u32(descriptor + 4, PATH).unwrap();
+        let [packed, low] = static_descriptor(PATH, 0x10);
+        cpu.mem.write_u32(descriptor, packed).unwrap();
+        cpu.mem.write_u32(descriptor + 4, low).unwrap();
 
         assert_eq!(cpu.ipc_static_buffers(TLS), vec![(PATH, 0x10)]);
         assert_eq!(cpu.ipc_request_path(TLS), "/save/data.bin");
@@ -1475,28 +1595,27 @@ pub(crate) mod testing {
     }
 
     /// Where [`write_path_request`] parks the path it hands the service.
-    const PATH_AT: u32 = 0x3800;
+    const PATH_AT: u64 = 0x3800;
 
     /// [`request_with_path`] into an existing `Cpu`.
     pub(crate) fn write_path_request(cpu: &mut Cpu, command_id: u32, path: &str, payload: &[u8]) {
-        for offset in (0..0x100u32).step_by(4) {
+        for offset in (0..0x100u64).step_by(4) {
             cpu.mem.write_u32(TLS + offset, 0).unwrap();
         }
         for (i, &byte) in path.as_bytes().iter().enumerate() {
-            cpu.mem.write_u8(PATH_AT + i as u32, byte).unwrap();
+            cpu.mem.write_u8(PATH_AT + i as u64, byte).unwrap();
         }
-        cpu.mem.write_u8(PATH_AT + path.len() as u32, 0).unwrap();
+        cpu.mem.write_u8(PATH_AT + path.len() as u64, 0).unwrap();
         cpu.mem.write_u32(TLS, 4 | (1 << 16)).unwrap(); // one send-static
         cpu.mem.write_u32(TLS + 4, 12).unwrap();
-        cpu.mem
-            .write_u32(TLS + 8, (path.len() as u32 + 1) << 16)
-            .unwrap();
-        cpu.mem.write_u32(TLS + 12, PATH_AT).unwrap();
+        let [packed, low] = static_descriptor(PATH_AT, path.len() as u32 + 1);
+        cpu.mem.write_u32(TLS + 8, packed).unwrap();
+        cpu.mem.write_u32(TLS + 12, low).unwrap();
         let at = TLS + 0x20;
         cpu.mem.write_u32(at, SFCI).unwrap();
         cpu.mem.write_u32(at + 8, command_id).unwrap();
         for (i, &byte) in payload.iter().enumerate() {
-            cpu.mem.write_u8(at + 0x10 + i as u32, byte).unwrap();
+            cpu.mem.write_u8(at + 0x10 + i as u64, byte).unwrap();
         }
     }
 
@@ -1518,7 +1637,7 @@ pub(crate) mod testing {
 
     /// Overwrite the TLS buffer with a fresh request, clearing it first.
     pub(crate) fn write_request(cpu: &mut Cpu, command_id: u32, payload: &[u8]) {
-        for offset in (0..0x100u32).step_by(4) {
+        for offset in (0..0x100u64).step_by(4) {
             cpu.mem.write_u32(TLS + offset, 0).unwrap();
         }
         cpu.mem.write_u32(TLS, 4).unwrap();
@@ -1527,7 +1646,7 @@ pub(crate) mod testing {
         cpu.mem.write_u32(at, SFCI).unwrap();
         cpu.mem.write_u32(at + 8, command_id).unwrap();
         for (index, &byte) in payload.iter().enumerate() {
-            cpu.mem.write_u8(at + 0x10 + index as u32, byte).unwrap();
+            cpu.mem.write_u8(at + 0x10 + index as u64, byte).unwrap();
         }
     }
 
@@ -1535,7 +1654,7 @@ pub(crate) mod testing {
     pub(crate) fn request_with_recv_buffer(
         command_id: u32,
         payload: &[u8],
-        buffer: u32,
+        buffer: u64,
         size: u32,
     ) -> Cpu {
         let mut cpu = Cpu::new();
@@ -1549,7 +1668,7 @@ pub(crate) mod testing {
         cpu: &mut Cpu,
         command_id: u32,
         payload: &[u8],
-        buffer: u32,
+        buffer: u64,
         size: u32,
         send: bool,
     ) {
@@ -1567,10 +1686,10 @@ pub(crate) mod testing {
         cpu: &mut Cpu,
         command_id: u32,
         payload: &[u8],
-        send: &[(u32, u32)],
-        recv: &[(u32, u32)],
+        send: &[(u64, u32)],
+        recv: &[(u64, u32)],
     ) {
-        for offset in (0..0x200u32).step_by(4) {
+        for offset in (0..0x200u64).step_by(4) {
             cpu.mem.write_u32(TLS + offset, 0).unwrap();
         }
         let counts = ((send.len() as u32) << 20) | ((recv.len() as u32) << 24);
@@ -1578,17 +1697,17 @@ pub(crate) mod testing {
         cpu.mem.write_u32(TLS + 4, 16).unwrap();
         // Each descriptor: size, low address word, packed high bits.
         for (index, &(address, size)) in send.iter().chain(recv).enumerate() {
-            let at = TLS + 8 + 12 * index as u32;
-            cpu.mem.write_u32(at, size).unwrap();
-            cpu.mem.write_u32(at + 4, address).unwrap();
-            cpu.mem.write_u32(at + 8, 0).unwrap();
+            let at = TLS + 8 + 12 * index as u64;
+            for (word, value) in map_descriptor(address, size).into_iter().enumerate() {
+                cpu.mem.write_u32(at + 4 * word as u64, value).unwrap();
+            }
         }
-        let descriptors = 8 + 12 * (send.len() + recv.len()) as u32;
+        let descriptors = 8 + 12 * (send.len() + recv.len()) as u64;
         let at = TLS + descriptors.div_ceil(16) * 16;
         cpu.mem.write_u32(at, SFCI).unwrap();
         cpu.mem.write_u32(at + 8, command_id).unwrap();
         for (index, &byte) in payload.iter().enumerate() {
-            cpu.mem.write_u8(at + 0x10 + index as u32, byte).unwrap();
+            cpu.mem.write_u8(at + 0x10 + index as u64, byte).unwrap();
         }
     }
 
@@ -1596,7 +1715,7 @@ pub(crate) mod testing {
     pub(crate) fn request_with_recv_static(
         command_id: u32,
         payload: &[u8],
-        buffer: u32,
+        buffer: u64,
         size: u32,
     ) -> Cpu {
         let cpu = request(false, command_id, payload);
@@ -1604,9 +1723,10 @@ pub(crate) mod testing {
         let data_words = 2 + 4 + payload.len().div_ceil(4) as u32;
         // recv_static_mode = 2 + one buffer.
         cpu.mem.write_u32(TLS + 4, data_words | (3 << 10)).unwrap();
-        let at = TLS + 8 + 4 * data_words;
-        cpu.mem.write_u32(at, buffer).unwrap();
-        cpu.mem.write_u32(at + 4, size << 16).unwrap();
+        let at = TLS + 8 + 4 * u64::from(data_words);
+        let [low, packed] = recv_static_entry(buffer, size);
+        cpu.mem.write_u32(at, low).unwrap();
+        cpu.mem.write_u32(at + 4, packed).unwrap();
         cpu
     }
 
@@ -1614,13 +1734,13 @@ pub(crate) mod testing {
     pub(crate) fn auto_select_request(
         command_id: u32,
         payload: &[u8],
-        buffer: u32,
+        buffer: u64,
         size: u32,
         through_pointer: bool,
     ) -> Cpu {
         let cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
-        for offset in (0..0x200u32).step_by(4) {
+        for offset in (0..0x200u64).step_by(4) {
             cpu.mem.write_u32(TLS + offset, 0).unwrap();
         }
         let (pointer, alias) = if through_pointer {
@@ -1632,13 +1752,14 @@ pub(crate) mod testing {
         cpu.mem
             .write_u32(TLS, 4 | (1 << 16) | (1 << 20) | (1 << 24))
             .unwrap();
-        cpu.mem.write_u32(TLS + 8, pointer.1 << 16).unwrap();
-        cpu.mem.write_u32(TLS + 12, pointer.0).unwrap();
+        let [packed, low] = static_descriptor(pointer.0, pointer.1);
+        cpu.mem.write_u32(TLS + 8, packed).unwrap();
+        cpu.mem.write_u32(TLS + 12, low).unwrap();
         for (index, &(address, len)) in [alias, alias].iter().enumerate() {
-            let at = TLS + 16 + 12 * index as u32;
-            cpu.mem.write_u32(at, len).unwrap();
-            cpu.mem.write_u32(at + 4, address).unwrap();
-            cpu.mem.write_u32(at + 8, 0).unwrap();
+            let at = TLS + 16 + 12 * index as u64;
+            for (word, value) in map_descriptor(address, len).into_iter().enumerate() {
+                cpu.mem.write_u32(at + 4 * word as u64, value).unwrap();
+            }
         }
         // Padding, the CmifInHeader, then the payload.
         let data_words = 2 + 4 + payload.len().div_ceil(4) as u32;
@@ -1648,12 +1769,13 @@ pub(crate) mod testing {
         cpu.mem.write_u32(data_area + 16, command_id).unwrap();
         for (index, &byte) in payload.iter().enumerate() {
             cpu.mem
-                .write_u8(data_area + 24 + index as u32, byte)
+                .write_u8(data_area + 24 + index as u64, byte)
                 .unwrap();
         }
-        let recv_list = data_area + 4 * data_words;
-        cpu.mem.write_u32(recv_list, pointer.0).unwrap();
-        cpu.mem.write_u32(recv_list + 4, pointer.1 << 16).unwrap();
+        let recv_list = data_area + 4 * u64::from(data_words);
+        let [low, packed] = recv_static_entry(pointer.0, pointer.1);
+        cpu.mem.write_u32(recv_list, low).unwrap();
+        cpu.mem.write_u32(recv_list + 4, packed).unwrap();
         cpu
     }
 
@@ -1662,14 +1784,14 @@ pub(crate) mod testing {
         cpu: &mut Cpu,
         command_id: u32,
         payload: &[u8],
-        buffers: &[(u32, u32)],
+        buffers: &[(u64, u32)],
     ) {
         write_buffer_request(cpu, command_id, payload, buffers, &[]);
     }
 
     #[test]
     fn csrng_fills_the_buffer_with_bytes_that_differ() {
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x20_0000_4000;
         let mut cpu = request_with_recv_buffer(0, &[], BUFFER, 0x20);
         cpu.mem.map_zero(BUFFER, 0x100).unwrap();
         cpu.set_unix_time(1_700_000_000);
@@ -1745,15 +1867,15 @@ mod tests {
 
     #[test]
     fn ngc_writes_the_masked_text_back_rather_than_leaving_the_buffer() {
-        const IN: u32 = 0x4000;
-        const OUT: u32 = 0x5000;
+        const IN: u64 = 0x4000;
+        const OUT: u64 = 0x5000;
         const TEXT: &[u8] = b"a perfectly ordinary console name";
 
         let mut cpu = request(false, 2, &[]);
         cpu.mem.map_zero(IN, 0x200).unwrap();
         cpu.mem.map_zero(OUT, 0x200).unwrap();
         for (index, &byte) in TEXT.iter().enumerate() {
-            cpu.mem.write_u8(IN + index as u32, byte).unwrap();
+            cpu.mem.write_u8(IN + index as u64, byte).unwrap();
         }
         cpu.register_service_handle(9, "ngc:u");
         write_buffer_request(&mut cpu, 2, &[], &[(IN, TEXT.len() as u32)], &[(OUT, 0x80)]);
@@ -1766,15 +1888,15 @@ mod tests {
     #[test]
     fn ngct_matches_nothing_and_filters_nothing() {
         // Match is a bool, and Filter writes its buffer like Mask.
-        const IN: u32 = 0x4000;
-        const OUT: u32 = 0x5000;
+        const IN: u64 = 0x4000;
+        const OUT: u64 = 0x5000;
         const TEXT: &[u8] = b"still ordinary";
 
         let mut cpu = request(false, 0, &[]);
         cpu.mem.map_zero(IN, 0x200).unwrap();
         cpu.mem.map_zero(OUT, 0x200).unwrap();
         for (index, &byte) in TEXT.iter().enumerate() {
-            cpu.mem.write_u8(IN + index as u32, byte).unwrap();
+            cpu.mem.write_u8(IN + index as u64, byte).unwrap();
         }
         cpu.register_service_handle(9, "ngct:u");
         cpu.ngc_request(TLS, 9, Some(0)).unwrap();

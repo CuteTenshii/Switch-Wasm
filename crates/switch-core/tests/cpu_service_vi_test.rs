@@ -32,10 +32,10 @@ fn the_binder_transacts_on_the_command_a_pre_3_0_0_sdk_sends() {
 
         let parcel = binder_parcel(&QUERY_WIDTH.to_le_bytes());
         for (i, &b) in parcel.iter().enumerate() {
-            cpu.mem.write_u8(PARCEL + i as u32, b).unwrap();
+            cpu.mem.write_u8(u64::from(PARCEL + i as u32), b).unwrap();
         }
         for i in (0..0x100u32).step_by(4) {
-            cpu.mem.write_u32(REPLY + i, 0).unwrap();
+            cpu.mem.write_u32(u64::from(REPLY + i), 0).unwrap();
         }
 
         // `{ s32 binder_id, u32 code, u32 flags }`, parcel in the send buffer.
@@ -58,20 +58,22 @@ fn the_binder_transacts_on_the_command_a_pre_3_0_0_sdk_sends() {
             "cmd {cmd} was refused"
         );
         // The reply parcel `{ i32 value, i32 status }` behind the usual header.
-        let payload_size = cpu.mem.read_u32(REPLY).unwrap();
-        let payload_off = cpu.mem.read_u32(REPLY + 4).unwrap();
+        let payload_size = cpu.mem.read_u32(u64::from(REPLY)).unwrap();
+        let payload_off = cpu.mem.read_u32(u64::from(REPLY + 4)).unwrap();
         assert_eq!(payload_off, 16, "cmd {cmd}: no reply parcel came back");
         assert_eq!(
             payload_size, 8,
             "cmd {cmd}: the reply is a value and a status"
         );
         assert_eq!(
-            cpu.mem.read_u32(REPLY + payload_off).unwrap(),
+            cpu.mem.read_u32(u64::from(REPLY + payload_off)).unwrap(),
             1280,
             "cmd {cmd}: the queue answered a width query with something else"
         );
         assert_eq!(
-            cpu.mem.read_u32(REPLY + payload_off + 4).unwrap(),
+            cpu.mem
+                .read_u32(u64::from(REPLY + payload_off + 4))
+                .unwrap(),
             0,
             "cmd {cmd} failed"
         );
@@ -102,10 +104,10 @@ fn vi_native_window_names_the_binder_interface() {
     let size = cpu.mem.read_u64(tls + 0x20).unwrap() as u32;
 
     // Parcel header: { payload_size, payload_off, objects_size, objects_off }.
-    let payload_size = cpu.mem.read_u32(WINDOW).unwrap();
-    let payload_off = cpu.mem.read_u32(WINDOW + 4).unwrap();
-    let objects_size = cpu.mem.read_u32(WINDOW + 8).unwrap();
-    let objects_off = cpu.mem.read_u32(WINDOW + 12).unwrap();
+    let payload_size = cpu.mem.read_u32(u64::from(WINDOW)).unwrap();
+    let payload_off = cpu.mem.read_u32(u64::from(WINDOW + 4)).unwrap();
+    let objects_size = cpu.mem.read_u32(u64::from(WINDOW + 8)).unwrap();
+    let objects_off = cpu.mem.read_u32(u64::from(WINDOW + 12)).unwrap();
     assert_eq!(payload_size, 0x28, "a flat_binder_object is 0x28 bytes");
     assert_eq!(payload_off, 0x10);
     assert_eq!(objects_size, 4, "one object in the offset table");
@@ -118,15 +120,18 @@ fn vi_native_window_names_the_binder_interface() {
 
     let payload = WINDOW + payload_off;
     assert_eq!(
-        cpu.mem.read_u32(payload).unwrap(),
+        cpu.mem.read_u32(u64::from(payload)).unwrap(),
         2,
         "flat_binder_object type"
     );
-    let binder = cpu.mem.read_u64(payload + 8).unwrap();
+    let binder = cpu.mem.read_u64(u64::from(payload + 8)).unwrap();
     assert_ne!(binder, 0, "no IGraphicBufferProducer id");
     let mut name = [0u8; 8];
     for (i, slot) in name.iter_mut().enumerate() {
-        *slot = cpu.mem.read_u8(payload + 0x18 + i as u32).unwrap();
+        *slot = cpu
+            .mem
+            .read_u8(u64::from(payload + 0x18 + i as u32))
+            .unwrap();
     }
     assert_eq!(&name, b"dispdrv\0", "the interface has to name itself");
 }
@@ -157,15 +162,17 @@ fn the_display_answers_what_it_is() {
         "ListDisplays failed"
     );
     assert_eq!(cpu.mem.read_u64(tls + 0x20).unwrap(), 1, "no displays");
-    let name: Vec<u8> = (0..7).map(|i| cpu.mem.read_u8(BUF + i).unwrap()).collect();
+    let name: Vec<u8> = (0..7)
+        .map(|i| cpu.mem.read_u8(u64::from(BUF + i)).unwrap())
+        .collect();
     assert_eq!(&name, b"Default");
     assert_eq!(
-        cpu.mem.read_u8(BUF + 0x40).unwrap(),
+        cpu.mem.read_u8(u64::from(BUF + 0x40)).unwrap(),
         1,
         "layer limit not enabled"
     );
-    assert_eq!(cpu.mem.read_u64(BUF + 0x50).unwrap(), 1280);
-    assert_eq!(cpu.mem.read_u64(BUF + 0x58).unwrap(), 720);
+    assert_eq!(cpu.mem.read_u64(u64::from(BUF + 0x50)).unwrap(), 1280);
+    assert_eq!(cpu.mem.read_u64(u64::from(BUF + 0x58)).unwrap(), 720);
 
     // OpenDisplay takes that name and returns the display id.
     let mut open = [0u8; 0x40];
@@ -201,7 +208,9 @@ fn the_display_answers_what_it_is() {
     assert_ne!(system, 0, "no ISystemDisplayService");
 
     for i in 0..0x40u32 {
-        cpu.mem.write_u32(BUF + i * 4, 0xDEAD_BEEF).unwrap();
+        cpu.mem
+            .write_u32(u64::from(BUF + i * 4), 0xDEAD_BEEF)
+            .unwrap();
     }
     ipc_request_plain_with_buffer(
         &mut cpu,
@@ -222,9 +231,12 @@ fn the_display_answers_what_it_is() {
         1,
         "no modes to pick from"
     );
-    assert_eq!(cpu.mem.read_u32(BUF).unwrap(), 1280);
-    assert_eq!(cpu.mem.read_u32(BUF + 4).unwrap(), 720);
-    assert_eq!(f32::from_bits(cpu.mem.read_u32(BUF + 8).unwrap()), 60.0);
+    assert_eq!(cpu.mem.read_u32(u64::from(BUF)).unwrap(), 1280);
+    assert_eq!(cpu.mem.read_u32(u64::from(BUF + 4)).unwrap(), 720);
+    assert_eq!(
+        f32::from_bits(cpu.mem.read_u32(u64::from(BUF + 8)).unwrap()),
+        60.0
+    );
 }
 
 #[test]
@@ -501,19 +513,19 @@ fn the_dock_resizes_the_display_and_takes_the_touchscreen_away() {
     cpu.run(1).unwrap();
     cpu.set_pc(0x1000);
     let state = LIFO + 0x20 + 8;
-    let before = cpu.mem.read_u64(LIFO + 0x20).unwrap();
+    let before = cpu.mem.read_u64(u64::from(LIFO + 0x20)).unwrap();
     cpu.set_touch_state(&[TouchPoint {
         finger_id: 0,
         x: 640,
         y: 360,
     }]);
     assert_eq!(
-        cpu.mem.read_u32(state + 0x08).unwrap(),
+        cpu.mem.read_u32(u64::from(state + 0x08)).unwrap(),
         0,
         "docked reports no contacts"
     );
     assert!(
-        cpu.mem.read_u64(LIFO + 0x20).unwrap() > before,
+        cpu.mem.read_u64(u64::from(LIFO + 0x20)).unwrap() > before,
         "the sample still advances"
     );
 
@@ -525,11 +537,15 @@ fn the_dock_resizes_the_display_and_takes_the_touchscreen_away() {
         y: 360,
     }]);
     assert_eq!(
-        cpu.mem.read_u32(state + 0x08).unwrap(),
+        cpu.mem.read_u32(u64::from(state + 0x08)).unwrap(),
         1,
         "handheld reports the contact"
     );
-    assert_eq!(cpu.mem.read_u32(state + 0x10 + 0x10).unwrap(), 640, "x");
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(state + 0x10 + 0x10)).unwrap(),
+        640,
+        "x"
+    );
 }
 
 #[test]

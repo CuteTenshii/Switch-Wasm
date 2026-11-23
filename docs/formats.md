@@ -92,7 +92,7 @@ Section headings are paths under `crates/switch-core/src/`; a heading that start
 
 - The core reads no environment: browsers have none, and `getenv` on per-syscall/IPC/draw paths was 37% of a Home Menu run. Switches are fields set through the API (`Cpu::set_jit_enabled`, `Cpu::set_vsync_throttle`, `trace::set_mask`, `switch_gpu::Gpu`'s setters), and diagnostic files go to a `dump::Sink`; the examples' `common::parse` and `common::new_cpu` read the command-line flags into them once.
 - `IdHasher` (fxhash-style) replaces SipHash for self-minted keys: SipHash was 18.7% of a Home Menu run. Iteration order was already nondeterministic with the default hasher. `finish` must fold the high half down because one multiply moves entropy only upward and `HashMap` buckets by low bits; without the fold, 4096 page-aligned addresses shared one bucket.
-- `FB_BASE`/`INPUT_ADDR` sit above the heap and alias regions and below `GUEST_SPACE_END` (`kernel/layout.rs`); a region that grows must not reach them.
+- `FB_BASE`/`INPUT_ADDR` sit above a 32-bit process's heap and alias regions and below `GUEST_SPACE_END` (`kernel/layout.rs`); a region that grows must not reach them. A 64-bit process's regions are above 4 GiB.
 
 ## `romfs.rs`
 
@@ -116,7 +116,7 @@ Section headings are paths under `crates/switch-core/src/`; a heading that start
 
 ## `npdm.rs`
 
-- `system_resource_size` decides the memory layout: Just Dance 2019 declares 0 (plain heap), Just Dance 2023 declares 16 MiB (VAMM). `nnSdk` reads the same figure from `svcGetInfo`, so both must agree.
+- `system_resource_size` is what `svcGetInfo` reports as `SystemResourceSizeTotal`, which puts `nnSdk` on its Vamm manager when nonzero: Just Dance 2019 declares 0 (plain heap), Just Dance 2023 16 MiB. For a 32-bit title it also picks the layout ([kernel.md](kernel.md)). The NPDM's `Is64BitInstruction` flag picks between the 39-bit and 32-bit layouts.
 - Mario Kart 8 Deluxe (`0100152000022000`) is AArch32: its `rtld` opens with `b #+8`, which decodes as `ANDS x0, x0, x0` in A64 and then runs the `MOD0` offset word.
 - A system applet like Data Erase gets core 3 alone; refusing it that core panics.
 - Missing NPDM means 64-bit (homebrew NROs have none).

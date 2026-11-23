@@ -128,12 +128,15 @@ fn main() {
                 cpu.read_x(30)
             );
             if let Some((reg, off, len)) = mark_dump {
-                let at = (cpu.read_x(reg) as i64 + off) as u32;
+                let at = cpu.read_x(reg).wrapping_add_signed(off);
                 let mut line = String::new();
                 for i in 0..len {
                     let _ = std::fmt::Write::write_fmt(
                         &mut line,
-                        format_args!(" {:08x}", cpu.mem.read_u32(at + i * 4).unwrap_or(0)),
+                        format_args!(
+                            " {:08x}",
+                            cpu.mem.read_u32(at + u64::from(i) * 4).unwrap_or(0)
+                        ),
                     );
                 }
                 println!("[mark]   x{reg}{off:+} = {at:#x}:{line}");
@@ -143,9 +146,9 @@ fn main() {
             recording = true;
             // Dump any argument that points at a printable C string.
             for r in 0..8u8 {
-                let addr = cpu.read_x(r) as u32;
+                let addr = cpu.read_x(r);
                 let mut sbuf = String::new();
-                for i in 0..128u32 {
+                for i in 0..128u64 {
                     match cpu.mem.read_u8(addr.wrapping_add(i)) {
                         Ok(0) => break,
                         Ok(b) if (0x20..0x7f).contains(&b) => sbuf.push(b as char),

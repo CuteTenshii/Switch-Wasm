@@ -612,7 +612,7 @@ impl Emitter<'_> {
             Op::SimdLoadStore { insn } => self.simd_load_store(insn, retired),
             Op::LoadLiteral { rt, addr, acc } => {
                 self.f.i32_const(addr as i32);
-                self.f.local_set(L_ADDR);
+                self.set_addr32();
                 self.access(rt, acc, retired);
                 true
             }

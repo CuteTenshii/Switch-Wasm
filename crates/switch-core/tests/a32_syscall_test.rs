@@ -16,7 +16,7 @@ fn syscall(imm: u32, regs: [u32; 5]) -> Cpu {
         cpu.set_reg(i as u8, u64::from(*v));
     }
     cpu.mem
-        .map(BASE, &(0xEF00_0000 | imm).to_le_bytes())
+        .map(u64::from(BASE), &(0xEF00_0000 | imm).to_le_bytes())
         .unwrap();
     cpu.run(1).unwrap();
     cpu

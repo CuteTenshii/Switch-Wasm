@@ -470,7 +470,7 @@ mod tests {
     fn flat_copy_moves_bytes() {
         let mut h = Harness::new();
         for i in 0..16u32 {
-            h.mem.write_u8(0x3000_0000 + i, i as u8).unwrap();
+            h.mem.write_u8(u64::from(0x3000_0000 + i), i as u8).unwrap();
         }
         let mut engine = EngineCopy::new();
         set_iova(&mut engine, OFFSET_IN, h.base);
@@ -481,7 +481,7 @@ mod tests {
         engine.write(LAUNCH_DMA, NON_PIPELINED, &mut ctx).unwrap();
 
         for i in 0..16u32 {
-            assert_eq!(h.mem.read_u8(0x3000_0100 + i).unwrap(), i as u8);
+            assert_eq!(h.mem.read_u8(u64::from(0x3000_0100 + i)).unwrap(), i as u8);
         }
         assert_eq!(h.stats.copies, 1);
     }
@@ -492,7 +492,7 @@ mod tests {
         for y in 0..4u32 {
             for x in 0..8u32 {
                 h.mem
-                    .write_u8(0x3000_0000 + y * 16 + x, (y * 8 + x) as u8)
+                    .write_u8(u64::from(0x3000_0000 + y * 16 + x), (y * 8 + x) as u8)
                     .unwrap();
             }
         }
@@ -516,7 +516,7 @@ mod tests {
         for y in 0..4u32 {
             for x in 0..8u32 {
                 assert_eq!(
-                    h.mem.read_u8(0x3000_0400 + y * 8 + x).unwrap(),
+                    h.mem.read_u8(u64::from(0x3000_0400 + y * 8 + x)).unwrap(),
                     (y * 8 + x) as u8
                 );
             }
@@ -527,7 +527,7 @@ mod tests {
     fn a_negative_destination_pitch_writes_the_rows_bottom_to_top() {
         let mut h = Harness::new();
         for i in 0..32u32 {
-            h.mem.write_u8(0x3000_0000 + i, i as u8).unwrap();
+            h.mem.write_u8(u64::from(0x3000_0000 + i), i as u8).unwrap();
         }
         let mut engine = EngineCopy::new();
         set_iova(&mut engine, OFFSET_IN, h.base);
@@ -550,7 +550,9 @@ mod tests {
         for y in 0..4u32 {
             for x in 0..8u32 {
                 assert_eq!(
-                    h.mem.read_u8(0x3000_0400 + (3 - y) * 8 + x).unwrap(),
+                    h.mem
+                        .read_u8(u64::from(0x3000_0400 + (3 - y) * 8 + x))
+                        .unwrap(),
                     (y * 8 + x) as u8
                 );
             }
@@ -583,7 +585,10 @@ mod tests {
             .unwrap();
 
         for i in 0..4u32 {
-            assert_eq!(h.mem.read_u32(0x3000_0400 + i * 4).unwrap(), 0xDEAD_BEEF);
+            assert_eq!(
+                h.mem.read_u32(u64::from(0x3000_0400 + i * 4)).unwrap(),
+                0xDEAD_BEEF
+            );
         }
     }
 
@@ -635,8 +640,8 @@ mod tests {
 
         for i in 0..2u32 {
             let at = 0x3000_0400 + i * 8;
-            assert_eq!(h.mem.read_u32(at).unwrap(), 0x1111_2222);
-            assert_eq!(h.mem.read_u32(at + 4).unwrap(), 0x3333_4444);
+            assert_eq!(h.mem.read_u32(u64::from(at)).unwrap(), 0x1111_2222);
+            assert_eq!(h.mem.read_u32(u64::from(at + 4)).unwrap(), 0x3333_4444);
         }
     }
 
@@ -644,7 +649,9 @@ mod tests {
     fn block_linear_destination_uses_the_swizzle() {
         let mut h = Harness::new();
         for i in 0..64u32 {
-            h.mem.write_u8(0x3000_0000 + i, (i + 1) as u8).unwrap();
+            h.mem
+                .write_u8(u64::from(0x3000_0000 + i), (i + 1) as u8)
+                .unwrap();
         }
         let mut engine = EngineCopy::new();
         set_iova(&mut engine, OFFSET_IN, h.base);

@@ -340,7 +340,7 @@ impl Cpu {
     /// `acc:u0`, `acc:u1` and `acc:su`. Commands 0..=51 are shared; from 100 up
     /// the same id means different things per service, so those arms
     /// dispatch on the service the session was opened under.
-    pub(crate) fn acc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn acc_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
@@ -396,7 +396,7 @@ impl Cpu {
     /// Commands on the account service itself; `iface` is the service opened.
     fn acc_user_service_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         iface: &str,
         cmd_id: Option<u32>,
@@ -516,7 +516,7 @@ impl Cpu {
     /// `IProfile` and `IProfileEditor` (the same plus the store commands).
     fn acc_profile_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         iface: &str,
         cmd_id: Option<u32>,
@@ -538,7 +538,7 @@ impl Cpu {
                 if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
                     if addr != 0 {
                         for i in 0..(size as usize).min(ACCOUNT_USER_DATA_LEN) as u32 {
-                            self.mem.write_u8(addr.wrapping_add(i), 0)?;
+                            self.mem.write_u8(addr.wrapping_add(u64::from(i)), 0)?;
                         }
                     }
                 }
@@ -563,7 +563,8 @@ impl Cpu {
                     if addr != 0 {
                         let len = image.len().min(size as usize);
                         for (i, &byte) in image[..len].iter().enumerate() {
-                            self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
+                            self.mem
+                                .write_u8(addr.wrapping_add(u64::from(i as u32)), byte)?;
                         }
                         written = len as u32;
                     }
@@ -601,7 +602,7 @@ impl Cpu {
     }
 
     /// `IManagerForApplication`/`IManagerForSystemService`, and what `IAdministrator` shares.
-    fn acc_manager_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    fn acc_manager_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         match cmd_id {
             // CheckAvailability -> success, as `nifm` reports a link; tokens are empty.
             Some(0) => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -630,7 +631,7 @@ impl Cpu {
     }
 
     /// `IAsyncContext`, already finished: event signalled, `HasDone` true, success.
-    fn acc_async_context_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    fn acc_async_context_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         match cmd_id {
             // GetSystemEvent.
             Some(0) => {
@@ -648,17 +649,17 @@ impl Cpu {
         }
     }
 
-    fn acc_requested_uid(&self, tls: u32) -> [u8; 16] {
+    fn acc_requested_uid(&self, tls: u64) -> [u8; 16] {
         let at = self.ipc_request_data(tls);
         let mut uid = [0u8; 16];
         for (index, byte) in uid.iter_mut().enumerate() {
-            *byte = self.mem.read_u8(at.wrapping_add(index as u32)).unwrap_or(0);
+            *byte = self.mem.read_u8(at.wrapping_add(index as u64)).unwrap_or(0);
         }
         uid
     }
 
     /// Hand out an `IProfile` or `IProfileEditor` for the requested user.
-    fn acc_open_profile(&mut self, tls: u32, handle: u64, iface: &str) -> Result<()> {
+    fn acc_open_profile(&mut self, tls: u64, handle: u64, iface: &str) -> Result<()> {
         let uid = self.acc_requested_uid(tls);
         if self.user(uid).is_none() {
             return self.write_ipc_response(tls, ACCOUNT_USER_NOT_EXIST, &[], &[], &[]);
@@ -669,17 +670,17 @@ impl Cpu {
     }
 
     /// Write `uids` into a list command's output buffer and zero the rest.
-    fn acc_write_user_list(&mut self, tls: u32, uids: &[[u8; 16]]) -> Result<()> {
+    fn acc_write_user_list(&mut self, tls: u64, uids: &[[u8; 16]]) -> Result<()> {
         // Callers count users up to the first all-zero uid, so every slot is written.
         if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
             if addr != 0 {
                 for offset in 0..size {
-                    self.mem.write_u8(addr.wrapping_add(offset), 0)?;
+                    self.mem.write_u8(addr.wrapping_add(u64::from(offset)), 0)?;
                 }
                 let fits = size as usize / 16;
                 for (slot, uid) in uids.iter().take(fits).enumerate() {
                     self.mem
-                        .write_bytes(addr.wrapping_add(slot as u32 * 16), uid)?;
+                        .write_bytes(addr.wrapping_add(u64::from(slot as u32 * 16)), uid)?;
                 }
             }
         }
@@ -842,7 +843,7 @@ mod tests {
     #[test]
     fn acc_list_all_users_zeroes_the_slots_it_has_no_user_for() {
         // Every slot must be written; the caller scans for the first zero uid.
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         let mut cpu = request_with_recv_buffer(2, &[], BUFFER, 0x40);
         cpu.mem.map_zero(BUFFER, 0x100).unwrap();
         for offset in 0..0x40 {
@@ -860,8 +861,8 @@ mod tests {
 
     #[test]
     fn save_data_thumbnails_are_kept_per_user_and_title() {
-        const SEND: u32 = 0x4000;
-        const RECV: u32 = 0x5000;
+        const SEND: u64 = 0x4000;
+        const RECV: u64 = 0x5000;
         const TITLE: u64 = 0x0100_7EF0_0011_E000;
         let mut payload = super::default_uid().to_vec();
         payload.extend_from_slice(&TITLE.to_le_bytes());
@@ -934,7 +935,7 @@ mod tests {
 
     #[test]
     fn acc_profile_get_writes_the_userdata_into_its_pointer_buffer() {
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         let mut cpu = request_with_recv_static(0, &[], BUFFER, 0x80);
         cpu.mem.map_zero(BUFFER, 0x100).unwrap();
         // Stale stack contents the reply must overwrite.
@@ -993,7 +994,7 @@ mod tests {
         }
 
         // 141 is `ListQualifiedUsers`.
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         let mut cpu = request_with_recv_buffer(141, &[], BUFFER, 0x40);
         cpu.mem.map_zero(BUFFER, 0x100).unwrap();
         cpu.register_service_handle(9, "acc:u0");
@@ -1054,7 +1055,7 @@ mod tests {
 
     #[test]
     fn acc_load_image_writes_exactly_the_size_it_advertised() {
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         let mut cpu = request(false, 10, &[]);
         cpu.register_service_handle(9, "acc:profile");
         cpu.acc_request(TLS, 9, Some(10)).unwrap();
@@ -1063,7 +1064,7 @@ mod tests {
 
         let mut cpu = request_with_recv_buffer(11, &[], BUFFER, advertised);
         cpu.mem
-            .map_zero(BUFFER, advertised as usize + 0x100)
+            .map_zero(BUFFER, u64::from(advertised) + 0x100)
             .unwrap();
         cpu.register_service_handle(9, "acc:profile");
         cpu.acc_request(TLS, 9, Some(11)).unwrap();
@@ -1081,7 +1082,7 @@ mod tests {
 
         let mut cpu = request_with_recv_buffer(21, &[], BUFFER, advertised);
         cpu.mem
-            .map_zero(BUFFER, advertised as usize + 0x100)
+            .map_zero(BUFFER, u64::from(advertised) + 0x100)
             .unwrap();
         cpu.register_service_handle(9, "acc:profile");
         cpu.acc_request(TLS, 9, Some(21)).unwrap();
@@ -1142,7 +1143,7 @@ mod tests {
         acc(&mut cpu, "acc:u0", 0);
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 2, "GetUserCount");
 
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         let mut cpu = request_with_recv_buffer(2, &[], BUFFER, 0x80);
         cpu.mem.map_zero(BUFFER, 0x100).unwrap();
         two_users(&mut cpu);

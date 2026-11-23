@@ -101,7 +101,7 @@ impl AudioControl {
 impl Cpu {
     /// `IAudioOutManager` (`audout:u`). One device, `DeviceOut`; samples go to the
     /// host at the guest's rate and channel count, unresampled.
-    pub(crate) fn audout_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn audout_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
@@ -118,7 +118,7 @@ impl Cpu {
                 if let Some(buf) = self.ipc_output_buffer_addr(tls, 0) {
                     for i in 0..NAME_LEN {
                         let b = DEVICE.get(i as usize).copied().unwrap_or(0);
-                        let _ = self.mem.write_u8(buf.wrapping_add(i), b);
+                        let _ = self.mem.write_u8(buf.wrapping_add(u64::from(i)), b);
                     }
                 }
                 self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[])
@@ -140,7 +140,7 @@ impl Cpu {
                 if let Some(buf) = self.ipc_output_buffer_addr(tls, 0) {
                     for i in 0..NAME_LEN {
                         let b = DEVICE.get(i as usize).copied().unwrap_or(0);
-                        let _ = self.mem.write_u8(buf.wrapping_add(i), b);
+                        let _ = self.mem.write_u8(buf.wrapping_add(u64::from(i)), b);
                     }
                 }
 
@@ -185,7 +185,7 @@ impl Cpu {
     /// `IAudioOut`: one open output device.
     pub(crate) fn audio_out_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         cmd_id: Option<u32>,
         handle: u64,
     ) -> Result<()> {
@@ -313,7 +313,7 @@ impl Cpu {
         }
     }
 
-    fn audio_out_append(&mut self, tls: u32, handle: u64) -> Result<()> {
+    fn audio_out_append(&mut self, tls: u64, handle: u64) -> Result<()> {
         let now = self.cycles;
         let data = self.ipc_request_data(tls);
         let tag = self.mem.read_u64(data).unwrap_or(0);
@@ -321,7 +321,7 @@ impl Cpu {
         let mut unplayable = false;
         if let Some((desc, _)) = self.ipc_input_buffer(tls, 0) {
             // `AudioOutBuffer`: { next, buffer, buffer_size, data_size, data_offset }, all u64.
-            let buffer = self.mem.read_u64(desc.wrapping_add(8)).unwrap_or(0) as u32;
+            let buffer = self.mem.read_u64(desc.wrapping_add(8)).unwrap_or(0);
             let buffer_size = self.mem.read_u64(desc.wrapping_add(16)).unwrap_or(0) as u32;
             let data_size = self.mem.read_u64(desc.wrapping_add(24)).unwrap_or(0) as u32;
             let data_offset = self.mem.read_u64(desc.wrapping_add(32)).unwrap_or(0) as u32;
@@ -336,9 +336,12 @@ impl Cpu {
                 && u64::from(data_offset) + u64::from(data_size) <= u64::from(buffer_size);
             unplayable = !playable;
             if playable {
-                let start = buffer.wrapping_add(data_offset);
+                let start = buffer.wrapping_add(u64::from(data_offset));
                 for i in 0..data_size / 2 {
-                    let sample = self.mem.read_u16(start.wrapping_add(i * 2)).unwrap_or(0);
+                    let sample = self
+                        .mem
+                        .read_u16(start.wrapping_add(u64::from(i * 2)))
+                        .unwrap_or(0);
                     samples.push(sample as i16);
                 }
             } else if self
@@ -385,7 +388,7 @@ impl Cpu {
 
     /// `GetReleasedAudioOutBuffer`: hand back the tags of finished buffers. The entry
     /// after the last tag is zeroed because `nn::audio` reads it without checking the count.
-    fn audio_out_release(&mut self, tls: u32, handle: u64) -> Result<()> {
+    fn audio_out_release(&mut self, tls: u64, handle: u64) -> Result<()> {
         let now = self.cycles;
         let out = self.ipc_output_buffer(tls, 0);
         let room = out.map(|(_, size)| size / 8).unwrap_or(0);
@@ -408,12 +411,14 @@ impl Cpu {
         }
         if let Some(addr) = addr {
             for (i, &tag) in tags.iter().enumerate() {
-                let _ = self.mem.write_u64(addr.wrapping_add(i as u32 * 8), tag);
+                let _ = self
+                    .mem
+                    .write_u64(addr.wrapping_add(u64::from(i as u32 * 8)), tag);
             }
             if (tags.len() as u32) < room {
                 let _ = self
                     .mem
-                    .write_u64(addr.wrapping_add(tags.len() as u32 * 8), 0);
+                    .write_u64(addr.wrapping_add(u64::from(tags.len() as u32 * 8)), 0);
             }
         }
         self.write_ipc_response(tls, 0, &[], &(tags.len() as u32).to_le_bytes(), &[])
@@ -422,7 +427,7 @@ impl Cpu {
     /// `audctl` (`nn::audioctrl::detail::IAudioController`): system-wide audio settings.
     pub(crate) fn audctl_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {

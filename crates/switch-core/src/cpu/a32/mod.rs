@@ -152,16 +152,17 @@ impl Cpu {
                 // The trampolines `bootstrap` wrote are A64; re-assemble them as A32.
                 let _ = self
                     .mem
-                    .write_u32(super::SELF_RETURN_TRAMPOLINE, 0xEF00_0007); // svc #7
+                    .write_u32(u64::from(super::SELF_RETURN_TRAMPOLINE), 0xEF00_0007); // svc #7
                 let _ = self
                     .mem
-                    .write_u32(super::SELF_RETURN_TRAMPOLINE + 4, 0xEAFF_FFFE); // b .
+                    .write_u32(u64::from(super::SELF_RETURN_TRAMPOLINE + 4), 0xEAFF_FFFE); // b .
                 let _ = self
                     .mem
-                    .write_u32(super::THREAD_EXIT_TRAMPOLINE, 0xEF00_000A); // svc #0xa
+                    .write_u32(u64::from(super::THREAD_EXIT_TRAMPOLINE), 0xEF00_000A); // svc #0xa
                 let _ = self
                     .mem
-                    .write_u32(super::THREAD_EXIT_TRAMPOLINE + 4, 0xEAFF_FFFE); // b .
+                    .write_u32(u64::from(super::THREAD_EXIT_TRAMPOLINE + 4), 0xEAFF_FFFE);
+                // b .
             }
             ExecMode::A64 => {
                 self.thumb = false;

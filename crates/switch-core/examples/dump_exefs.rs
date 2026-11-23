@@ -34,7 +34,7 @@ fn main() {
         let image_end = m.data.mem_addr + m.data.file_size + m.bss_size;
         let mut flat = Vec::with_capacity((image_end - base) as usize);
         for a in base..image_end {
-            flat.push(mem.read_u8(a).unwrap_or(0));
+            flat.push(mem.read_u8(u64::from(a)).unwrap_or(0));
         }
         let path = format!("{out_dir}/{name}.bin");
         fs::write(&path, &flat).expect("write the flat image");

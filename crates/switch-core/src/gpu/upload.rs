@@ -397,7 +397,7 @@ impl Target {
     }
 
     /// The swizzled bytes and their address, when one mapping holds them all.
-    fn mapped(&self, ctx: &ExecCtx) -> Result<Option<(u32, Vec<u8>)>> {
+    fn mapped(&self, ctx: &ExecCtx) -> Result<Option<(u64, Vec<u8>)>> {
         let swizzled = u64::from(self.layout.layer_stride(self.row_bytes, self.rows));
         let Some(cpu) = ctx.span(self.addr, swizzled) else {
             return Ok(None);
@@ -1335,7 +1335,7 @@ mod tests {
     impl Harness {
         fn new(size: u32) -> Harness {
             let mem = Memory::new();
-            mem.map_zero(0x3000_0000, size as usize).unwrap();
+            mem.map_zero(0x3000_0000, u64::from(size)).unwrap();
             let mut vmm = AddressSpace::new();
             let base = vmm
                 .map(0x3000_0000, size as u64, 1, 0, 0x1000, 0, 0)
@@ -1363,7 +1363,7 @@ mod tests {
         fn write(&mut self, offset: u64, bytes: &[u8]) {
             for (i, &byte) in bytes.iter().enumerate() {
                 self.mem
-                    .write_u8(0x3000_0000 + offset as u32 + i as u32, byte)
+                    .write_u8(0x3000_0000 + offset + i as u64, byte)
                     .unwrap();
             }
         }

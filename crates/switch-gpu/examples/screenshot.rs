@@ -108,20 +108,20 @@ struct Memory {
     #[arg(long, value_parser = bounds, value_name = "LO:HI")]
     cover: Option<(u32, u32)>,
     /// Report the step at which 4 KiB at this address first holds a non-zero word.
-    #[arg(long, value_parser = common::hex32, value_name = "ADDR")]
-    watch_mem: Option<u32>,
+    #[arg(long, value_parser = common::hex64, value_name = "ADDR")]
+    watch_mem: Option<u64>,
     /// Report the non-zero spans of these `<addr>:<size>` regions at the end.
     #[arg(long, value_delimiter = ',', value_parser = common::span, value_name = "ADDR:SIZE")]
-    scan_mem: Vec<(u32, u32)>,
+    scan_mem: Vec<(u64, u64)>,
     /// Print three vertices' worth of f32s at each address at the end.
-    #[arg(long, value_delimiter = ',', value_parser = common::hex32, value_name = "ADDR")]
-    dump_verts: Vec<u32>,
+    #[arg(long, value_delimiter = ',', value_parser = common::hex64, value_name = "ADDR")]
+    dump_verts: Vec<u64>,
     /// Write block-linear surfaces as PPMs: `<addr>:<w>x<h>:<format>[:<block height>]`.
     #[arg(long, value_delimiter = ',', value_name = "SPEC")]
     dump_surface: Vec<String>,
     /// Keep writing this `<addr>:<value>` word, once at `--poke-at` if given.
-    #[arg(long, value_parser = bounds, value_name = "ADDR:VALUE")]
-    poke_u32: Option<(u32, u32)>,
+    #[arg(long, value_parser = poke, value_name = "ADDR:VALUE")]
+    poke_u32: Option<(u64, u32)>,
     /// The step to poke at.
     #[arg(long, value_name = "STEP")]
     poke_at: Option<u64>,
@@ -149,6 +149,14 @@ fn bounds(text: &str) -> Result<(u32, u32), String> {
         .split_once(':')
         .ok_or_else(|| format!("{text:?} is not <hex>:<hex>"))?;
     Ok((common::hex32(lo)?, common::hex32(hi)?))
+}
+
+/// A hex `<addr>:<value>` pair: a guest address and the word to keep there.
+fn poke(text: &str) -> Result<(u64, u32), String> {
+    let (addr, value) = text
+        .split_once(':')
+        .ok_or_else(|| format!("{text:?} is not <hex addr>:<hex value>"))?;
+    Ok((common::hex64(addr)?, common::hex32(value)?))
 }
 
 fn main() {
@@ -187,7 +195,7 @@ fn main() {
         .map(|(lo, hi)| vec![false; ((hi - lo) / 4) as usize])
         .unwrap_or_default();
     let mut seen_nonzero = false;
-    let mut gate: Option<u32> = None;
+    let mut gate: Option<u64> = None;
 
     // Homebrew that never presents the frame stops; a retail title needs billions of steps.
     let default_steps = if program.is_homebrew() {
@@ -222,7 +230,7 @@ fn main() {
             if let Some(at) = memory.watch_mem {
                 if !seen_nonzero
                     && done % DEFAULT_INTERVAL == 0
-                    && (0..0x1000u32)
+                    && (0..0x1000u64)
                         .step_by(4)
                         .any(|k| cpu.mem.read_u32(at + k).unwrap_or(0) != 0)
                 {
@@ -250,10 +258,9 @@ fn main() {
             }
             if memory.gate_sniff && gate.is_none() {
                 let pc = cpu.get_pc();
-                if let Ok(insn) = cpu.mem.read_u32(pc) {
+                if let Ok(insn) = cpu.mem.fetch(pc) {
                     if insn & 0xFFFF_FC1F == 0xB943_E808 {
-                        let at =
-                            (cpu.read_x(((insn >> 5) & 0x1F) as u8) as u32).wrapping_add(0x3e8);
+                        let at = cpu.read_x(((insn >> 5) & 0x1F) as u8).wrapping_add(0x3e8);
                         println!("[gate] found at {at:#x} via pc={pc:#x} step {done}");
                         gate = Some(at);
                     }
@@ -281,7 +288,7 @@ fn main() {
         scan_mem(&cpu, lo, hi);
     }
     for &at in &memory.dump_verts {
-        let f: Vec<f32> = (0..45u32)
+        let f: Vec<f32> = (0..45u64)
             .map(|k| f32::from_bits(cpu.mem.read_u32(at + k * 4).unwrap_or(0)))
             .collect();
         println!("  {at:#x} as f32: {:?}", &f[..15]);
@@ -365,22 +372,35 @@ fn find_magic(cpu: &switch_core::cpu::Cpu, magic: &str) {
             .copied()
             .unwrap_or([0; 4]),
     );
+    const BLOCK: u64 = 0x20_0000;
     let mut hits = 0u32;
-    let mut at = 0u32;
-    while at < 0x8000_0000 && hits < 12 {
-        if cpu.mem.read_u32(at) == Ok(wanted) {
-            println!("[find] {magic} at {at:#x}");
-            hits += 1;
+    // Only backed pages hold anything; untouched blocks of the 39-bit space are skipped whole.
+    'search: for block in (0..switch_core::mem::ADDRESS_SPACE_SIZE).step_by(BLOCK as usize) {
+        if cpu.mem.mapped_bytes_in(block, block + BLOCK) == 0 {
+            continue;
         }
-        at += 4;
+        for page in (block..block + BLOCK).step_by(0x1000) {
+            if !cpu.mem.page_mapped(page) {
+                continue;
+            }
+            for at in (page..page + 0x1000).step_by(4) {
+                if cpu.mem.read_u32(at) == Ok(wanted) {
+                    println!("[find] {magic} at {at:#x}");
+                    hits += 1;
+                    if hits == 12 {
+                        break 'search;
+                    }
+                }
+            }
+        }
     }
     println!("[find] {magic}: {hits} hit(s)");
 }
 
 /// Print the non-zero spans of `lo..hi`.
-fn scan_mem(cpu: &switch_core::cpu::Cpu, lo: u32, hi: u32) {
+fn scan_mem(cpu: &switch_core::cpu::Cpu, lo: u64, hi: u64) {
     let mut spans = Vec::new();
-    let mut span: Option<u32> = None;
+    let mut span: Option<u64> = None;
     for at in (lo..hi).step_by(4) {
         let nonzero = cpu.mem.read_u32(at).unwrap_or(0) != 0;
         match (nonzero, span) {
@@ -406,7 +426,7 @@ fn dump_surface(cpu: &switch_core::cpu::Cpu, spec: &str, out: &str) {
     use switch_core::gpu::surface::{block_linear_offset, ColorFormat};
     let fields: Vec<&str> = spec.split(':').collect();
     let parsed = (|| {
-        let addr = common::parse_hex32(fields.first()?)?;
+        let addr = common::parse_hex(fields.first()?)?;
         let (w, h) = fields.get(1)?.split_once('x')?;
         let (w, h): (u32, u32) = (w.parse().ok()?, h.parse().ok()?);
         let format = ColorFormat::from_raw(common::parse_hex32(fields.get(2)?)?).ok()?;
@@ -422,9 +442,9 @@ fn dump_surface(cpu: &switch_core::cpu::Cpu, spec: &str, out: &str) {
     let mut brightest = 0.0f32;
     for y in 0..h {
         for x in 0..w {
-            let at = addr + block_linear_offset(x * bpp, y, w * bpp, block_height);
+            let at = addr + u64::from(block_linear_offset(x * bpp, y, w * bpp, block_height));
             let raw = (0..bpp).fold(0u128, |acc, i| {
-                acc | u128::from(cpu.mem.read_u8(at + i).unwrap_or(0)) << (8 * i)
+                acc | u128::from(cpu.mem.read_u8(at + u64::from(i)).unwrap_or(0)) << (8 * i)
             });
             let rgba = format.decode(raw).unwrap_or([0.0; 4]);
             brightest = rgba[..3].iter().fold(brightest, |m, &c| m.max(c));

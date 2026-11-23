@@ -44,7 +44,7 @@ fn the_system_process_common_functions_chain_hands_back_real_sessions() {
 
 /// Marshal a `PushOutData`-shaped request carrying one object.
 fn push_storage(cpu: &mut Cpu, command_id: u32, storage: u64) {
-    for i in (0..0x200u32).step_by(4) {
+    for i in (0..0x200u64).step_by(4) {
         cpu.mem.write_u32(TLS + i, 0).unwrap();
     }
     cpu.mem.write_u32(TLS, 4).unwrap();
@@ -280,7 +280,7 @@ fn am_answers_the_current_application_id() {
 
 #[test]
 fn the_applet_launched_history_starts_at_the_running_applet() {
-    const BUFFER: u32 = 0x4000;
+    const BUFFER: u64 = 0x4000;
     let mut cpu = request_with_recv_buffer(120, &[], BUFFER, 0x20);
     cpu.mem.map_zero(BUFFER, 0x100).unwrap();
     cpu.process_mut().program_id = 0x0100_D710_0469_4000;

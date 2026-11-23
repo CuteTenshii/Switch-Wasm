@@ -80,6 +80,9 @@ impl Emitter<'_> {
             // Read before linking: `blr x30` jumps to the old x30.
             Term::Br { rn } | Term::Blr { rn, .. } | Term::Ret { rn } => {
                 self.read_reg_raw(rn & 0x1F);
+                self.f.local_tee(L_T);
+                self.leave_unless_below_4gib(len);
+                self.f.local_get(L_T);
                 self.f.i32_wrap_i64();
                 self.f.local_set(L_TARGET);
                 // A return to 0 is homebrew's exit, routed through the trampoline.
@@ -108,11 +111,13 @@ impl Emitter<'_> {
             // call back before anything is written.
             Term::BlPlt { got, .. } | Term::BPlt { got, .. } => {
                 self.f.i32_const(got as i32);
-                self.f.local_set(L_ADDR);
+                self.set_addr32();
                 self.page_for_read(8, len);
                 self.in_page();
                 self.f.i64_load(UNALIGNED, 0);
                 self.f.local_tee(L_T);
+                self.leave_unless_below_4gib(len);
+                self.f.local_get(L_T);
                 self.store_reg(17);
                 self.f.local_get(L_T);
                 self.f.i32_wrap_i64();
@@ -302,6 +307,16 @@ impl Emitter<'_> {
         self.f.return_call_indirect(0);
         self.f.end();
         self.f.end();
+    }
+
+    /// Leave the region at its terminator, `retired` instructions done, if the branch target
+    /// on the stack is above 4 GiB, where no code is loaded: the interpreter faults on it.
+    fn leave_unless_below_4gib(&mut self, retired: usize) {
+        self.f.i64_const(32);
+        self.f.i64_shr_u();
+        self.f.i64_const(0);
+        self.f.i64_ne();
+        self.deopt_if(retired);
     }
 
     /// Load what the region touches, ahead of everything else.

@@ -17,21 +17,23 @@ impl Cpu {
     /// The address-space half of [`Cpu::bootstrap`]: the stack and the exit trampolines.
     pub(crate) fn map_runtime(&mut self) {
         // The whole guest space is lazily mapped: reads see zeros, writes allocate on first touch.
-        self.mem.soft_map_zero(GUEST_SPACE_START, GUEST_SPACE_END);
-        let _ = self
-            .mem
-            .map_zero((STACK_TOP - STACK_SIZE) as u32, STACK_SIZE as usize);
+        self.refresh_memory_layout();
+        let _ = self.mem.map_zero(STACK_TOP - STACK_SIZE, STACK_SIZE);
         // LR points at a stub that calls ExitProcess (svc 0x07), so returning from main exits cleanly.
-        let _ = self.mem.map_zero(SELF_RETURN_TRAMPOLINE, 0x10);
-        self.mem.write_u32(SELF_RETURN_TRAMPOLINE, 0xD400_00E1).ok(); // svc #7
+        let _ = self.mem.map_zero(u64::from(SELF_RETURN_TRAMPOLINE), 0x10);
         self.mem
-            .write_u32(SELF_RETURN_TRAMPOLINE + 4, 0x1400_0000)
+            .write_u32(u64::from(SELF_RETURN_TRAMPOLINE), 0xD400_00E1)
+            .ok(); // svc #7
+        self.mem
+            .write_u32(u64::from(SELF_RETURN_TRAMPOLINE + 4), 0x1400_0000)
             .ok(); // b .
                    // Returning from a thread entry point is `svcExitThread` (svc 0x0A).
-        let _ = self.mem.map_zero(THREAD_EXIT_TRAMPOLINE, 0x10);
-        self.mem.write_u32(THREAD_EXIT_TRAMPOLINE, 0xD400_0141).ok(); // svc #0xa
+        let _ = self.mem.map_zero(u64::from(THREAD_EXIT_TRAMPOLINE), 0x10);
         self.mem
-            .write_u32(THREAD_EXIT_TRAMPOLINE + 4, 0x1400_0000)
+            .write_u32(u64::from(THREAD_EXIT_TRAMPOLINE), 0xD400_0141)
+            .ok(); // svc #0xa
+        self.mem
+            .write_u32(u64::from(THREAD_EXIT_TRAMPOLINE + 4), 0x1400_0000)
             .ok(); // b .
     }
 
@@ -76,7 +78,7 @@ impl Cpu {
     pub fn next_load_path(&self) -> Option<String> {
         let mut buf = [0u8; crate::nro::NEXT_LOAD_BUFFER_SIZE];
         self.mem
-            .read_into(crate::nro::NEXT_LOAD_PATH_ADDR, &mut buf)
+            .read_into(u64::from(crate::nro::NEXT_LOAD_PATH_ADDR), &mut buf)
             .ok()?;
         let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
         let path = std::str::from_utf8(&buf[..len]).ok()?;
@@ -186,16 +188,6 @@ impl Cpu {
         if loaded.is_empty() {
             return Err(Error::Cpu("no modules to boot".into()));
         }
-        // Before the guest runs: `nnSdk` reads the regions with its first `svcGetInfo`.
-        let heap_beside_vamm = loaded.iter().any(|m| m.heap_beside_vamm);
-        if heap_beside_vamm {
-            self.log(
-                Level::Debug,
-                "[loader] the title sizes its own heap beside Vamm: heap and alias regions split the space",
-            );
-        }
-        self.process_mut().heap_beside_vamm = heap_beside_vamm;
-        self.refresh_memory_layout();
         Ok(loaded)
     }
 

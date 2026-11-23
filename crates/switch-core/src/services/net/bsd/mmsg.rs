@@ -118,7 +118,7 @@ impl Cpu {
     /// `MSG_WAITFORONE`. The `timespec` is not honoured: libnx's `recvmsg` passes zero.
     pub(super) fn bsd_receive_messages(
         &mut self,
-        tls: u32,
+        tls: u64,
         fd: i32,
         count: u32,
         flags: u32,
@@ -172,7 +172,8 @@ impl Cpu {
         self.bsd_end_wait(fd);
         let reply = serialize(&messages[..received]);
         for (offset, &byte) in reply.iter().enumerate() {
-            self.mem.write_u8(addr.wrapping_add(offset as u32), byte)?;
+            self.mem
+                .write_u8(addr.wrapping_add(u64::from(offset as u32)), byte)?;
         }
         self.bsd_reply(tls, received as i32, 0)
     }
@@ -182,7 +183,7 @@ impl Cpu {
     /// that failure is the answer only if it was the first message.
     pub(super) fn bsd_send_messages(
         &mut self,
-        tls: u32,
+        tls: u64,
         fd: i32,
         count: u32,
         flags: u32,
@@ -222,7 +223,8 @@ impl Cpu {
         }
         let reply = serialize(&messages[..sent]);
         for (offset, &byte) in reply.iter().enumerate() {
-            self.mem.write_u8(addr.wrapping_add(offset as u32), byte)?;
+            self.mem
+                .write_u8(addr.wrapping_add(u64::from(offset as u32)), byte)?;
         }
         self.bsd_reply(tls, sent as i32, 0)
     }
@@ -235,7 +237,7 @@ mod tests {
     use crate::kernel::ipc::testing::*;
     use crate::services::netbridge::Peer;
 
-    const BUFFER: u32 = SCRATCH + 0x200;
+    const BUFFER: u64 = SCRATCH + 0x200;
     const BUFFER_SIZE: u32 = 0x1000;
 
     /// A message as libnx's `_serializeMmsg` lays it out before a call.

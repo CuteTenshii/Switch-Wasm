@@ -1,8 +1,8 @@
 //! The Horizon supervisor calls (`SVC`) libnx homebrew issues at runtime.
 
 use crate::cpu::{
-    ArbiterWait, Cpu, GUEST_ASLR_REGION_ADDR, GUEST_ASLR_REGION_SIZE, GUEST_SPACE_END,
-    GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE, HID_SHMEM_SIZE, PL_SHMEM_SIZE,
+    ArbiterWait, Cpu, GUEST_ASLR_REGION_ADDR, GUEST_ASLR_REGION_SIZE, GUEST_STACK_REGION_ADDR,
+    GUEST_STACK_REGION_SIZE, HID_SHMEM_SIZE, PL_SHMEM_SIZE,
 };
 use crate::kernel::cores::Handback;
 use crate::mem::{MemoryState, Permission, StateRun};
@@ -48,8 +48,8 @@ impl Cpu {
         const IDEAL_CORE_NO_UPDATE: i32 = -3;
         // Memory pool and system resource figures come from the process layout (`MemoryLayout`).
         let layout = self.memory_layout();
-        let total_memory_size = u64::from(layout.total_memory);
-        let system_resource_size = u64::from(layout.system_resource);
+        let total_memory_size = layout.total_memory;
+        let system_resource_size = layout.system_resource;
         // Trace every SVC except IPC (traced by `TRACE_IPC`) and the hot
         // WaitSynchronization, SleepThread and QueryMemory.
         if !matches!(imm, 0x21 | 0x18 | 0x0b | 0x06)
@@ -70,13 +70,13 @@ impl Cpu {
                 // SetHeapSize(size): a heap larger than its region is refused.
                 const RESULT_OUT_OF_MEMORY: u64 = 1 | (104 << 9);
                 let size = self.read_zr(1);
-                if size > u64::from(layout.heap_size) {
+                if size > layout.heap_size {
                     self.write_zr(0, RESULT_OUT_OF_MEMORY);
                     return Ok(());
                 }
-                self.process_mut().heap_size = size as u32;
+                self.process_mut().heap_size = size;
                 self.write_zr(0, RESULT_OK);
-                self.write_zr(1, u64::from(layout.heap_addr));
+                self.write_zr(1, layout.heap_addr);
                 Ok(())
             }
             0x02 | 0x03 | 0x14 => {
@@ -87,8 +87,8 @@ impl Cpu {
             0x04 => {
                 // MapMemory(dst, src, size): really back dst, since `virtmemFindStack` looks
                 // for unmapped ranges to place the next thread's stack mirror.
-                let dst = self.read_zr(0) as u32;
-                let src = self.read_zr(1) as u32;
+                let dst = self.read_zr(0);
+                let src = self.read_zr(1);
                 let size = self.read_zr(2) as usize;
                 if dst == 0 || size == 0 {
                     self.write_zr(0, RESULT_INVALID_MEMORY_RANGE);
@@ -103,12 +103,12 @@ impl Cpu {
             }
             0x2C => {
                 // MapPhysicalMemory(address, size): how 39-bit titles grow their heap. Pages
-                // materialise on first write via the soft-mapped low 2 GiB.
+                // materialise on first write via the soft-mapped address space.
                 let addr = self.read_zr(0);
                 let size = self.read_zr(1);
                 let fits = addr
                     .checked_add(size)
-                    .is_some_and(|end| end <= u64::from(u32::MAX) + 1);
+                    .is_some_and(|end| end <= layout.space_end);
                 if size == 0 || (addr & 0xFFF) != 0 || (size & 0xFFF) != 0 || !fits {
                     self.write_zr(0, RESULT_INVALID_MEMORY_RANGE);
                     return Ok(());
@@ -118,8 +118,8 @@ impl Cpu {
             }
             0x2D => {
                 // UnmapPhysicalMemory(address, size): pages are really freed for the RAM cap.
-                let addr = self.read_zr(0) as u32;
-                let size = self.read_zr(1) as usize;
+                let addr = self.read_zr(0);
+                let size = self.read_zr(1);
                 self.mem.unmap(addr, size);
                 self.write_zr(0, RESULT_OK);
                 Ok(())
@@ -127,11 +127,11 @@ impl Cpu {
             0x13 => {
                 // MapSharedMemory(handle, addr, size, perm): hid's is the console's block, with a
                 // connected pad published at once; others are zeroed, pl's with the shared font.
-                let addr = self.read_zr(1) as u32;
-                let size = self.read_zr(2) as u32;
+                let addr = self.read_zr(1);
+                let size = self.read_zr(2);
                 // Prefer `hid`'s handle; the size match is a fallback.
                 if Some(self.read_zr(0)) == self.process().hid_shmem_handle
-                    || size == HID_SHMEM_SIZE
+                    || size == u64::from(HID_SHMEM_SIZE)
                 {
                     let block = self.hid_shmem.clone();
                     self.mem.map_shared(addr, &block)?;
@@ -144,8 +144,8 @@ impl Cpu {
                     let block = self.time_shmem.clone();
                     self.mem.map_shared(addr, &block)?;
                 } else {
-                    self.mem.map_zero(addr, size as usize)?;
-                    if size == PL_SHMEM_SIZE {
+                    self.mem.map_zero(addr, size)?;
+                    if size == u64::from(PL_SHMEM_SIZE) {
                         self.process_mut().pl_shmem_addr = addr;
                         self.write_shared_font(addr);
                     }
@@ -161,11 +161,11 @@ impl Cpu {
                     self.write_zr(0, 0x8000_D401);
                     return Ok(());
                 }
-                let src = self.read_zr(1) as u32;
+                let src = self.read_zr(1);
                 let size = self.read_zr(2) as usize;
                 if dst != 0 && src != 0 && size != 0 {
-                    self.mem.copy_range(src, dst as u32, size)?;
-                    self.mem.unmap(dst as u32, size);
+                    self.mem.copy_range(src, dst, size)?;
+                    self.mem.unmap(dst, size as u64);
                 }
                 self.write_zr(0, RESULT_OK);
                 Ok(())
@@ -175,10 +175,10 @@ impl Cpu {
                 // state. Untouched soft-mapped pages read as unmapped. Only module `.text` is
                 // executable, since `rtld` finds modules by walking for executable `CodeStatic`,
                 // and `.rodata` is read-only, where `nn::diag` reads a module's name.
-                let out = self.read_zr(0) as u32;
-                let addr = self.read_zr(2) as u32;
+                let out = self.read_zr(0);
+                let addr = self.read_zr(2);
                 // See [`crate::mem::Memory::state_run`].
-                let mut run = self.mem.state_run(addr, GUEST_SPACE_END);
+                let mut run = self.mem.state_run(addr, layout.space_end);
                 // The granted heap is in use even where no page has been touched yet.
                 let heap =
                     layout.heap_addr..layout.heap_addr.saturating_add(self.process().heap_size);
@@ -195,10 +195,21 @@ impl Cpu {
                 } else if !heap.is_empty() {
                     run.start = run.start.max(heap.end);
                 }
-                let (base, end) = (run.start, run.end);
+                // Past the end of the space is one inaccessible region up to 2^64, as Horizon
+                // reports it: `rtld` walks regions until the address wraps.
+                if addr >= layout.space_end {
+                    run = StateRun {
+                        start: layout.space_end,
+                        end: 0,
+                        mapped: false,
+                        perm: Permission::None,
+                        state: MemoryState::Inaccessible,
+                    };
+                }
+                let (base, size) = (run.start, run.end.wrapping_sub(run.start));
                 let mut info = Vec::with_capacity(40);
-                info.extend_from_slice(&(base as u64).to_le_bytes());
-                info.extend_from_slice(&((end - base) as u64).to_le_bytes());
+                info.extend_from_slice(&base.to_le_bytes());
+                info.extend_from_slice(&size.to_le_bytes());
                 for v in [
                     run.state as u32, // type
                     0,
@@ -210,7 +221,7 @@ impl Cpu {
                     info.extend_from_slice(&v.to_le_bytes());
                 }
                 for (i, &b) in info.iter().enumerate() {
-                    self.mem.write_u8(out.wrapping_add(i as u32), b)?;
+                    self.mem.write_u8(out.wrapping_add(i as u64), b)?;
                 }
                 self.write_zr(0, RESULT_OK);
                 self.write_zr(1, if run.mapped { 0x1000 } else { 0 }); // page info
@@ -244,7 +255,7 @@ impl Cpu {
             0x08 => {
                 // CreateThread(entry = X1, arg = X2, stack_top = X3, priority = W4, core = W5)
                 // -> handle in X1. Starts suspended with its own TLS block.
-                let entry = self.read_zr(1) as u32;
+                let entry = self.branch_target(self.read_zr(1))?;
                 let arg = self.read_zr(2);
                 let stack_top = self.read_zr(3);
                 // AArch32 passes the priority in r0 and the core in r4.
@@ -308,7 +319,7 @@ impl Cpu {
             }
             0x33 => {
                 // GetThreadContext3(out = X0, handle = X1): the suspended thread's registers.
-                let out = self.read_zr(0) as u32;
+                let out = self.read_zr(0);
                 let handle = self.read_zr(1);
                 let ok = self.write_thread_context(out, handle);
                 self.write_zr(0, if ok { RESULT_OK } else { RESULT_INVALID_HANDLE });
@@ -328,7 +339,7 @@ impl Cpu {
             0x1A => {
                 // ArbitrateLock(owner = W0, mutex = X1, self = W2)
                 let owner = self.read_zr(0) as u32;
-                let mutex = self.read_zr(1) as u32;
+                let mutex = self.read_zr(1);
                 let requester = self.read_zr(2) as u32;
                 if crate::trace::enabled(crate::trace::Trace::Wait) {
                     crate::traceln!(
@@ -342,15 +353,15 @@ impl Cpu {
             }
             0x1B => {
                 // ArbitrateUnlock(mutex = X0)
-                let mutex = self.read_zr(0) as u32;
+                let mutex = self.read_zr(0);
                 self.write_zr(0, RESULT_OK);
                 self.arbitrate_unlock(mutex);
                 Ok(())
             }
             0x1C => {
                 // WaitProcessWideKeyAtomic(mutex = X0, key = X1, self = W2, timeout = X3)
-                let mutex = self.read_zr(0) as u32;
-                let key = self.read_zr(1) as u32;
+                let mutex = self.read_zr(0);
+                let key = self.read_zr(1);
                 let requester = self.read_zr(2) as u32;
                 // A negative timeout waits forever; a positive one is in nanoseconds.
                 let timeout = self.svc_arg64(3, 3, 4) as i64;
@@ -370,7 +381,7 @@ impl Cpu {
                 // If the arb_type predicate doesn't hold, report InvalidState instead of blocking.
                 const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
                 const RESULT_TIMED_OUT: u64 = 0xEA01;
-                let addr = self.read_zr(0) as u32;
+                let addr = self.read_zr(0);
                 let arb_type = self.read_zr(1) as u32;
                 let value = self.read_zr(2) as u32 as i32;
                 let timeout = self.svc_arg64(3, 3, 4) as i64;
@@ -399,7 +410,7 @@ impl Cpu {
             0x35 => {
                 // SignalToAddress(address = X0, signal_type = W1, value = W2, count = W3).
                 const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
-                let addr = self.read_zr(0) as u32;
+                let addr = self.read_zr(0);
                 let signal_type = self.read_zr(1) as u32;
                 let value = self.read_zr(2) as u32 as i32;
                 let count = self.read_zr(3) as u32 as i32;
@@ -418,7 +429,7 @@ impl Cpu {
             0x36 => Ok(()),
             0x1D => {
                 // SignalProcessWideKey(key = X0, count = W1)
-                let key = self.read_zr(0) as u32;
+                let key = self.read_zr(0);
                 let count = self.read_zr(1) as u32 as i32;
                 if crate::trace::enabled(crate::trace::Trace::Wait) {
                     crate::traceln!(
@@ -568,12 +579,12 @@ impl Cpu {
             0x15 => {
                 // CreateTransferMemory(addr, size, perm): the creator's pages become a shared
                 // block, so a process the memory is passed to sees what the creator writes.
-                let addr = self.read_zr(1) as u32;
+                let addr = self.read_zr(1);
                 let size = self.read_zr(2) as usize;
                 let handle = self.alloc_handle();
                 self.grant_handle(handle);
                 let page = crate::mem::PAGE_SIZE;
-                if size != 0 && (addr as usize).is_multiple_of(page) && size.is_multiple_of(page) {
+                if size != 0 && addr.is_multiple_of(page as u64) && size.is_multiple_of(page) {
                     let block = crate::mem::SharedPages::new(size);
                     let mut contents = vec![0u8; size];
                     self.mem.read_into(addr, &mut contents)?;
@@ -590,14 +601,14 @@ impl Cpu {
                 // index of the signalled handle.
                 const RESULT_TIMED_OUT: u64 = 0xEA01;
                 const RESULT_CANCELLED: u64 = 1 | (118 << 9);
-                let handles_ptr = self.read_zr(1) as u32;
+                let handles_ptr = self.read_zr(1);
                 let count = (self.read_zr(2) as u32).min(0x40);
                 let timeout = self.svc_arg64(3, 0, 3) as i64;
                 let handles: Vec<u64> = (0..count)
                     .map(|i| {
                         u64::from(
                             self.mem
-                                .read_u32(handles_ptr.wrapping_add(i * 4))
+                                .read_u32(handles_ptr.wrapping_add(u64::from(i) * 4))
                                 .unwrap_or(0),
                         )
                     })
@@ -676,7 +687,7 @@ impl Cpu {
             }
             0x1F => {
                 // ConnectToNamedPort
-                let name_ptr = self.read_zr(1) as u32;
+                let name_ptr = self.read_zr(1);
                 let name = if name_ptr != 0 {
                     self.read_port_name(name_ptr)
                 } else {
@@ -691,7 +702,7 @@ impl Cpu {
             }
             0x20..=0x23 => {
                 // SendSyncRequest variants: a named service's stub, else the generic reply.
-                let tls = self.tpidr as u32;
+                let tls = self.tpidr;
                 let session = self.read_zr(0);
                 // A Close request (type 2) has no command id; it tears down the session.
                 if self.ipc_message_type(tls) == 2 {
@@ -1130,7 +1141,7 @@ impl Cpu {
                     let start = self.ipc_reply_start(tls);
                     let is_domain = self
                         .mem
-                        .read_u32(tls.wrapping_add(start + 0x10))
+                        .read_u32(tls.wrapping_add(u64::from(start + 0x10)))
                         .unwrap_or(0)
                         == 0x4943_4653;
                     // A fresh object id for a caller that expects an out-object.
@@ -1142,23 +1153,47 @@ impl Cpu {
                     };
                     if is_domain {
                         for i in 0..4u32 {
-                            let _ = self.mem.write_u32(tls.wrapping_add(start + i * 4), 0);
+                            let _ = self
+                                .mem
+                                .write_u32(tls.wrapping_add(u64::from(start + i * 4)), 0);
                         }
                         let _ = self
                             .mem
-                            .write_u32(tls.wrapping_add(start + 0x10), 0x4F43_4653);
-                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x14), 0);
-                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x18), 0);
-                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x1C), 0);
-                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x20), data);
-                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x24), 0);
-                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x28), data);
+                            .write_u32(tls.wrapping_add(u64::from(start + 0x10)), 0x4F43_4653);
+                        let _ = self
+                            .mem
+                            .write_u32(tls.wrapping_add(u64::from(start + 0x14)), 0);
+                        let _ = self
+                            .mem
+                            .write_u32(tls.wrapping_add(u64::from(start + 0x18)), 0);
+                        let _ = self
+                            .mem
+                            .write_u32(tls.wrapping_add(u64::from(start + 0x1C)), 0);
+                        let _ = self
+                            .mem
+                            .write_u32(tls.wrapping_add(u64::from(start + 0x20)), data);
+                        let _ = self
+                            .mem
+                            .write_u32(tls.wrapping_add(u64::from(start + 0x24)), 0);
+                        let _ = self
+                            .mem
+                            .write_u32(tls.wrapping_add(u64::from(start + 0x28)), data);
                     } else {
-                        let _ = self.mem.write_u32(tls.wrapping_add(start), 0x4F43_4653);
-                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x04), 0);
-                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x08), 0);
-                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x0C), 0);
-                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x10), data);
+                        let _ = self
+                            .mem
+                            .write_u32(tls.wrapping_add(u64::from(start)), 0x4F43_4653);
+                        let _ = self
+                            .mem
+                            .write_u32(tls.wrapping_add(u64::from(start + 0x04)), 0);
+                        let _ = self
+                            .mem
+                            .write_u32(tls.wrapping_add(u64::from(start + 0x08)), 0);
+                        let _ = self
+                            .mem
+                            .write_u32(tls.wrapping_add(u64::from(start + 0x0C)), 0);
+                        let _ = self
+                            .mem
+                            .write_u32(tls.wrapping_add(u64::from(start + 0x10)), data);
                     }
                 }
                 // A service that could not answer wrote no reply, so the request is still in the
@@ -1228,10 +1263,10 @@ impl Cpu {
                     "[svcBreak] reason={reason_name} ({reason:#x}) arg={arg:#x} size={size:#x}"
                 );
                 if let Some(value) = match size {
-                    1 => self.mem.read_u8(arg as u32).ok().map(u64::from),
-                    2 => self.mem.read_u16(arg as u32).ok().map(u64::from),
-                    4 => self.mem.read_u32(arg as u32).ok().map(u64::from),
-                    8 => self.mem.read_u64(arg as u32).ok(),
+                    1 => self.mem.read_u8(arg).ok().map(u64::from),
+                    2 => self.mem.read_u16(arg).ok().map(u64::from),
+                    4 => self.mem.read_u32(arg).ok().map(u64::from),
+                    8 => self.mem.read_u64(arg).ok(),
                     _ => None,
                 } {
                     let _ = write!(msg, " value={value:#x}");
@@ -1247,8 +1282,8 @@ impl Cpu {
             }
             0x27 => {
                 // OutputDebugString(ptr, size)
-                let ptr = self.read_zr(0) as u32;
-                let len = (self.read_zr(1) as i64).clamp(0, 4096) as u32;
+                let ptr = self.read_zr(0);
+                let len = (self.read_zr(1) as i64).clamp(0, 4096) as u64;
                 if ptr != 0 && len > 0 {
                     for i in 0..len {
                         match self.mem.read_u8(ptr.wrapping_add(i)) {
@@ -1267,14 +1302,14 @@ impl Cpu {
                     0 => self.process().process_core_mask, // CoreMask
                     1 => 0x0FFF_FFFF_F000_0000,            // PriorityMask: 28..=59
                     // Alias/heap regions from the layout, below 4 GiB (`u32` guest addresses).
-                    2 => u64::from(layout.alias_addr), // AliasRegionAddress
-                    3 => u64::from(layout.alias_size), // AliasRegionSize
-                    4 => u64::from(layout.heap_addr),  // HeapRegionAddress
-                    5 => u64::from(layout.heap_size),  // HeapRegionSize
-                    6 => total_memory_size,            // TotalMemorySize
-                    7 => 0,                            // UsedMemorySize
-                    8 => 0,                            // DebuggerAttached
-                    9 => 0,                            // ResourceLimit
+                    2 => layout.alias_addr, // AliasRegionAddress
+                    3 => layout.alias_size, // AliasRegionSize
+                    4 => layout.heap_addr,  // HeapRegionAddress
+                    5 => layout.heap_size,  // HeapRegionSize
+                    6 => total_memory_size, // TotalMemorySize
+                    7 => 0,                 // UsedMemorySize
+                    8 => 0,                 // DebuggerAttached
+                    9 => 0,                 // ResourceLimit
                     // RandomEntropy: non-zero SplitMix64 per subvalue; `sdk` aborts on zero.
                     11 => {
                         let sub = self.svc_arg64(3, 0, 3).wrapping_add(1);
@@ -1365,27 +1400,51 @@ mod tests {
         cpu.read_zr(0)
     }
 
+    /// `rtld` walks regions until the address wraps, so past the end is one region to 2^64.
+    #[test]
+    fn query_memory_past_the_address_space_is_one_inaccessible_region() {
+        const OUT: u64 = 0x0800_0000;
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(OUT, 0x1000).unwrap();
+        let end = cpu.memory_layout().space_end;
+        for addr in [end, end + 0x1234_5000, u64::MAX - 0xFFF] {
+            cpu.write_zr(0, OUT);
+            cpu.write_zr(2, addr);
+            cpu.horizon_syscall(0x06).unwrap();
+            assert_eq!(cpu.read_zr(0), 0);
+            let (base, size) = (
+                cpu.mem.read_u64(OUT).unwrap(),
+                cpu.mem.read_u64(OUT + 8).unwrap(),
+            );
+            assert_eq!(base, end, "at {addr:#x}");
+            assert_eq!(base.wrapping_add(size), 0, "the region runs to 2^64");
+            assert_eq!(cpu.mem.read_u32(OUT + 16).unwrap(), 0x10, "Inaccessible");
+            assert_eq!(cpu.mem.read_u32(OUT + 24).unwrap(), 0, "no permission");
+        }
+    }
+
     #[test]
     fn query_memory_reports_the_granted_heap_before_it_is_touched() {
-        const OUT: u32 = 0x0800_0000;
+        const OUT: u64 = 0x0800_0000;
         const SIZE: u64 = 0x0100_0000;
         let mut cpu = Cpu::new();
         cpu.mem.map_zero(OUT, 0x1000).unwrap();
         cpu.write_zr(1, SIZE);
         cpu.horizon_syscall(0x01).unwrap();
-        let heap = cpu.read_zr(1) as u32;
-        cpu.write_zr(0, u64::from(OUT));
-        cpu.write_zr(2, u64::from(heap) + 0x0050_0000);
+        let heap = cpu.read_zr(1);
+        assert_eq!(heap, crate::cpu::HEAP_REGION_ADDR);
+        cpu.write_zr(0, OUT);
+        cpu.write_zr(2, heap + 0x0050_0000);
         cpu.horizon_syscall(0x06).unwrap();
-        assert_eq!(cpu.mem.read_u32(OUT).unwrap(), heap);
-        assert_eq!(cpu.mem.read_u32(OUT + 8).unwrap(), SIZE as u32);
+        assert_eq!(cpu.mem.read_u64(OUT).unwrap(), heap);
+        assert_eq!(cpu.mem.read_u64(OUT + 8).unwrap(), SIZE);
         assert_eq!(cpu.mem.read_u32(OUT + 16).unwrap(), 5, "Normal");
-        cpu.write_zr(0, u64::from(OUT));
-        cpu.write_zr(2, u64::from(heap) - 0x1000);
+        cpu.write_zr(0, OUT);
+        cpu.write_zr(2, heap - 0x1000);
         cpu.horizon_syscall(0x06).unwrap();
         let (base, len) = (
-            cpu.mem.read_u32(OUT).unwrap(),
-            cpu.mem.read_u32(OUT + 8).unwrap(),
+            cpu.mem.read_u64(OUT).unwrap(),
+            cpu.mem.read_u64(OUT + 8).unwrap(),
         );
         assert_eq!(
             base + len,
@@ -1406,8 +1465,8 @@ mod tests {
     fn a_transfer_memory_is_the_creators_pages_and_goes_with_its_last_handle() {
         const ADDR: u32 = 0x0900_0000;
         let mut cpu = Cpu::new();
-        cpu.mem.map_zero(ADDR, 0x2000).unwrap();
-        cpu.mem.write_u32(ADDR + 4, 7).unwrap();
+        cpu.mem.map_zero(u64::from(ADDR), 0x2000).unwrap();
+        cpu.mem.write_u32(u64::from(ADDR + 4), 7).unwrap();
         cpu.write_zr(1, u64::from(ADDR));
         cpu.write_zr(2, 0x2000);
         cpu.horizon_syscall(0x15).unwrap();
@@ -1416,7 +1475,7 @@ mod tests {
 
         let memory = cpu.transfer_memories[&handle].clone();
         assert_eq!(memory.read_u32(4).unwrap(), 7, "the contents were not kept");
-        cpu.mem.write_u32(ADDR + 0x1000, 9).unwrap();
+        cpu.mem.write_u32(u64::from(ADDR + 0x1000), 9).unwrap();
         assert_eq!(
             memory.read_u32(0x1000).unwrap(),
             9,

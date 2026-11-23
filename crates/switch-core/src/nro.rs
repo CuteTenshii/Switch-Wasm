@@ -110,30 +110,30 @@ pub const NEXT_LOAD_BUFFER_SIZE: usize = 0x300;
 pub fn setup_env_block(mem: &Memory) -> u32 {
     let a = ENV_BLOCK_ADDR;
     // MainThreadHandle (Key 1): required by __libnx_init_thread.
-    let _ = mem.write_u32(a, ENTRY_MAIN_THREAD_HANDLE);
-    let _ = mem.write_u32(a + 4, 0);
-    let _ = mem.write_u64(a + 8, 1);
-    let _ = mem.write_u64(a + 16, 0);
+    let _ = mem.write_u32(u64::from(a), ENTRY_MAIN_THREAD_HANDLE);
+    let _ = mem.write_u32(u64::from(a + 4), 0);
+    let _ = mem.write_u64(u64::from(a + 8), 1);
+    let _ = mem.write_u64(u64::from(a + 16), 0);
     // HosVersion: 0xFFFFFFFF ("current") with the "ATMOSPHR" magic.
-    let _ = mem.write_u32(a + 24, ENTRY_HOS_VERSION);
-    let _ = mem.write_u32(a + 28, 0);
-    let _ = mem.write_u64(a + 32, 0xFFFF_FFFF);
-    let _ = mem.write_u64(a + 40, 0x4154_4D4F_5350_4852); // "ATMOSPHR"
-    let _ = mem.write_u32(a + 48, ENTRY_ARGV);
-    let _ = mem.write_u32(a + 52, 0);
-    let _ = mem.write_u64(a + 56, 0);
-    let _ = mem.write_u64(a + 64, u64::from(ARGV_STRING_ADDR));
+    let _ = mem.write_u32(u64::from(a + 24), ENTRY_HOS_VERSION);
+    let _ = mem.write_u32(u64::from(a + 28), 0);
+    let _ = mem.write_u64(u64::from(a + 32), 0xFFFF_FFFF);
+    let _ = mem.write_u64(u64::from(a + 40), 0x4154_4D4F_5350_4852); // "ATMOSPHR"
+    let _ = mem.write_u32(u64::from(a + 48), ENTRY_ARGV);
+    let _ = mem.write_u32(u64::from(a + 52), 0);
+    let _ = mem.write_u64(u64::from(a + 56), 0);
+    let _ = mem.write_u64(u64::from(a + 64), u64::from(ARGV_STRING_ADDR));
     // NextLoadPath (Key 2): { path buffer, argv buffer }.
-    let _ = mem.write_u32(a + 72, ENTRY_NEXT_LOAD_PATH);
-    let _ = mem.write_u32(a + 76, 0);
-    let _ = mem.write_u64(a + 80, u64::from(NEXT_LOAD_PATH_ADDR));
-    let _ = mem.write_u64(a + 88, u64::from(NEXT_LOAD_ARGV_ADDR));
-    let _ = mem.map_zero(NEXT_LOAD_PATH_ADDR, NEXT_LOAD_BUFFER_SIZE);
-    let _ = mem.map_zero(NEXT_LOAD_ARGV_ADDR, NEXT_LOAD_BUFFER_SIZE);
-    let _ = mem.write_u32(a + 96, ENTRY_END_OF_LIST);
-    let _ = mem.write_u32(a + 100, 0);
-    let _ = mem.write_u64(a + 104, 0);
-    let _ = mem.write_u64(a + 112, 0);
+    let _ = mem.write_u32(u64::from(a + 72), ENTRY_NEXT_LOAD_PATH);
+    let _ = mem.write_u32(u64::from(a + 76), 0);
+    let _ = mem.write_u64(u64::from(a + 80), u64::from(NEXT_LOAD_PATH_ADDR));
+    let _ = mem.write_u64(u64::from(a + 88), u64::from(NEXT_LOAD_ARGV_ADDR));
+    let _ = mem.map_zero(u64::from(NEXT_LOAD_PATH_ADDR), NEXT_LOAD_BUFFER_SIZE as u64);
+    let _ = mem.map_zero(u64::from(NEXT_LOAD_ARGV_ADDR), NEXT_LOAD_BUFFER_SIZE as u64);
+    let _ = mem.write_u32(u64::from(a + 96), ENTRY_END_OF_LIST);
+    let _ = mem.write_u32(u64::from(a + 100), 0);
+    let _ = mem.write_u64(u64::from(a + 104), 0);
+    let _ = mem.write_u64(u64::from(a + 112), 0);
     write_argv0(mem, HOMEBREW_NRO_PATH);
     a
 }
@@ -146,8 +146,8 @@ const ARGV_STRING_MAX: usize = (NEXT_LOAD_PATH_ADDR - ARGV_STRING_ADDR) as usize
 /// Longer than the block holds, it is cut short.
 pub fn write_argv0(mem: &Memory, path: &str) {
     let path = &path.as_bytes()[..path.len().min(ARGV_STRING_MAX)];
-    let _ = mem.write_bytes(ARGV_STRING_ADDR, path);
-    let _ = mem.write_u8(ARGV_STRING_ADDR + path.len() as u32, 0);
+    let _ = mem.write_bytes(u64::from(ARGV_STRING_ADDR), path);
+    let _ = mem.write_u8(u64::from(ARGV_STRING_ADDR + path.len() as u32), 0);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,14 +387,14 @@ pub fn symbol_value(data: &[u8], name: &str) -> Option<u64> {
 fn patch_libtransistor_runconf(mem: &Memory, data: &[u8], base: u32, text_end: u32) -> Result<()> {
     if let Some(off) = symbol_value(data, "_trn_runconf_heap_mode") {
         let addr = base.wrapping_add(off as u32);
-        let _ = mem.write_u32(addr, 1);
+        let _ = mem.write_u32(u64::from(addr), 1);
     }
     let _ = patch_sbrk_runconf_via_code(mem, base, text_end);
     Ok(())
 }
 
 fn read_insn(mem: &Memory, addr: u32) -> Option<u32> {
-    mem.read_u32(addr).ok()
+    mem.read_u32(u64::from(addr)).ok()
 }
 
 fn is_svc(insn: u32, imm: u16) -> bool {
@@ -539,7 +539,7 @@ fn patch_sbrk_runconf_via_code(mem: &Memory, base: u32, text_end: u32) -> Result
                             if cmp_reg == i2_reg as u8 && imm == 2 && is_b_cond(i4, 0) {
                                 if let Some((cmp_reg2, imm2)) = decode_cmp_w_imm(i5) {
                                     if cmp_reg2 == i2_reg as u8 && imm2 == 1 && is_b_cond(i6, 1) {
-                                        return mem.write_u32(ptr_addr, 1);
+                                        return mem.write_u32(u64::from(ptr_addr), 1);
                                     }
                                 }
                             }
@@ -575,8 +575,8 @@ fn apply_relr(mem: &Memory, base: u32, end_addr: u32, relr: &[u8]) -> Result<()>
                 return Ok(());
             }
             last = addr;
-            let cur = mem.read_u64(addr)?;
-            mem.write_u64(addr, cur.wrapping_add(base as u64))?;
+            let cur = mem.read_u64(u64::from(addr))?;
+            mem.write_u64(u64::from(addr), cur.wrapping_add(base as u64))?;
         } else {
             if addr >= end_addr {
                 return Ok(());
@@ -588,8 +588,8 @@ fn apply_relr(mem: &Memory, base: u32, end_addr: u32, relr: &[u8]) -> Result<()>
                         return Ok(());
                     }
                     last = a;
-                    let cur = mem.read_u64(a)?;
-                    mem.write_u64(a, cur.wrapping_add(base as u64))?;
+                    let cur = mem.read_u64(u64::from(a))?;
+                    mem.write_u64(u64::from(a), cur.wrapping_add(base as u64))?;
                 }
             }
             addr = addr.wrapping_add(8 * 63);
@@ -661,7 +661,7 @@ pub fn load_nro(mem: &Memory, data: &[u8]) -> Result<LoadedNro> {
     copy_segment(mem, data, h.text_offset, h.text_size, text_addr)?;
     copy_segment(mem, data, h.ro_offset, h.ro_size, ro_addr)?;
     copy_segment(mem, data, h.data_offset, h.data_size, data_addr)?;
-    mem.map_zero(end_addr, h.bss_size as usize)?;
+    mem.map_zero(u64::from(end_addr), u64::from(h.bss_size))?;
     let image_end = end_addr.wrapping_add(h.bss_size);
     if !has_self_relocating_crt0(data) {
         apply_nro_relocations(mem, data, image_end)?;
@@ -669,9 +669,13 @@ pub fn load_nro(mem: &Memory, data: &[u8]) -> Result<LoadedNro> {
     let text_end = text_addr.wrapping_add(h.text_size);
     let _ = patch_libtransistor_runconf(mem, data, base, text_end);
     // Lock `.text`; `.rodata` stays writable for a crt0 patching `.data.rel.ro`.
-    mem.mark_readonly(text_addr, ro_addr);
+    mem.mark_readonly(u64::from(text_addr), u64::from(ro_addr));
     // See `Memory::mark_module`.
-    mem.mark_module((text_addr, data_addr), (data_addr, image_end), false);
+    mem.mark_module(
+        (u64::from(text_addr), u64::from(data_addr)),
+        (u64::from(data_addr), u64::from(image_end)),
+        false,
+    );
 
     let env_addr = if has_self_relocating_crt0(data) {
         setup_env_block(mem)
@@ -713,7 +717,7 @@ fn copy_segment(mem: &Memory, data: &[u8], off: u32, size: u32, addr: u32) -> Re
     if end > data.len() {
         return Err(Error::Nro("segment exceeds input data".into()));
     }
-    mem.map(addr, &data[start..end])
+    mem.map(u64::from(addr), &data[start..end])
 }
 
 #[cfg(test)]
@@ -811,11 +815,14 @@ mod tests {
         let mem = Memory::new();
         let loaded = load_nro(&mem, &nro).unwrap();
         assert_eq!(loaded.entry, NRO_BASE);
-        assert_eq!(mem.read_u32(NRO_BASE).unwrap(), 0x01);
-        assert_eq!(mem.read_u32(NRO_BASE + 4).unwrap(), 0x02);
-        assert_eq!(mem.read_u32(loaded.data.mem_addr).unwrap(), 0xEFBE_ADDE);
+        assert_eq!(mem.read_u32(u64::from(NRO_BASE)).unwrap(), 0x01);
+        assert_eq!(mem.read_u32(u64::from(NRO_BASE + 4)).unwrap(), 0x02);
         assert_eq!(
-            mem.read_u8(loaded.data.mem_addr + loaded.data.file_size)
+            mem.read_u32(u64::from(loaded.data.mem_addr)).unwrap(),
+            0xEFBE_ADDE
+        );
+        assert_eq!(
+            mem.read_u8(u64::from(loaded.data.mem_addr + loaded.data.file_size))
                 .unwrap(),
             0
         );
@@ -831,18 +838,24 @@ mod tests {
         let mem = Memory::new();
         let loaded = load_nro(&mem, &nro).unwrap();
         // this was locked down) now faults instead of silently succeeding.
-        assert!(mem.write_u32(loaded.text.mem_addr, 0xDEAD_BEEF).is_err());
-        assert_eq!(mem.read_u32(loaded.text.mem_addr).unwrap(), 0x01);
-        mem.write_u32(loaded.data.mem_addr, 0x1234).unwrap();
-        assert_eq!(mem.read_u32(loaded.data.mem_addr).unwrap(), 0x1234);
+        assert!(mem
+            .write_u32(u64::from(loaded.text.mem_addr), 0xDEAD_BEEF)
+            .is_err());
+        assert_eq!(mem.read_u32(u64::from(loaded.text.mem_addr)).unwrap(), 0x01);
+        mem.write_u32(u64::from(loaded.data.mem_addr), 0x1234)
+            .unwrap();
+        assert_eq!(
+            mem.read_u32(u64::from(loaded.data.mem_addr)).unwrap(),
+            0x1234
+        );
     }
 
     #[test]
     fn apply_relr_relocates_and_stops_at_backward_jump() {
         let mem = Memory::new();
-        mem.map_zero(NRO_BASE, 0x2000).unwrap();
-        mem.write_u64(NRO_BASE + 0x1000, 0x1234).unwrap();
-        mem.write_u64(NRO_BASE + 0x1008, 0x5678).unwrap();
+        mem.map_zero(u64::from(NRO_BASE), 0x2000).unwrap();
+        mem.write_u64(u64::from(NRO_BASE + 0x1000), 0x1234).unwrap();
+        mem.write_u64(u64::from(NRO_BASE + 0x1008), 0x5678).unwrap();
         // An address, a bitmap, then a backward address that stops the walk.
         let mut relr = Vec::new();
         relr.extend_from_slice(&0x1000u64.to_le_bytes());
@@ -850,11 +863,11 @@ mod tests {
         relr.extend_from_slice(&0u64.to_le_bytes()); // address 0 → backwards → stop
         apply_relr(&mem, NRO_BASE, NRO_BASE + 0x2000, &relr).unwrap();
         assert_eq!(
-            mem.read_u64(NRO_BASE + 0x1000).unwrap(),
+            mem.read_u64(u64::from(NRO_BASE + 0x1000)).unwrap(),
             0x1234 + NRO_BASE as u64
         );
         assert_eq!(
-            mem.read_u64(NRO_BASE + 0x1008).unwrap(),
+            mem.read_u64(u64::from(NRO_BASE + 0x1008)).unwrap(),
             0x5678 + NRO_BASE as u64
         );
     }

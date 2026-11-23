@@ -951,7 +951,9 @@ mod tests {
         let base = h.base;
         let pb = pushbuffer(&[header(3, 1, 0, 0), CLASS_3D, header(4, 0x55, 0, 0x360)]);
         for (i, b) in pb.iter().enumerate() {
-            h.mem.write_u8(0x3000_0000 + i as u32, *b).unwrap();
+            h.mem
+                .write_u8(u64::from(0x3000_0000 + i as u32), *b)
+                .unwrap();
         }
         let words = (pb.len() / 4) as u64;
         let entry = (base & 0xFF_FFFF_FFFC) | (words << 42);

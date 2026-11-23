@@ -65,8 +65,10 @@ fn main() {
             }
             scanned += 1;
             let mut cpu = common::new_cpu();
-            cpu.mem.map_zero(SCRATCH, SCRATCH_SIZE).unwrap();
-            cpu.mem.map(CODE, &word.to_le_bytes()).unwrap();
+            cpu.mem
+                .map_zero(u64::from(SCRATCH), SCRATCH_SIZE as u64)
+                .unwrap();
+            cpu.mem.map(u64::from(CODE), &word.to_le_bytes()).unwrap();
             cpu.set_mode(ExecMode::A32);
             cpu.set_pc_and_sp(CODE, u64::from(SCRATCH) + SCRATCH_SIZE as u64 / 2);
             for reg in 0..13 {

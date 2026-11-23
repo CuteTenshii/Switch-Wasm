@@ -10,7 +10,7 @@
 mod common;
 
 use clap::Parser;
-use common::emit::{self, LAYOUT, TABLE_AT, TABLE_BYTES};
+use common::emit::{self, LAYOUT, POOL_AT};
 use common::{Flow, Pace};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -108,7 +108,7 @@ fn main() {
         // No guest memory is mapped, so a block runs up to its first memory access.
         let whole = path.len() - 1;
         let ops = (0..whole)
-            .find(|&i| cpu.mem.read_u32(path[i]).is_ok_and(defers))
+            .find(|&i| cpu.mem.fetch(path[i]).is_ok_and(defers))
             .unwrap_or(whole);
         if ops < 2 {
             continue;
@@ -188,11 +188,7 @@ fn main() {
         cases += 1;
     }
 
-    let header = emit::header()
-        + &format!(
-            "wasm_pages {}\n",
-            (TABLE_AT + TABLE_BYTES).div_ceil(64 * 1024)
-        );
+    let header = emit::header() + &format!("wasm_pages {}\n", POOL_AT.div_ceil(64 * 1024));
     std::fs::write(format!("{out_dir}/manifest.txt"), header + &manifest)
         .expect("cannot write the manifest");
 

@@ -12,18 +12,11 @@ mod common;
 
 use clap::Parser;
 
-use common::emit::{self, LAYOUT, TABLE_AT, TABLE_BYTES};
+use common::emit::{self, LAYOUT, POOL_AT};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use switch_core::cpu::{defers, emits, Cpu};
 use switch_core::disasm::disassemble;
-
-/// Where the mapped guest pages live, one 4 KiB slot each.
-const POOL_AT: u32 = TABLE_AT + TABLE_BYTES;
-
-/// Bitmap of pages with cached contents, one bit per guest page.
-const BITMAP_AT: u32 = POOL_AT + WINDOW_BYTES;
-const BITMAP_BYTES: u32 = (1 << 20) / 8;
 
 /// Slot of the `n`th window page, scattered so page-boundary checks are exercised.
 /// [`WINDOW_PAGES`] is prime, so the stepping reaches every slot.
@@ -180,7 +173,7 @@ fn main() {
                 for &nzcv in flags {
                     // A case before this one may have stored over the preamble.
                     cpu.mem
-                        .map(WINDOW_AT, &start)
+                        .map(u64::from(WINDOW_AT), &start)
                         .expect("the window is mapped");
                     seed(&mut cpu, set, nzcv);
                     for i in 0..32 {
@@ -206,20 +199,24 @@ fn main() {
                     // Reset the window through `map` (ignoring read-only ranges) and re-arm the
                     // cached page before each block.
                     cpu.mem
-                        .map(WINDOW_AT, &start)
+                        .map(u64::from(WINDOW_AT), &start)
                         .expect("the window is mapped");
                     cpu.mem.take_read_hit();
                     cpu.mem.take_watch_hit();
-                    cpu.mem.mark_code_page(WATCHED_PAGE_AT);
+                    cpu.mem.mark_code_page(u64::from(WATCHED_PAGE_AT));
                     cpu.mem.dirty_code_pages(0);
                     arm_monitor(&mut cpu, body[0], set);
                     let monitor_before = cpu.exclusive_state();
                     let mut fault = false;
+                    // A terminator that faults (a branch above 4 GiB, where no code is) after the
+                    // body ran: the block retires the body and hands the terminator back.
+                    let mut terminator_fault = false;
                     // A branch taken before the end leaves the block there.
                     let mut took = false;
                     for i in 0..ops {
                         if cpu.step().is_err() {
                             fault = true;
+                            terminator_fault = i > 0 && i + 1 == ops;
                             break;
                         }
                         if path[i + 1] != u32::MAX && cpu.get_pc() != path[i + 1] {
@@ -228,33 +225,38 @@ fn main() {
                             break;
                         }
                     }
-                    if fault && !hands_back {
+                    if fault && !hands_back && !terminator_fault {
                         faulted += 1;
                         continue;
                     }
                     // A store over the block's own terminator; real code pages hand back.
                     let ended = path.last() == Some(&u32::MAX);
                     let left = took || ended;
-                    if ended && !took && cpu.mem.read_u32(path[ops - 1]).ok() != Some(RET) {
+                    if ended
+                        && !took
+                        && cpu.mem.read_u32(u64::from(path[ops - 1])).ok() != Some(RET)
+                    {
                         rewrote += 1;
                         continue;
                     }
 
                     // Faults, watched reads and writes, and cached-page stores must all hand
                     // back with no state change.
-                    let must_hand_back = fault
-                        || cpu.mem.take_read_hit().is_some()
+                    let body_must_hand_back = cpu.mem.take_read_hit().is_some()
                         || cpu.mem.take_watch_hit().is_some()
                         || cpu
                             .mem
                             .dirty_code_pages(0)
                             .is_none_or(|pages| !pages.is_empty());
+                    let must_hand_back = (fault && !terminator_fault) || body_must_hand_back;
 
                     let name = format!("case{cases:05}");
                     std::fs::write(format!("{out_dir}/{name}.wasm"), &module)
                         .expect("cannot write a module");
                     // A written terminator leaves with the interpreter's pc.
                     let mode = match (hands_back, must_hand_back, left) {
+                        (false, false, _) if terminator_fault => format!("upto:{}", ops - 1),
+                        (true, false, _) if terminator_fault => format!("maybe-upto:{}", ops - 1),
                         (false, _, false) => "exact".into(),
                         (false, _, true) => format!("left:{:#010x}", cpu.get_pc()),
                         (true, false, false) => "maybe".into(),
@@ -320,7 +322,6 @@ fn main() {
     let header = emit::header()
         + &format!(
             "tpidr_values {TPIDR_SEED} {TPIDR_RW_SEED}\n\
-         bitmap_at {BITMAP_AT}\n\
          code_at {CODE_AT}\n\
          read_watch {READ_WATCH_AT} {}\n\
          watch {WATCH_AT} {}\n\
@@ -331,7 +332,7 @@ fn main() {
             WATCH_AT + WATCH_BYTES,
             READONLY_ONE.0,
             READONLY_TWO.0,
-            (BITMAP_AT + BITMAP_BYTES).div_ceil(64 * 1024),
+            (POOL_AT + WINDOW_BYTES).div_ceil(64 * 1024),
             page_lines(),
         );
     std::fs::write(format!("{out_dir}/manifest.txt"), header + &manifest)
@@ -398,16 +399,22 @@ fn code_bytes(program: &[u32]) -> Vec<u8> {
 fn mapped_cpu(code: &[u8]) -> Cpu {
     let cpu = common::new_cpu();
     cpu.mem
-        .map_zero(WINDOW_AT, WINDOW_BYTES as usize)
+        .map_zero(u64::from(WINDOW_AT), u64::from(WINDOW_BYTES))
         .expect("cannot map the guest window");
     cpu.mem
-        .write_bytes(WINDOW_AT, &window_bytes())
+        .write_bytes(u64::from(WINDOW_AT), &window_bytes())
         .expect("cannot fill the guest window");
-    cpu.mem.map(CODE_AT, code).expect("cannot write the code");
-    cpu.mem.mark_readonly(READONLY_ONE.0, READONLY_ONE.1);
-    cpu.mem.mark_readonly(READONLY_TWO.0, READONLY_TWO.1);
-    cpu.mem.watch_reads(READ_WATCH_AT, READ_WATCH_BYTES);
-    cpu.mem.watch_writes(WATCH_AT, WATCH_BYTES);
+    cpu.mem
+        .map(u64::from(CODE_AT), code)
+        .expect("cannot write the code");
+    cpu.mem
+        .mark_readonly(u64::from(READONLY_ONE.0), u64::from(READONLY_ONE.1));
+    cpu.mem
+        .mark_readonly(u64::from(READONLY_TWO.0), u64::from(READONLY_TWO.1));
+    cpu.mem
+        .watch_reads(u64::from(READ_WATCH_AT), u64::from(READ_WATCH_BYTES));
+    cpu.mem
+        .watch_writes(u64::from(WATCH_AT), u64::from(WATCH_BYTES));
     cpu
 }
 
@@ -423,7 +430,7 @@ fn baseline(code: &[u8]) -> Vec<u8> {
 fn memory_delta(cpu: &Cpu, baseline: &[u8]) -> String {
     let mut now = vec![0u8; WINDOW_BYTES as usize];
     cpu.mem
-        .read_into(WINDOW_AT, &mut now)
+        .read_into(u64::from(WINDOW_AT), &mut now)
         .expect("the window is mapped");
     let mut out = String::new();
     let mut at = 0usize;
@@ -595,7 +602,7 @@ fn arm_monitor(cpu: &mut Cpu, insn: u32, set: usize) {
         cpu.set_exclusive(false, 0, [0, 0]);
         return;
     }
-    let addr = cpu.reg_slots()[rn] as u32;
+    let addr = cpu.reg_slots()[rn];
     let size = (insn >> 30) & 0b11;
     let held = match (pair, size) {
         (_, 0) => cpu.mem.read_u8(addr).map(|v| [u64::from(v), 0]),

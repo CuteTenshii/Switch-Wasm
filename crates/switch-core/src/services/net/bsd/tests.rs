@@ -35,7 +35,7 @@ pub(in crate::services::net) fn open_socket(cpu: &mut Cpu, kind: u32) -> i32 {
     fd
 }
 
-pub(in crate::services::net) const SCRATCH: u32 = 0x4000;
+pub(in crate::services::net) const SCRATCH: u64 = 0x4000;
 
 /// What `fcntl(F_SETFL, O_NONBLOCK)` leaves behind.
 pub(in crate::services::net) fn set_nonblocking(cpu: &mut Cpu, fd: i32) {
@@ -51,9 +51,9 @@ pub(in crate::services::net) fn loopback_sockaddr(port: u16) -> [u8; 16] {
     raw
 }
 
-pub(in crate::services::net) fn place(cpu: &mut Cpu, at: u32, bytes: &[u8]) {
+pub(in crate::services::net) fn place(cpu: &mut Cpu, at: u64, bytes: &[u8]) {
     for (offset, &byte) in bytes.iter().enumerate() {
-        cpu.mem.write_u8(at + offset as u32, byte).unwrap();
+        cpu.mem.write_u8(at + offset as u64, byte).unwrap();
     }
 }
 
@@ -87,7 +87,7 @@ pub(in crate::services::net) fn connected_pair(cpu: &mut Cpu, listener: i32) -> 
 }
 
 pub(in crate::services::net) fn send_on(cpu: &mut Cpu, fd: i32, bytes: &[u8]) -> (i32, i32) {
-    const AT: u32 = SCRATCH + 0x40;
+    const AT: u64 = SCRATCH + 0x40;
     place(cpu, AT, bytes);
     write_map_buffer_request(cpu, 10, &fd.to_le_bytes(), AT, bytes.len() as u32, true);
     cpu.bsd_request(TLS, 9, Some(10)).unwrap();
@@ -105,7 +105,7 @@ pub(in crate::services::net) fn recv_with(
     len: u32,
     flags: u32,
 ) -> ((i32, i32), Vec<u8>) {
-    const AT: u32 = SCRATCH + 0x80;
+    const AT: u64 = SCRATCH + 0x80;
     place(cpu, AT, &vec![0u8; len as usize]);
     let payload = [fd.to_le_bytes(), flags.to_le_bytes()].concat();
     write_map_buffer_request(cpu, 8, &payload, AT, len, false);
@@ -175,7 +175,7 @@ pub(in crate::services::net) fn bsd_sends_an_addressed_datagram_the_link_would_c
     // if it does not go out.
     let (mut cpu, fd) = bsd_socket(super::BSD_SOCK_DGRAM);
     cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
-    const PAYLOAD: u32 = SCRATCH + 0x40;
+    const PAYLOAD: u64 = SCRATCH + 0x40;
     const PORT: u16 = 19132;
 
     place(&mut cpu, SCRATCH, &loopback_sockaddr(PORT));
@@ -218,8 +218,8 @@ pub(in crate::services::net) fn bsd_sends_an_addressed_datagram_the_link_would_c
     assert!(cpu.pending_yield, "a read that waits has to reschedule");
 
     // Datagram sockets poll writable.
-    const POLL_IN: u32 = SCRATCH + 0xc0;
-    const POLL_OUT: u32 = SCRATCH + 0xd0;
+    const POLL_IN: u64 = SCRATCH + 0xc0;
+    const POLL_OUT: u64 = SCRATCH + 0xd0;
     const POLLOUT: u16 = 0x0004;
     let mut pollfd = [0u8; 8];
     pollfd[..4].copy_from_slice(&fd.to_le_bytes());
@@ -244,7 +244,7 @@ pub(in crate::services::net) fn bsd_sends_an_addressed_datagram_the_link_would_c
 
 #[test]
 pub(in crate::services::net) fn bsd_socket_options_and_flags_read_back() {
-    const BUFFER: u32 = 0x4000;
+    const BUFFER: u64 = 0x4000;
     let (mut cpu, fd) = bsd_socket(1);
     cpu.mem.map_zero(BUFFER, 0x100).unwrap();
 
@@ -389,19 +389,21 @@ pub(in crate::services::net) fn bsd_builds_the_socket_pair_asio_wakes_its_own_se
 #[test]
 pub(in crate::services::net) fn bsd_select_names_the_descriptor_that_has_a_byte() {
     const SET: u32 = 0x80;
-    const SETS: u32 = 0x6000;
+    const SETS: u64 = 0x6000;
     let (mut cpu, listener) = bsd_socket(1);
     cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
-    cpu.mem.map_zero(SETS, 6 * SET as usize).unwrap();
+    cpu.mem.map_zero(SETS, 6 * u64::from(SET)).unwrap();
     let (client, server) = connected_pair(&mut cpu, listener);
 
-    let sets: Vec<(u32, u32)> = (0..6).map(|index| (SETS + index * SET, SET)).collect();
+    let sets: Vec<(u64, u32)> = (0..6)
+        .map(|index| (SETS + index * u64::from(SET), SET))
+        .collect();
     let select = |cpu: &mut Cpu, watch: i32, micros: u64| {
-        for offset in 0..6 * SET {
+        for offset in 0..6 * u64::from(SET) {
             cpu.mem.write_u8(SETS + offset, 0).unwrap();
         }
         let bit = 1u8 << (watch % 8);
-        cpu.mem.write_u8(SETS + (watch as u32 / 8), bit).unwrap();
+        cpu.mem.write_u8(SETS + (watch as u64 / 8), bit).unwrap();
         let mut payload = [0u8; 32];
         payload[..4].copy_from_slice(&((watch + 1) as u32).to_le_bytes());
         payload[16..24].copy_from_slice(&micros.to_le_bytes());
@@ -411,7 +413,7 @@ pub(in crate::services::net) fn bsd_select_names_the_descriptor_that_has_a_byte(
         let ready = bsd_result(cpu);
         let out = cpu
             .mem
-            .read_u8(SETS + 3 * SET + (watch as u32 / 8))
+            .read_u8(SETS + 3 * u64::from(SET) + (watch as u64 / 8))
             .unwrap();
         (ready, out & bit != 0)
     };
@@ -485,7 +487,7 @@ pub(in crate::services::net) fn bsd_connects_to_this_console_and_refuses_everywh
 
 #[test]
 pub(in crate::services::net) fn bsd_get_sock_name_reports_the_address_nifm_does() {
-    const BUFFER: u32 = 0x4000;
+    const BUFFER: u64 = 0x4000;
     let (mut cpu, fd) = bsd_socket(1);
     cpu.mem.map_zero(BUFFER, 0x100).unwrap();
     write_map_buffer_request(&mut cpu, 16, &fd.to_le_bytes(), BUFFER, 0x10, false);
@@ -510,7 +512,7 @@ pub(in crate::services::net) fn bsd_command(
 
 /// `setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, timeval)`, the `timeval` as the guest laid it out.
 fn set_receive_timeout(cpu: &mut Cpu, fd: i32, timeval: &[u8]) {
-    const AT: u32 = SCRATCH + 0x180;
+    const AT: u64 = SCRATCH + 0x180;
     place(cpu, AT, timeval);
     let mut payload = [0u8; 12];
     payload[..4].copy_from_slice(&fd.to_le_bytes());
@@ -592,7 +594,7 @@ pub(in crate::services::net) fn so_rcvtimeo_reads_back_whole_and_parses_either_l
     set_receive_timeout(&mut cpu, fd, &value);
     assert_eq!(cpu.bsd_receive_timeout(fd), Some(2_500_000_000));
 
-    const OUT: u32 = SCRATCH + 0x100;
+    const OUT: u64 = SCRATCH + 0x100;
     let mut payload = [0u8; 12];
     payload[..4].copy_from_slice(&fd.to_le_bytes());
     payload[4..8].copy_from_slice(&super::BSD_SOL_SOCKET.to_le_bytes());
@@ -652,7 +654,7 @@ pub(in crate::services::net) fn a_blocking_accept_waits_for_a_connection() {
 
 /// `ioctl(fd, FIONREAD)`: the result and the count.
 fn bytes_waiting(cpu: &mut Cpu, fd: i32) -> ((i32, i32), u32) {
-    const OUT: u32 = SCRATCH + 0x1c0;
+    const OUT: u64 = SCRATCH + 0x1c0;
     let payload: Vec<u8> = [fd as u32, super::BSD_FIONREAD, 1]
         .iter()
         .flat_map(|word| word.to_le_bytes())
@@ -780,7 +782,7 @@ pub(in crate::services::net) fn open_and_sysctl_find_nothing_and_the_registratio
 
 /// `setsockopt(fd, SOL_SOCKET, option, value)`.
 fn set_option(cpu: &mut Cpu, fd: i32, option: u32, value: &[u8]) {
-    const AT: u32 = SCRATCH + 0x1e0;
+    const AT: u64 = SCRATCH + 0x1e0;
     place(cpu, AT, value);
     let payload: Vec<u8> = [fd as u32, super::BSD_SOL_SOCKET, option]
         .iter()

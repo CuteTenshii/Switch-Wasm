@@ -1120,8 +1120,7 @@ impl Emitter<'_> {
         let total = regs * members * vector;
         self.read_reg_raw(rn);
         self.f.local_tee(L_A);
-        self.f.i32_wrap_i64();
-        self.f.local_set(L_ADDR);
+        self.set_addr64();
         if post {
             self.f.local_get(L_A);
             if rm == 31 {
@@ -1220,8 +1219,7 @@ impl Emitter<'_> {
         // The address, and the base's writeback by the transfer size or Xm.
         self.read_reg_raw(rn);
         self.f.local_tee(L_A);
-        self.f.i32_wrap_i64();
-        self.f.local_set(L_ADDR);
+        self.set_addr64();
         if post {
             self.f.local_get(L_A);
             if rm == 31 {

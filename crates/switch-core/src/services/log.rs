@@ -6,7 +6,7 @@ use crate::Result;
 
 impl Cpu {
     /// `fatal:u`: report the guest's `Result` as a diagnostic and let it carry on.
-    pub(crate) fn fatal_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn fatal_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         let result = self.mem.read_u32(self.ipc_request_data(tls)).unwrap_or(0);
         let module = result & 0x1FF;
         let description = (result >> 9) & 0x1FFF;
@@ -27,7 +27,7 @@ impl Cpu {
     /// a 0x18-byte header (`pid`, `thread id`, `flags`, `severity`, `verbosity`,
     /// `payload_size`) then TLV chunks; the text is key 2. `flags` bit 0 marks the
     /// first packet of a message and bit 1 the last.
-    pub(crate) fn lm_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn lm_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
@@ -76,7 +76,7 @@ impl Cpu {
     }
 
     /// Parse one LogPacket and append its text to the guest's console output.
-    fn absorb_log_packet(&mut self, addr: u32, size: u32) {
+    fn absorb_log_packet(&mut self, addr: u64, size: u32) {
         const HEADER_LEN: u32 = 0x18;
         const FLAG_HEAD: u8 = 1 << 0;
         const FLAG_TAIL: u8 = 1 << 1;
@@ -97,11 +97,11 @@ impl Cpu {
         while off + 2 <= end {
             let key = self
                 .mem
-                .read_u8(addr.wrapping_add(HEADER_LEN + off))
+                .read_u8(addr.wrapping_add(u64::from(HEADER_LEN + off)))
                 .unwrap_or(0);
             let len = u32::from(
                 self.mem
-                    .read_u8(addr.wrapping_add(HEADER_LEN + off + 1))
+                    .read_u8(addr.wrapping_add(u64::from(HEADER_LEN + off + 1)))
                     .unwrap_or(0),
             );
             off += 2;
@@ -111,7 +111,10 @@ impl Cpu {
             if key == KEY_TEXT || key == KEY_MODULE {
                 let mut chunk = String::with_capacity(len as usize);
                 for i in 0..len {
-                    match self.mem.read_u8(addr.wrapping_add(HEADER_LEN + off + i)) {
+                    match self
+                        .mem
+                        .read_u8(addr.wrapping_add(u64::from(HEADER_LEN + off + i)))
+                    {
                         Ok(0) => break,
                         Ok(b) => chunk.push(b as char),
                         Err(_) => break,
@@ -156,7 +159,7 @@ mod tests {
 
     #[test]
     fn a_log_packet_sent_as_a_pointer_buffer_is_printed() {
-        const PACKET: u32 = 0x3000;
+        const PACKET: u64 = 0x3000;
         let text = b"hello";
         let mut packet = vec![0u8; 0x18];
         packet[0x10] = 0b11; // head and tail
@@ -168,7 +171,7 @@ mod tests {
         let mut cpu = auto_select_request(0, &[], PACKET, packet.len() as u32, true);
         cpu.mem.map_zero(PACKET, 0x100).unwrap();
         for (offset, &byte) in packet.iter().enumerate() {
-            cpu.mem.write_u8(PACKET + offset as u32, byte).unwrap();
+            cpu.mem.write_u8(PACKET + offset as u64, byte).unwrap();
         }
         cpu.record_handle(9, "lm:logger");
         cpu.lm_request(TLS, 9, Some(0)).unwrap();

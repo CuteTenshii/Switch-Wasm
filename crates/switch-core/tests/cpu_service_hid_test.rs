@@ -193,43 +193,68 @@ fn gamepad_input_writes_input_reg_and_hid_shmem() {
             expected_buttons
         );
 
-        assert_eq!(cpu.mem.read_u32(base).unwrap(), style, "style_set");
         assert_eq!(
-            cpu.mem.read_u32(base + 0x4188).unwrap(),
+            cpu.mem.read_u32(u64::from(base)).unwrap(),
+            style,
+            "style_set"
+        );
+        assert_eq!(
+            cpu.mem.read_u32(u64::from(base + 0x4188)).unwrap(),
             device,
             "device_type"
         );
         let lifo = base + lifo_off;
-        assert_eq!(cpu.mem.read_u64(lifo + 0x08).unwrap(), 17, "buffer_count");
-        assert_eq!(cpu.mem.read_u64(lifo + 0x10).unwrap(), 0, "tail");
-        assert_eq!(cpu.mem.read_u64(lifo + 0x18).unwrap(), 1, "count");
+        assert_eq!(
+            cpu.mem.read_u64(u64::from(lifo + 0x08)).unwrap(),
+            17,
+            "buffer_count"
+        );
+        assert_eq!(cpu.mem.read_u64(u64::from(lifo + 0x10)).unwrap(), 0, "tail");
+        assert_eq!(
+            cpu.mem.read_u64(u64::from(lifo + 0x18)).unwrap(),
+            1,
+            "count"
+        );
         let entry = lifo + 0x20;
-        let sample = cpu.mem.read_u64(entry).unwrap();
+        let sample = cpu.mem.read_u64(u64::from(entry)).unwrap();
         assert!(sample > 0, "sampling number must advance");
         // Bit 0 of the storage number is the seqlock flag, so it is doubled.
-        assert_eq!(cpu.mem.read_u64(entry + 0x08).unwrap() * 2, sample);
-        assert_eq!(cpu.mem.read_u64(entry + 0x10).unwrap(), expected_buttons);
         assert_eq!(
-            cpu.mem.read_u32(entry + 0x18).unwrap(),
+            cpu.mem.read_u64(u64::from(entry + 0x08)).unwrap() * 2,
+            sample
+        );
+        assert_eq!(
+            cpu.mem.read_u64(u64::from(entry + 0x10)).unwrap(),
+            expected_buttons
+        );
+        assert_eq!(
+            cpu.mem.read_u32(u64::from(entry + 0x18)).unwrap(),
             1000u32.wrapping_neg()
         );
-        assert_eq!(cpu.mem.read_u32(entry + 0x1C).unwrap(), 30000);
-        assert_eq!(cpu.mem.read_u32(entry + 0x28).unwrap() & 1, 1);
+        assert_eq!(cpu.mem.read_u32(u64::from(entry + 0x1C)).unwrap(), 30000);
+        assert_eq!(cpu.mem.read_u32(u64::from(entry + 0x28)).unwrap() & 1, 1);
 
         // Power info after `system_button_properties`: full batteries.
         for info in 0..3u32 {
-            let level = cpu.mem.read_u32(base + 0x4198 + info * 4).unwrap();
+            let level = cpu
+                .mem
+                .read_u32(u64::from(base + 0x4198 + info * 4))
+                .unwrap();
             assert_eq!(level, 4, "battery_level[{info}]");
         }
         // PowerConnected bits set, Charging bits clear.
-        let properties = cpu.mem.read_u32(base + 0x4190).unwrap();
+        let properties = cpu.mem.read_u32(u64::from(base + 0x4190)).unwrap();
         assert_eq!(properties & 0x38, 0x38, "PowerConnected");
         assert_eq!(properties & 0x7, 0, "Charging");
 
         // One pad: the other slot is nothing connected.
-        assert_eq!(cpu.mem.read_u32(idle).unwrap(), 0, "idle style_set");
         assert_eq!(
-            cpu.mem.read_u32(idle + 0x4188).unwrap(),
+            cpu.mem.read_u32(u64::from(idle)).unwrap(),
+            0,
+            "idle style_set"
+        );
+        assert_eq!(
+            cpu.mem.read_u32(u64::from(idle + 0x4188)).unwrap(),
             0,
             "idle device_type"
         );
@@ -264,34 +289,81 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
         },
     ]);
 
-    assert_eq!(cpu.mem.read_u64(LIFO + 0x08).unwrap(), 17, "buffer_count");
-    assert_eq!(cpu.mem.read_u64(LIFO + 0x10).unwrap(), 0, "tail");
-    assert_eq!(cpu.mem.read_u64(LIFO + 0x18).unwrap(), 1, "count");
+    assert_eq!(
+        cpu.mem.read_u64(u64::from(LIFO + 0x08)).unwrap(),
+        17,
+        "buffer_count"
+    );
+    assert_eq!(cpu.mem.read_u64(u64::from(LIFO + 0x10)).unwrap(), 0, "tail");
+    assert_eq!(
+        cpu.mem.read_u64(u64::from(LIFO + 0x18)).unwrap(),
+        1,
+        "count"
+    );
 
     let storage = LIFO + 0x20;
-    let sample = cpu.mem.read_u64(storage).unwrap();
+    let sample = cpu.mem.read_u64(u64::from(storage)).unwrap();
     assert!(sample > 0, "sampling number must advance");
     let state = storage + 8;
     // The storage number is the state's doubled.
     assert_eq!(
-        cpu.mem.read_u64(state).unwrap() * 2,
+        cpu.mem.read_u64(u64::from(state)).unwrap() * 2,
         sample,
         "state sampling number"
     );
-    assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 2, "contact count");
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(state + 0x08)).unwrap(),
+        2,
+        "contact count"
+    );
 
     let touch = |i: u32| state + 0x10 + i * 0x28;
-    assert_eq!(cpu.mem.read_u32(touch(0) + 0x0C).unwrap(), 0, "finger_id");
-    assert_eq!(cpu.mem.read_u32(touch(0) + 0x10).unwrap(), 640, "x");
-    assert_eq!(cpu.mem.read_u32(touch(0) + 0x14).unwrap(), 360, "y");
-    assert!(cpu.mem.read_u32(touch(0) + 0x18).unwrap() > 0, "diameter_x");
-    assert_eq!(cpu.mem.read_u32(touch(1) + 0x0C).unwrap(), 3, "finger_id");
-    assert_eq!(cpu.mem.read_u32(touch(1) + 0x10).unwrap(), 100, "x");
-    assert_eq!(cpu.mem.read_u32(touch(1) + 0x14).unwrap(), 700, "y");
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(0) + 0x0C)).unwrap(),
+        0,
+        "finger_id"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(0) + 0x10)).unwrap(),
+        640,
+        "x"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(0) + 0x14)).unwrap(),
+        360,
+        "y"
+    );
+    assert!(
+        cpu.mem.read_u32(u64::from(touch(0) + 0x18)).unwrap() > 0,
+        "diameter_x"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(1) + 0x0C)).unwrap(),
+        3,
+        "finger_id"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(1) + 0x10)).unwrap(),
+        100,
+        "x"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(1) + 0x14)).unwrap(),
+        700,
+        "y"
+    );
 
     // New contacts carry `start_touch`; UIs tap on that transition.
-    assert_eq!(cpu.mem.read_u32(touch(0) + 0x08).unwrap(), 1, "start 0");
-    assert_eq!(cpu.mem.read_u32(touch(1) + 0x08).unwrap(), 1, "start 3");
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(0) + 0x08)).unwrap(),
+        1,
+        "start 0"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(1) + 0x08)).unwrap(),
+        1,
+        "start 3"
+    );
 
     // A lifted finger is published once more with `end_touch`; the held one's
     // attributes return to zero.
@@ -300,16 +372,28 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
         x: 5,
         y: 6,
     }]);
-    assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 2, "contact count");
-    assert_eq!(cpu.mem.read_u32(touch(0) + 0x08).unwrap(), 0, "held");
     assert_eq!(
-        cpu.mem.read_u32(touch(1) + 0x0C).unwrap(),
+        cpu.mem.read_u32(u64::from(state + 0x08)).unwrap(),
+        2,
+        "contact count"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(0) + 0x08)).unwrap(),
+        0,
+        "held"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(1) + 0x0C)).unwrap(),
         3,
         "the lifted id"
     );
-    assert_eq!(cpu.mem.read_u32(touch(1) + 0x08).unwrap(), 2, "end");
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(1) + 0x08)).unwrap(),
+        2,
+        "end"
+    );
     assert!(
-        cpu.mem.read_u64(storage).unwrap() > sample,
+        cpu.mem.read_u64(u64::from(storage)).unwrap() > sample,
         "sample must advance"
     );
 
@@ -319,16 +403,40 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
         x: 5,
         y: 6,
     }]);
-    assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 1, "contact count");
-    assert_eq!(cpu.mem.read_u32(touch(1) + 0x10).unwrap(), 0, "vacated x");
-    assert_eq!(cpu.mem.read_u32(touch(1) + 0x14).unwrap(), 0, "vacated y");
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(state + 0x08)).unwrap(),
+        1,
+        "contact count"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(1) + 0x10)).unwrap(),
+        0,
+        "vacated x"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(1) + 0x14)).unwrap(),
+        0,
+        "vacated y"
+    );
 
     // A full lift is published, not silent.
     cpu.set_touch_state(&[]);
-    assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 1, "the end sample");
-    assert_eq!(cpu.mem.read_u32(touch(0) + 0x08).unwrap(), 2, "end");
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(state + 0x08)).unwrap(),
+        1,
+        "the end sample"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(0) + 0x08)).unwrap(),
+        2,
+        "end"
+    );
     cpu.set_touch_state(&[]);
-    assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 0, "contact count");
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(state + 0x08)).unwrap(),
+        0,
+        "contact count"
+    );
 
     // Coordinates clamp to the digitizer; slots to sixteen.
     cpu.set_touch_state(&[TouchPoint {
@@ -337,11 +445,15 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
         y: 99_999,
     }]);
     assert_eq!(
-        cpu.mem.read_u32(touch(0) + 0x10).unwrap(),
+        cpu.mem.read_u32(u64::from(touch(0) + 0x10)).unwrap(),
         1279,
         "clamped x"
     );
-    assert_eq!(cpu.mem.read_u32(touch(0) + 0x14).unwrap(), 719, "clamped y");
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(touch(0) + 0x14)).unwrap(),
+        719,
+        "clamped y"
+    );
 }
 
 #[test]

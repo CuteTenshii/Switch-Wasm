@@ -44,7 +44,7 @@ fn sample_frame(cpu: &mut switch_core::cpu::Cpu) -> Option<(HashMap<u32, u64>, u
         if cpu.nv.gpu.frames != start {
             return Flow::Stop;
         }
-        if let Ok(insn) = cpu.mem.read_u32(cpu.get_pc()) {
+        if let Ok(insn) = cpu.mem.fetch(cpu.get_pc()) {
             *seen.entry(insn).or_default() += 1;
         }
         Flow::Continue

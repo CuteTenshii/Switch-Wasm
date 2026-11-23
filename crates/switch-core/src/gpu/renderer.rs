@@ -29,7 +29,7 @@ pub struct Blit {
 #[derive(Debug, Clone, Copy)]
 pub struct ScanOut {
     /// The CPU address of the buffer's first pixel.
-    pub addr: u32,
+    pub addr: u64,
     pub format: Format,
     pub layout: Layout,
     pub width: u32,
@@ -123,7 +123,7 @@ pub trait Renderer: std::fmt::Debug {
     /// Start getting a presented frame back without waiting for the ones already on their
     /// way; see [`Submit`]. `scanout` is the CPU address the display reads, when known; a
     /// backend may keep every other surface for later.
-    fn submit_frame(&mut self, ctx: &mut ExecCtx, scanout: Option<u32>) -> Result<Submit> {
+    fn submit_frame(&mut self, ctx: &mut ExecCtx, scanout: Option<u64>) -> Result<Submit> {
         let _ = (ctx, scanout);
         Ok(Submit::Done)
     }

@@ -138,6 +138,17 @@ impl Cpu {
         self.pc = pc;
     }
 
+    /// The pc an indirect branch to `target` lands on. Code is only ever loaded below
+    /// 4 GiB, so a target above is a fault rather than an address to truncate.
+    pub(crate) fn branch_target(&self, target: u64) -> Result<u32> {
+        u32::try_from(target).map_err(|_| {
+            Error::Cpu(format!(
+                "branch to {target:#x} from {:#x}: no code is loaded above 4 GiB",
+                self.pc
+            ))
+        })
+    }
+
     /// Read a register where 31 is SP.
     #[inline(always)]
     pub fn read_x(&self, idx: u8) -> u64 {
@@ -166,8 +177,8 @@ impl Cpu {
         self.vregs.0[idx as usize]
     }
 
-    pub fn tls_base(&self) -> u32 {
-        self.tpidr as u32
+    pub fn tls_base(&self) -> u64 {
+        self.tpidr
     }
 
     pub fn set_vreg(&mut self, idx: u8, val: u128) {

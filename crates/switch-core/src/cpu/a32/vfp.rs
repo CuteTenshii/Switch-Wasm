@@ -118,23 +118,23 @@ impl Cpu {
             if double {
                 let dd = (d_bit << 4) | vd;
                 if load {
-                    let lo = self.mem.read_u32(addr)?;
-                    let hi = self.mem.read_u32(addr.wrapping_add(4))?;
+                    let lo = self.mem.read_u32(u64::from(addr))?;
+                    let hi = self.mem.read_u32(u64::from(addr.wrapping_add(4)))?;
                     self.set_vfp_d(dd, u64::from(lo) | (u64::from(hi) << 32));
                 } else {
                     let val = self.vfp_d(dd);
-                    self.mem.write_u32(addr, val as u32)?;
+                    self.mem.write_u32(u64::from(addr), val as u32)?;
                     self.mem
-                        .write_u32(addr.wrapping_add(4), (val >> 32) as u32)?;
+                        .write_u32(u64::from(addr.wrapping_add(4)), (val >> 32) as u32)?;
                 }
             } else {
                 let sd = (vd << 1) | d_bit;
                 if load {
-                    let val = self.mem.read_u32(addr)?;
+                    let val = self.mem.read_u32(u64::from(addr))?;
                     self.set_vfp_s(sd, val);
                 } else {
                     let val = self.vfp_s(sd);
-                    self.mem.write_u32(addr, val)?;
+                    self.mem.write_u32(u64::from(addr), val)?;
                 }
             }
             self.pc = self.pc.wrapping_add(4);
@@ -150,24 +150,24 @@ impl Cpu {
             if double {
                 let dd = ((d_bit << 4) | vd).wrapping_add(i) & 0x1F;
                 if load {
-                    let lo = self.mem.read_u32(addr)?;
-                    let hi = self.mem.read_u32(addr.wrapping_add(4))?;
+                    let lo = self.mem.read_u32(u64::from(addr))?;
+                    let hi = self.mem.read_u32(u64::from(addr.wrapping_add(4)))?;
                     self.set_vfp_d(dd, u64::from(lo) | (u64::from(hi) << 32));
                 } else {
                     let val = self.vfp_d(dd);
-                    self.mem.write_u32(addr, val as u32)?;
+                    self.mem.write_u32(u64::from(addr), val as u32)?;
                     self.mem
-                        .write_u32(addr.wrapping_add(4), (val >> 32) as u32)?;
+                        .write_u32(u64::from(addr.wrapping_add(4)), (val >> 32) as u32)?;
                 }
                 addr = addr.wrapping_add(8);
             } else {
                 let sd = (((vd << 1) | d_bit).wrapping_add(i)) & 0x1F;
                 if load {
-                    let val = self.mem.read_u32(addr)?;
+                    let val = self.mem.read_u32(u64::from(addr))?;
                     self.set_vfp_s(sd, val);
                 } else {
                     let val = self.vfp_s(sd);
-                    self.mem.write_u32(addr, val)?;
+                    self.mem.write_u32(u64::from(addr), val)?;
                 }
                 addr = addr.wrapping_add(4);
             }

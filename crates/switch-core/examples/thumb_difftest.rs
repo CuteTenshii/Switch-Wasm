@@ -30,16 +30,18 @@ fn main() {
     let expected = std::fs::read(format!("{dir}/expected.bin")).unwrap_or_default();
 
     let mut cpu = Cpu::new();
-    cpu.mem.map(BASE, &image).expect("cannot map the image");
+    cpu.mem
+        .map(u64::from(BASE), &image)
+        .expect("cannot map the image");
     // Where the qemu image builds its page table, which the replay fills in too.
     cpu.mem
         .map_zero(0x4010_0000, 0x4000)
         .expect("cannot map the table");
     cpu.mem
-        .map_zero(BUF, 0x1000)
+        .map_zero(u64::from(BUF), 0x1000)
         .expect("cannot map the buffer");
     cpu.mem
-        .map_zero(RESULTS, count * CASE)
+        .map_zero(u64::from(RESULTS), (count * CASE) as u64)
         .expect("cannot map the results");
     cpu.set_mode(ExecMode::A32);
     cpu.set_pc(BASE);
@@ -63,7 +65,7 @@ fn main() {
     }
     let mut got = vec![0u8; expected.len()];
     cpu.mem
-        .read_into(RESULTS, &mut got)
+        .read_into(u64::from(RESULTS), &mut got)
         .expect("results are mapped");
 
     if let Some(case) = std::env::var("THUMB_CASE")

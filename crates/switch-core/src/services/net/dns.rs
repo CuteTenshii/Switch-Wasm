@@ -149,7 +149,7 @@ fn results(reply: Reply, error: u32, size: u32) -> [u8; 12] {
 impl Cpu {
     /// `sfdnsres` (`IResolver`): nothing resolves. Every lookup fails definitively,
     /// `EAI_NONAME` or `HOST_NOT_FOUND`, including numeric addresses.
-    pub(crate) fn sfdnsres_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn sfdnsres_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[]);
         }
@@ -181,7 +181,8 @@ impl Cpu {
                 if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
                     if addr != 0 {
                         for (index, &byte) in message.iter().take(size as usize).enumerate() {
-                            self.mem.write_u8(addr.wrapping_add(index as u32), byte)?;
+                            self.mem
+                                .write_u8(addr.wrapping_add(u64::from(index as u32)), byte)?;
                         }
                     }
                 }
@@ -201,7 +202,7 @@ impl Cpu {
     }
 
     /// `nsd:a`/`nsd:u`: name resolution for the production environment, `lp1`.
-    pub(crate) fn nsd_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn nsd_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const FQDN_SIZE: u32 = 0x100;
         if self.ipc_answer_control(tls, handle, "nsd", cmd_id)? {
             return Ok(());
@@ -227,7 +228,7 @@ impl Cpu {
 
     /// `GetAddrInfoRequest` with a network: a literal address answers as itself, a name as
     /// its synthetic address, which `bsd` maps back to the name when the guest connects.
-    fn sfdnsres_addrinfo(&mut self, tls: u32, with_options: bool) -> Result<()> {
+    fn sfdnsres_addrinfo(&mut self, tls: u64, with_options: bool) -> Result<()> {
         let read = |cpu: &Cpu, index: u32| {
             cpu.ipc_input_buffer(tls, index)
                 .map(|(addr, size)| cpu.read_bytes(addr, size))
@@ -304,7 +305,7 @@ impl Cpu {
     /// answers as itself, a name as its synthetic address, as `GetAddrInfoRequest` does. The
     /// name is the first input buffer (the options, when there are any, the second), the
     /// serialized `hostent` the first output buffer.
-    fn sfdnsres_host_by_name(&mut self, tls: u32, with_options: bool) -> Result<()> {
+    fn sfdnsres_host_by_name(&mut self, tls: u64, with_options: bool) -> Result<()> {
         let name = self
             .ipc_input_buffer(tls, 0)
             .map(|(addr, size)| self.read_bytes(addr, size))
@@ -338,7 +339,7 @@ impl Cpu {
     /// `GetHostByAddrRequest`, and its WithOptions form, with a network: a synthetic address
     /// names the host it stands for. Anything else would need a reverse lookup the host does
     /// not offer, and is not found.
-    fn sfdnsres_host_by_address(&mut self, tls: u32, with_options: bool) -> Result<()> {
+    fn sfdnsres_host_by_address(&mut self, tls: u64, with_options: bool) -> Result<()> {
         let raw = self
             .ipc_input_buffer(tls, 0)
             .map(|(addr, size)| self.read_bytes(addr, size.min(4)))
@@ -357,7 +358,7 @@ impl Cpu {
     /// then each address as a little-endian word, since libnx byte-swaps it into `s_addr`.
     fn sfdnsres_hostent(
         &mut self,
-        tls: u32,
+        tls: u64,
         with_options: bool,
         name: &str,
         address: [u8; 4],
@@ -380,12 +381,12 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &results, &[])
     }
 
-    fn sfdnsres_host_failure(&mut self, tls: u32, with_options: bool) -> Result<()> {
+    fn sfdnsres_host_failure(&mut self, tls: u64, with_options: bool) -> Result<()> {
         self.sfdnsres_failure(tls, SFDNSRES_HOST_NOT_FOUND, Reply::host(with_options))
     }
 
     /// A failed lookup: the error in its word, errno 0, nothing written. See [`results`].
-    fn sfdnsres_failure(&mut self, tls: u32, error: i32, reply: Reply) -> Result<()> {
+    fn sfdnsres_failure(&mut self, tls: u64, error: i32, reply: Reply) -> Result<()> {
         let results = results(reply, error as u32, 0);
         self.write_ipc_response(tls, 0, &[], &results, &[])
     }
@@ -398,8 +399,8 @@ mod tests {
 
     #[test]
     fn nsd_resolves_the_environment_placeholder() {
-        const IN: u32 = 0x1000;
-        const OUT: u32 = 0x1200;
+        const IN: u64 = 0x1000;
+        const OUT: u64 = 0x1200;
         let mut cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         cpu.mem.map_zero(IN, 0x400).unwrap();
@@ -446,20 +447,20 @@ mod tests {
 
     #[test]
     fn sfdnsres_explains_the_failure_it_reports() {
-        const BUFFER: u32 = 0x4000;
+        const BUFFER: u64 = 0x4000;
         let mut cpu = request_with_recv_buffer(5, &[], BUFFER, 0x40);
         cpu.mem.map_zero(BUFFER, 0x100).unwrap();
         cpu.sfdnsres_request(TLS, Some(5)).unwrap();
         assert_eq!(cpu.read_string(BUFFER, 0x40), "Name or service not known");
     }
 
-    const LOOKUP_HOST: u32 = 0x5000;
+    const LOOKUP_HOST: u64 = 0x5000;
 
-    const LOOKUP_PORT: u32 = 0x5100;
+    const LOOKUP_PORT: u64 = 0x5100;
 
-    const LOOKUP_HINTS: u32 = 0x5200;
+    const LOOKUP_HINTS: u64 = 0x5200;
 
-    const LOOKUP_OUT: u32 = 0x5800;
+    const LOOKUP_OUT: u64 = 0x5800;
 
     /// `getaddrinfo(host, port, hints)` with the network on; the reply words and the output.
     fn lookup(host: &str, port: &str, socktype: Option<u32>) -> ((i32, u32), Vec<u8>) {
@@ -563,7 +564,7 @@ mod tests {
         }
         write_buffer_request(cpu, cmd, &[0; 16], &send, &[(LOOKUP_OUT, 0x100)]);
         cpu.sfdnsres_request(TLS, Some(cmd)).unwrap();
-        let word = |at: u32| cpu.mem.read_u32(TLS + at).unwrap();
+        let word = |at: u64| cpu.mem.read_u32(TLS + at).unwrap();
         let words = [word(0x20), word(0x24), word(0x28)];
         let size = if cmd == 10 { words[0] } else { words[2] };
         (words, cpu.read_bytes(LOOKUP_OUT, size))

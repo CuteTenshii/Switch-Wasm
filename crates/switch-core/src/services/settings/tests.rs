@@ -3,7 +3,7 @@ use crate::kernel::ipc::testing::*;
 
 #[test]
 fn set_sys_reports_an_accepted_eula() {
-    const BUFFER: u32 = 0x4000;
+    const BUFFER: u64 = 0x4000;
     const ENTRY: u32 = 0x30;
 
     let mut cpu = request_with_recv_buffer(21, &[], BUFFER, 4 * ENTRY);
@@ -26,7 +26,7 @@ fn set_sys_get_serial_number_returns_a_nul_padded_placeholder() {
     cpu.set_sys_request(TLS, Some(68)).unwrap();
     let mut got = [0u8; 0x18];
     for (i, byte) in got.iter_mut().enumerate() {
-        *byte = cpu.mem.read_u8(TLS + 0x20 + i as u32).unwrap();
+        *byte = cpu.mem.read_u8(TLS + 0x20 + i as u64).unwrap();
     }
     assert!(got.starts_with(b"XAW00000000000"));
     assert_eq!(got[b"XAW00000000000".len()], 0, "NUL-padded, not garbage");
@@ -123,7 +123,7 @@ fn set_sys_names_the_settings_it_used_to_leave_to_the_reply_padding() {
 
 #[test]
 fn set_sys_reports_a_real_firmware_version_into_its_pointer_buffer() {
-    const BUFFER: u32 = 0x4000;
+    const BUFFER: u64 = 0x4000;
     let mut cpu = request_with_recv_static(3, &[], BUFFER, 0x100);
     cpu.mem.map_zero(BUFFER, 0x200).unwrap();
     for offset in 0..0x100 {
@@ -208,7 +208,7 @@ fn set_sys_keeps_a_settings_block_whole_past_the_reply_padding() {
     cpu.set_sys_request(TLS, Some(39)).unwrap();
     for (index, &byte) in block.iter().enumerate() {
         assert_eq!(
-            cpu.mem.read_u8(TLS + 0x20 + index as u32).unwrap(),
+            cpu.mem.read_u8(TLS + 0x20 + index as u64).unwrap(),
             byte,
             "byte {index} of TvSettings"
         );
@@ -252,14 +252,14 @@ fn set_sys_replaces_the_eula_list_from_the_buffer_it_was_handed() {
     const SET: u32 = 22;
     const GET: u32 = 21;
     const ENTRY: u32 = 0x30;
-    const IN: u32 = 0x4000;
-    const OUT: u32 = 0x5000;
+    const IN: u64 = 0x4000;
+    const OUT: u64 = 0x5000;
 
     let mut cpu = request(false, SET, &[]);
     cpu.mem.map_zero(IN, 0x200).unwrap();
     cpu.mem.map_zero(OUT, 0x200).unwrap();
     cpu.mem.write_u32(IN, 0x2_0000).unwrap();
-    cpu.mem.write_u32(IN + ENTRY, 0x3_0000).unwrap();
+    cpu.mem.write_u32(IN + u64::from(ENTRY), 0x3_0000).unwrap();
     write_map_buffer_request(&mut cpu, SET, &[], IN, 2 * ENTRY, true);
     cpu.set_sys_request(TLS, Some(SET)).unwrap();
     assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
@@ -268,7 +268,7 @@ fn set_sys_replaces_the_eula_list_from_the_buffer_it_was_handed() {
     cpu.set_sys_request(TLS, Some(GET)).unwrap();
     assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 2, "two agreements");
     assert_eq!(cpu.mem.read_u32(OUT).unwrap(), 0x2_0000);
-    assert_eq!(cpu.mem.read_u32(OUT + ENTRY).unwrap(), 0x3_0000);
+    assert_eq!(cpu.mem.read_u32(OUT + u64::from(ENTRY)).unwrap(), 0x3_0000);
 }
 
 #[test]
@@ -277,15 +277,15 @@ fn the_device_nick_name_set_sys_was_given_reads_back_through_both_services() {
     const SET: u32 = 78;
     const SYS_GET: u32 = 77;
     const SET_GET: u32 = 11;
-    const IN: u32 = 0x4000;
-    const OUT: u32 = 0x5000;
+    const IN: u64 = 0x4000;
+    const OUT: u64 = 0x5000;
     const NAME: &[u8] = b"the console in the tab";
 
     let mut cpu = request(false, SET, &[]);
     cpu.mem.map_zero(IN, 0x200).unwrap();
     cpu.mem.map_zero(OUT, 0x200).unwrap();
     for (index, &byte) in NAME.iter().enumerate() {
-        cpu.mem.write_u8(IN + index as u32, byte).unwrap();
+        cpu.mem.write_u8(IN + index as u64, byte).unwrap();
     }
     write_map_buffer_request(&mut cpu, SET, &[], IN, 0x80, true);
     cpu.set_sys_request(TLS, Some(SET)).unwrap();
@@ -426,18 +426,18 @@ fn the_nfc_switch_is_one_switch() {
 fn set_sys_serves_a_settings_item_and_refuses_one_it_has_not_got() {
     const SIZE_OF: u32 = 37;
     const VALUE_OF: u32 = 38;
-    const CATEGORY: u32 = 0x4000;
-    const NAME: u32 = 0x4100;
-    const OUT: u32 = 0x5000;
+    const CATEGORY: u64 = 0x4000;
+    const NAME: u64 = 0x4100;
+    const OUT: u64 = 0x5000;
 
     let mut cpu = request(false, SIZE_OF, &[]);
     cpu.mem.map_zero(CATEGORY, 0x200).unwrap();
     cpu.mem.map_zero(OUT, 0x200).unwrap();
-    let write_name = |cpu: &mut Cpu, at: u32, text: &str| {
+    let write_name = |cpu: &mut Cpu, at: u64, text: &str| {
         for (index, &byte) in text.as_bytes().iter().enumerate() {
-            cpu.mem.write_u8(at + index as u32, byte).unwrap();
+            cpu.mem.write_u8(at + index as u64, byte).unwrap();
         }
-        cpu.mem.write_u8(at + text.len() as u32, 0).unwrap();
+        cpu.mem.write_u8(at + text.len() as u64, 0).unwrap();
     };
     write_name(&mut cpu, CATEGORY, "hbloader");
     write_name(&mut cpu, NAME, "applet_heap_reservation_size");
@@ -470,7 +470,7 @@ fn set_sys_serves_a_settings_item_and_refuses_one_it_has_not_got() {
 #[test]
 fn set_writes_the_language_codes_into_a_pointer_buffer() {
     // The pre-4.0.0 form fills a receive-static buffer.
-    const BUFFER: u32 = 0x4000;
+    const BUFFER: u64 = 0x4000;
     let mut cpu = request_with_recv_static(1, &[], BUFFER, 0x80);
     cpu.mem.map_zero(BUFFER, 0x100).unwrap();
     cpu.register_service_handle(9, "set");
@@ -492,7 +492,7 @@ fn set_writes_the_language_codes_into_a_pointer_buffer() {
 fn set_answers_the_pointer_buffer_size_and_not_its_language_count() {
     // Control command 3 is `QueryPointerBufferSize`, not `set`'s own command 3.
     let mut cpu = control_request(3);
-    cpu.tpidr = u64::from(TLS);
+    cpu.tpidr = TLS;
     cpu.register_service_handle(9, "set");
     cpu.write_zr(0, 9);
     cpu.horizon_syscall(0x20).unwrap();

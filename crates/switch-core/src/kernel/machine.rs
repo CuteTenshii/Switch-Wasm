@@ -38,21 +38,30 @@ impl Cpu {
         self.process().save_data_quota
     }
 
-    /// Set the NPDM `system_resource_size`, which selects the [`MemoryLayout`].
+    /// Set the NPDM `system_resource_size`, which the [`MemoryLayout`] reports.
     /// Call before [`Cpu::boot_retail_program`].
     pub fn set_system_resource_size(&mut self, size: u32) {
         self.process_mut().system_resource_size = size;
         self.refresh_memory_layout();
     }
 
-    /// Re-choose the layout from the program id, system resource size and loaded code, set in
-    /// any order.
+    /// Set whether the program is 64-bit, which picks the [`MemoryLayout`]'s regions.
+    pub fn set_64_bit(&mut self, is_64_bit: bool) {
+        self.process_mut().is_64_bit = is_64_bit;
+        self.refresh_memory_layout();
+    }
+
+    /// Re-choose the layout from the instruction set, program id and system resource size,
+    /// set in any order, and soft-map the space it ends at.
     pub(crate) fn refresh_memory_layout(&mut self) {
-        self.process_mut().memory_layout = MemoryLayout::for_program(
+        let layout = MemoryLayout::for_process(
+            self.process().is_64_bit,
             self.process().program_id,
             self.process().system_resource_size,
-            self.process().heap_beside_vamm,
         );
+        self.process_mut().memory_layout = layout;
+        self.mem
+            .soft_map_zero(u64::from(GUEST_SPACE_START), layout.space_end);
     }
 
     pub fn memory_layout(&self) -> MemoryLayout {

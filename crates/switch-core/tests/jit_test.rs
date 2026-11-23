@@ -78,7 +78,7 @@ fn snapshot(cpu: &Cpu) -> State {
         vregs,
         cycles: cpu.cycles,
         halted: cpu.halted,
-        data: cpu.mem.dump(DATA, DATA_LEN).unwrap_or_default(),
+        data: cpu.mem.dump(u64::from(DATA), DATA_LEN).unwrap_or_default(),
     }
 }
 
@@ -123,13 +123,13 @@ fn assert_same(interpreted: &State, translated: &State, what: &str) {
 fn loaded(code: &[u32], jit: bool) -> Cpu {
     let mut cpu = Cpu::new();
     cpu.set_jit_enabled(jit);
-    cpu.mem.map_zero(CODE, 0x1000).unwrap();
-    cpu.mem.map_zero(DATA, 0x1000).unwrap();
+    cpu.mem.map_zero(u64::from(CODE), 0x1000).unwrap();
+    cpu.mem.map_zero(u64::from(DATA), 0x1000).unwrap();
     let mut bytes = Vec::with_capacity(code.len() * 4);
     for insn in code {
         bytes.extend_from_slice(&insn.to_le_bytes());
     }
-    cpu.mem.map(CODE, &bytes).unwrap();
+    cpu.mem.map(u64::from(CODE), &bytes).unwrap();
     cpu.set_pc(CODE);
     cpu
 }
@@ -249,7 +249,7 @@ fn a_host_write_into_translated_code_is_noticed() {
     assert_eq!(cpu.read_x(0), 1);
     let before = cpu.jit_stats().translated;
 
-    cpu.mem.write_u32(CODE, 0xd2800040).unwrap(); // movz x0, #2
+    cpu.mem.write_u32(u64::from(CODE), 0xd2800040).unwrap(); // movz x0, #2
     cpu.set_pc(CODE);
     cpu.run(8).unwrap();
     assert_eq!(
@@ -400,7 +400,7 @@ fn a_block_across_two_pages_is_dropped_by_a_store_to_the_second() {
         .enumerate()
     {
         cpu.mem
-            .map(start + 4 * i as u32, &insn.to_le_bytes())
+            .map(u64::from(start + 4 * i as u32), &insn.to_le_bytes())
             .unwrap();
     }
     cpu.set_pc(start);
@@ -512,7 +512,7 @@ const SEVEN: u64 = CODE as u64 + 0x38;
 
 fn bound(code: &[u32], jit: bool, target: u64) -> Cpu {
     let cpu = loaded(code, jit);
-    cpu.mem.write_u64(PLT_SLOT, target).unwrap();
+    cpu.mem.write_u64(u64::from(PLT_SLOT), target).unwrap();
     cpu
 }
 
@@ -549,7 +549,7 @@ fn a_rebound_plt_slot_is_followed_on_the_next_call() {
     cpu.run(7).unwrap();
     assert_eq!(cpu.read_x(1), 5);
     assert_eq!(cpu.get_pc(), CODE + 4);
-    cpu.mem.write_u64(PLT_SLOT, SEVEN).unwrap();
+    cpu.mem.write_u64(u64::from(PLT_SLOT), SEVEN).unwrap();
     cpu.run(13).unwrap();
     assert_eq!(cpu.read_x(1), 7, "the second call went to the old target");
 }

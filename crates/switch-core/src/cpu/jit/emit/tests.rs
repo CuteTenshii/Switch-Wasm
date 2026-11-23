@@ -15,12 +15,13 @@ const LAYOUT: Layout = Layout {
     pc: 2084,
     fuel: 2088,
     memory: 2096,
-    pages: 2052,
+    blocks: 2052,
+    block_pages: 0,
+    block_watched: 2048,
     read_watch_lo: 2056,
-    read_watch_hi: 2060,
-    watch_lo: 2064,
-    watch_hi: 2068,
-    watched: 2080,
+    read_watch_hi: 2064,
+    watch_lo: 2072,
+    watch_hi: 2080,
     pair_lock: 2176,
     vregs: 4096,
     exclusive: 2112,
@@ -46,15 +47,12 @@ fn an_unwritable_op_refuses_the_whole_block() {
 }
 
 /// Walks guest state from the `Cpu`'s address by [`Layout::of_cpu`]
-/// offsets alone, as emitted code does.
+/// offsets alone, as emitted code does, to an address above 4 GiB.
 #[test]
 fn emitted_code_finds_guest_state_through_the_layout() {
-    /// One page-table entry.
-    const ENTRY: usize = std::mem::size_of::<Option<Box<[u8; PAGE_SIZE]>>>();
-
     const SLOT: u8 = 5;
     const VALUE: u64 = 0x0123_4567_89AB_CDEF;
-    const ADDR: u32 = 0x0800_1234;
+    const ADDR: u64 = 0x20_0800_1234;
     const BYTE: u8 = 0xA7;
 
     let mut cpu = Cpu::new();
@@ -73,7 +71,7 @@ fn emitted_code_finds_guest_state_through_the_layout() {
     // the type the field there holds.
     unsafe {
         let memory = *((base + layout.memory as usize) as *const usize);
-        let u32_at = |off: u32| *((memory + off as usize) as *const u32);
+        let u64_at = |off: u32| *((memory + off as usize) as *const u64);
 
         assert_eq!(
             *((base + layout.regs as usize + 8 * SLOT as usize) as *const u64),
@@ -89,7 +87,7 @@ fn emitted_code_finds_guest_state_through_the_layout() {
         let monitor = (base + layout.exclusive as usize) as *const u8;
         assert_eq!(
             (
-                *(monitor.add(MONITOR_ADDR as usize) as *const u32),
+                *(monitor.add(MONITOR_ADDR as usize) as *const u64),
                 *(monitor.add(MONITOR_ARMED as usize) as *const u32),
                 *(monitor.add(MONITOR_VALUE as usize) as *const u64),
             ),
@@ -98,44 +96,57 @@ fn emitted_code_finds_guest_state_through_the_layout() {
         );
 
         assert_eq!(
-            (u32_at(layout.read_watch_lo), u32_at(layout.read_watch_hi)),
+            (u64_at(layout.read_watch_lo), u64_at(layout.read_watch_hi)),
             (0x1000, 0x1040),
             "the read watchpoint moved"
         );
         assert_eq!(
-            (u32_at(layout.watch_lo), u32_at(layout.watch_hi)),
+            (u64_at(layout.watch_lo), u64_at(layout.watch_hi)),
             (0x2000, 0x2080),
             "the write watchpoint moved"
         );
 
-        // Marking a page allocates the bitmap and sets the bit stores test.
-        let watched = *((memory + layout.watched as usize) as *const *const u64);
-        assert!(!watched.is_null(), "the watched-page bitmap is not there");
-        let page = (ADDR >> PAGE_BITS) as usize;
-        assert_ne!(
-            *watched.add(page >> 6) & (1u64 << (page & 63)),
-            0,
+        // The walk: the table, the address's block, then its page's entry and bit.
+        let table = *((memory + layout.blocks as usize) as *const *const *const u8);
+        let block_of = |addr: u64| {
+            *table.add(((addr >> (PAGE_BITS + BLOCK_BITS)) as usize) & (BLOCK_COUNT - 1))
+        };
+        let in_block = |addr: u64| ((addr >> PAGE_BITS) as usize) & (BLOCK_PAGES - 1);
+        let watched = |addr: u64| {
+            let bits = block_of(addr).add(layout.block_watched as usize) as *const u64;
+            *bits.add(in_block(addr) >> 6) & (1u64 << (in_block(addr) & 63)) != 0
+        };
+        let entry = |addr: u64| {
+            let pages = block_of(addr).add(layout.block_pages as usize) as *const *const u8;
+            *pages.add(in_block(addr))
+        };
+        assert!(
+            watched(ADDR),
             "the marked page's bit is not where an emitted store looks"
         );
-        let protected = 0x3000 >> PAGE_BITS;
-        assert_ne!(
-            *watched.add(protected >> 6) & (1u64 << (protected & 63)),
-            0,
+        assert!(
+            watched(0x3000),
             "a write-protected page is not set where an emitted store looks"
         );
-
-        // The page-table walk: table pointer, entry, byte at the offset.
-        let table = *((memory + layout.pages as usize) as *const *const u8);
-        let entry = *(table.add(page * ENTRY) as *const *const u8);
-        assert!(!entry.is_null(), "a written page has no storage");
+        assert!(!entry(ADDR).is_null(), "a written page has no storage");
         assert_eq!(
-            *entry.add((ADDR as usize) & (PAGE_SIZE - 1)),
+            *entry(ADDR).add((ADDR as usize) & (PAGE_SIZE - 1)),
             BYTE,
             "the page-table walk does not reach the byte that was written"
         );
-        const NOWHERE: u32 = 0xF000_0000;
-        let blank = *(table.add((NOWHERE >> PAGE_BITS) as usize * ENTRY) as *const *const u8);
-        assert!(blank.is_null(), "an unmapped page is not a null entry");
+        const NOWHERE: u64 = 0x40_F000_0000;
+        assert!(
+            !block_of(NOWHERE).is_null(),
+            "an untouched block's entry is null, which the walk does not test for"
+        );
+        assert!(
+            entry(NOWHERE).is_null(),
+            "an unmapped page is not a null entry"
+        );
+        assert!(
+            !watched(NOWHERE),
+            "an untouched block has a watched bit set"
+        );
     }
 }
 

@@ -7,7 +7,7 @@ impl Cpu {
     /// delete by id). Alarms never fire.
     pub(crate) fn notif_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {

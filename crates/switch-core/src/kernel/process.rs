@@ -52,12 +52,12 @@ pub(crate) struct Process {
     /// The title's NACP save quota, reported by `IApplicationFunctions`; set through
     /// [`Cpu::set_save_data_quota`] and not enforced.
     pub(crate) save_data_quota: fs::SaveDataQuota,
-    /// Chosen from the NPDM system resource size and program id.
+    /// Chosen from the NPDM's instruction set and system resource size, and the program id.
     pub(crate) memory_layout: MemoryLayout,
     /// Kept because the layout also depends on the program id, which may arrive later.
     pub(crate) system_resource_size: u32,
-    /// The loaded modules size a heap beside Vamm; see [`MemoryLayout::HEAP_BESIDE_VAMM`].
-    pub(crate) heap_beside_vamm: bool,
+    /// Whether the program runs A64 code; a 32-bit one has a 4 GiB address space.
+    pub(crate) is_64_bit: bool,
     /// Application proxy (told `FocusStateChanged`) vs applet (told `ChangeIntoForeground`).
     pub(crate) applet_is_application: bool,
     /// `ISelfController` auto-sleep settings, stored so getters read them back.
@@ -68,7 +68,7 @@ pub(crate) struct Process {
     /// NROs mapped by `ldr:ro`, by mapped address; see [`Cpu::ldr_ro_request`].
     pub(crate) ro_modules: BTreeMap<u32, ldr::RoModule>,
     /// Registered NRRs, by address. Signatures are not checked.
-    pub(crate) ro_registrations: BTreeMap<u32, u32>,
+    pub(crate) ro_registrations: BTreeMap<u64, u64>,
     /// Open SD directory handles to the entries not yet yielded.
     pub(crate) fs_dirs: IdMap<u64, Vec<crate::vfs::DirEntry>>,
     /// Open `IFile` objects: domain object id to path.
@@ -116,9 +116,9 @@ pub(crate) struct Process {
     /// Whether the shared buffer's pages are mapped at `SHARED_BUFFER_ADDR`.
     pub(crate) shared_buffer_mapped: bool,
     /// Bytes `svcSetHeapSize` last granted, which `svcQueryMemory` reports as heap.
-    pub(crate) heap_size: u32,
+    pub(crate) heap_size: u64,
     /// Guest address of hid shared memory; 0 until mapped.
-    pub(crate) hid_shmem_addr: u32,
+    pub(crate) hid_shmem_addr: u64,
     /// Handle used to recognise hid's shared memory in `svcMapSharedMemory`.
     pub(crate) hid_shmem_handle: Option<u64>,
     /// The handle `time`'s `GetSharedMemoryNativeHandle` gave this process.
@@ -134,7 +134,7 @@ pub(crate) struct Process {
     pub(crate) ssl_connections: HashMap<u64, net::SslConnection>,
     pub(crate) erpt_readers: IdMap<u64, erpt::ErrorReportReader>,
     /// Guest address of pl's shared memory; 0 until mapped.
-    pub(crate) pl_shmem_addr: u32,
+    pub(crate) pl_shmem_addr: u64,
     /// Per-`IAudioRenderer` state from `OpenAudioRenderer`, used to size update replies.
     pub(crate) audren_renderers: IdMap<u64, audren::AudioRenderer>,
     /// Open `IAudioOut`s, by session handle.
@@ -185,9 +185,9 @@ impl Process {
             aoc_list_changed_event: None,
             display_resolution_event: None,
             save_data_quota: fs::SaveDataQuota::default(),
-            memory_layout: MemoryLayout::PLAIN,
+            memory_layout: MemoryLayout::WIDE,
             system_resource_size: 0,
-            heap_beside_vamm: false,
+            is_64_bit: true,
             in_focus: true,
             applet_focus_announced: false,
             applet_is_application: true,
@@ -470,10 +470,12 @@ mod tests {
         let other = cpu.create_process();
         cpu.map_shared_buffer().unwrap();
         cpu.in_process(other, |cpu| cpu.map_shared_buffer().unwrap());
-        cpu.mem.write_u32(SHARED_BUFFER_ADDR + 0x1_0000, 5).unwrap();
+        cpu.mem
+            .write_u32(u64::from(SHARED_BUFFER_ADDR + 0x1_0000), 5)
+            .unwrap();
         let seen = cpu.processes[&other]
             .mem
-            .read_u32(SHARED_BUFFER_ADDR + 0x1_0000)
+            .read_u32(u64::from(SHARED_BUFFER_ADDR + 0x1_0000))
             .unwrap();
         assert_eq!(seen, 5, "the other process has its own copy");
     }
@@ -484,7 +486,9 @@ mod tests {
             .into_iter()
             .enumerate()
         {
-            cpu.mem.write_u32(CODE + 4 * i as u32, insn).unwrap();
+            cpu.mem
+                .write_u32(u64::from(CODE + 4 * i as u32), insn)
+                .unwrap();
         }
     }
 
@@ -501,7 +505,7 @@ mod tests {
 
         cpu.run(4 * TIME_SLICE).unwrap();
 
-        let word = |pid: u64| cpu.processes[&pid].mem.read_u32(WORD).unwrap();
+        let word = |pid: u64| cpu.processes[&pid].mem.read_u32(u64::from(WORD)).unwrap();
         assert_eq!(
             word(ROOT_PID),
             1,
@@ -583,13 +587,13 @@ mod tests {
             "the SD card went with the title"
         );
         assert_eq!(
-            cpu.mem.read_u32(WORD).unwrap(),
+            cpu.mem.read_u32(u64::from(WORD)).unwrap(),
             0,
             "the new process sees the old one's memory"
         );
 
         // The next title runs, and its exit halts the console.
-        cpu.mem.write_u32(CODE, 0xD400_00E1).unwrap(); // svc #7
+        cpu.mem.write_u32(u64::from(CODE), 0xD400_00E1).unwrap(); // svc #7
         cpu.pc = CODE;
         cpu.run(TIME_SLICE).unwrap();
         assert!(cpu.halted, "the new title's exit did not halt the console");

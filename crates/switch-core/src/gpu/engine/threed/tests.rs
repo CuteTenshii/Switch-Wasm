@@ -39,7 +39,7 @@ struct Harness {
 impl Harness {
     fn new(size: u32) -> Harness {
         let mem = Memory::new();
-        mem.map_zero(0x3000_0000, size as usize).unwrap();
+        mem.map_zero(0x3000_0000, u64::from(size)).unwrap();
         let mut vmm = AddressSpace::new();
         let base = vmm
             .map(0x3000_0000, size as u64, 1, 0, SMALL_PAGE_SIZE, 0, 0)
@@ -222,7 +222,9 @@ fn clear_of_a_multisampled_target_fills_every_sample() {
     for y in 0..8u32 {
         for x in 0..16u32 {
             assert_eq!(
-                h.mem.read_u32(0x3000_0000 + y * 64 + x * 4).unwrap(),
+                h.mem
+                    .read_u32(u64::from(0x3000_0000 + y * 64 + x * 4))
+                    .unwrap(),
                 0xFFFF_FFFF,
                 "texel ({x}, {y})"
             );
@@ -338,7 +340,11 @@ fn a_clear_of_a_volume_slice_target_lands_where_the_volume_puts_it() {
     ] {
         let at = 0x3000_0000 + block_linear_volume_offset(x, y, z, 64, 16, 1, 16);
         let want = if z == 1 { 0xff } else { 0 };
-        assert_eq!(h.mem.read_u8(at).unwrap(), want, "({x}, {y}) of slice {z}");
+        assert_eq!(
+            h.mem.read_u8(u64::from(at)).unwrap(),
+            want,
+            "({x}, {y}) of slice {z}"
+        );
     }
 }
 
@@ -436,7 +442,7 @@ fn a_depth_clear_writes_runs_where_a_per_texel_clear_would() {
         for ty in 0..HEIGHT {
             for tx in 0..WIDTH {
                 let at = 0x3000_0000 + layout.offset(tx * BYTES, ty, width_bytes);
-                h.mem.write_u32(at, seeded(tx, ty)).unwrap();
+                h.mem.write_u32(u64::from(at), seeded(tx, ty)).unwrap();
             }
         }
 
@@ -464,7 +470,7 @@ fn a_depth_clear_writes_runs_where_a_per_texel_clear_would() {
                     old
                 };
                 assert_eq!(
-                    h.mem.read_u32(at).unwrap(),
+                    h.mem.read_u32(u64::from(at)).unwrap(),
                     want,
                     "texel ({tx},{ty}) of rect ({rx},{ry}) {rw}x{rh}"
                 );
@@ -498,7 +504,7 @@ fn clear_of_a_block_linear_target_uses_the_swizzle() {
     // A 16x8 RGBA8 surface is exactly one GOB; every byte of it is written.
     for i in 0..512u32 / 4 {
         assert_eq!(
-            h.mem.read_u32(0x3000_0000 + i * 4).unwrap(),
+            h.mem.read_u32(u64::from(0x3000_0000 + i * 4)).unwrap(),
             0xFF00_0000,
             "word {}",
             i
@@ -534,7 +540,11 @@ fn clear_of_part_of_a_gob_fills_every_row_of_it() {
         for tx in 0..32 {
             let at = 0x3000_0000 + layout.offset(tx * 4, ty, 32 * 4);
             let want = if tx < 20 { 0xFF00_0000 } else { 0 };
-            assert_eq!(h.mem.read_u32(at).unwrap(), want, "texel ({tx},{ty})");
+            assert_eq!(
+                h.mem.read_u32(u64::from(at)).unwrap(),
+                want,
+                "texel ({tx},{ty})"
+            );
         }
     }
 }

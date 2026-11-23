@@ -9,7 +9,7 @@ use crate::mem::Memory;
 use crate::trace::{enabled, Trace};
 use crate::vp9;
 use crate::Result;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// host1x's own class, for syncpoint waits and loads.
@@ -119,7 +119,8 @@ pub struct MmChannel {
     vp9: vp9::nvdec::Channel,
 }
 
-/// Decoded frames by the address of their luma surface: what nvdec "writes" and VIC reads.
+/// Decoded frames by their luma surface, as the method word naming it (its address >> 8):
+/// what nvdec "writes" and VIC reads.
 type Surfaces = HashMap<u32, Arc<vp9::Frame>>;
 
 /// A host's H.264 decoder. Pictures go in by the surface nvdec writes and come back in any
@@ -276,11 +277,75 @@ fn decode_stream(words: &[u32], class: u32) -> (Vec<Write>, Option<u32>) {
     (writes, None)
 }
 
+/// The engines' device address space: a 32-bit address for each mapped buffer. A buffer below
+/// 4 GiB is named by its own address; one above is given room in [`DEVICE_WINDOW`].
+#[derive(Debug, Default)]
+struct DeviceSpace {
+    /// Device address to `(CPU address, size)`, for buffers given room in the window.
+    mappings: BTreeMap<u32, (u64, u32)>,
+}
+
+/// Where buffers above 4 GiB are named: a 64-bit process's low heap region, which its own
+/// layout leaves unused, so no buffer it maps below 4 GiB has an address in it.
+const DEVICE_WINDOW: (u32, u32) = (
+    crate::kernel::layout::LOW_HEAP_REGION_ADDR,
+    crate::kernel::layout::LOW_ALIAS_REGION_ADDR,
+);
+const DEVICE_PAGE: u32 = 0x1000;
+
+impl DeviceSpace {
+    /// The device address of `size` bytes at `cpu`, mapping them if they have none; 0 when the
+    /// window is full.
+    fn map(&mut self, cpu: u64, size: u32) -> u32 {
+        if let Ok(direct) = u32::try_from(cpu) {
+            if direct.checked_add(size).is_some() {
+                return direct;
+            }
+        }
+        if let Some((&device, _)) = self
+            .mappings
+            .iter()
+            .find(|&(_, &(at, length))| at == cpu && length >= size)
+        {
+            return device;
+        }
+        let size = size.max(1).next_multiple_of(DEVICE_PAGE);
+        let mut start = DEVICE_WINDOW.0;
+        for (&device, &(_, length)) in &self.mappings {
+            if device - start >= size {
+                break;
+            }
+            start = device + length.next_multiple_of(DEVICE_PAGE);
+        }
+        if DEVICE_WINDOW.1 - start < size {
+            crate::traceln!("[video] no device address is left for {size:#x} bytes at {cpu:#x}");
+            return 0;
+        }
+        self.mappings.insert(start, (cpu, size));
+        start
+    }
+
+    /// Forget the room `cpu`'s buffer was given, if it was.
+    fn unmap(&mut self, cpu: u64) {
+        self.mappings.retain(|_, &mut (at, _)| at != cpu);
+    }
+
+    /// The CPU address a device address names.
+    fn cpu_address(&self, device: u64) -> u64 {
+        let mapped = u32::try_from(device).ok().and_then(|device| {
+            let (&start, &(cpu, size)) = self.mappings.range(..=device).next_back()?;
+            (device - start < size).then(|| cpu + u64::from(device - start))
+        });
+        mapped.unwrap_or(device)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Video {
     channels: HashMap<u32, MmChannel>,
     next_channel: u32,
     frames: Frames,
+    device: DeviceSpace,
 }
 
 impl Video {
@@ -323,7 +388,10 @@ impl Video {
         host1x: &mut Host1x,
     ) -> Result<Submitted> {
         let Video {
-            channels, frames, ..
+            channels,
+            frames,
+            device,
+            ..
         } = self;
         let Some(channel) = channels.get_mut(&id) else {
             return Ok(Submitted::Refused);
@@ -362,7 +430,9 @@ impl Video {
             };
             let mut stream = Vec::with_capacity(words as usize);
             for word in 0..words {
-                stream.push(mem.read_u32(base.wrapping_add(offset).wrapping_add(word * 4))?);
+                stream.push(
+                    mem.read_u32(base.wrapping_add(u64::from(offset) + u64::from(word) * 4))?,
+                );
             }
             for r in 0..relocs {
                 let at = relocs_at + r * SUBMIT_RELOC;
@@ -377,8 +447,9 @@ impl Video {
                 if buffer != handle || buffer_offset < offset || word >= words {
                     continue;
                 }
-                if let Some(address) = handle_address(nvmap, target) {
-                    stream[word as usize] = address.wrapping_add(target_offset) >> shift;
+                if let Some((cpu, size)) = handle_buffer(nvmap, target) {
+                    let address = device.map(cpu, size).wrapping_add(target_offset);
+                    stream[word as usize] = address >> (shift & 31);
                 }
             }
             streams.push(stream);
@@ -403,7 +474,7 @@ impl Video {
             thresholds.push((syncpt, host1x.incr_max(syncpt, increments)?));
         }
         for stream in &streams {
-            channel.run(stream, mem, host1x, frames)?;
+            channel.run(stream, mem, host1x, frames, device)?;
         }
 
         // Force each syncpoint to its threshold so no fence is left unreachable.
@@ -433,7 +504,7 @@ fn slot_luma(stream: &[u32], mut method: u32) -> Option<u32> {
     for write in writes.iter().filter(|w| w.class == Engine::Vic.class()) {
         match write.offset {
             THI_METHOD0 => method = write.value,
-            THI_METHOD1 if method == VIC_SLOT0_LUMA_OFFSET => surface = Some(write.value << 8),
+            THI_METHOD1 if method == VIC_SLOT0_LUMA_OFFSET => surface = Some(write.value),
             _ => {}
         }
     }
@@ -447,6 +518,7 @@ impl MmChannel {
         mem: &Memory,
         host1x: &mut Host1x,
         frames: &mut Frames,
+        device: &DeviceSpace,
     ) -> Result<()> {
         let (writes, stopped) = decode_stream(stream, self.engine.class());
         for write in writes {
@@ -456,7 +528,7 @@ impl MmChannel {
                 }
                 (class, THI_METHOD0) if class == self.engine.class() => self.method = write.value,
                 (class, THI_METHOD1) if class == self.engine.class() => {
-                    self.write_method(self.method, write.value, mem, frames)
+                    self.write_method(self.method, write.value, mem, frames, device)
                 }
                 (CLASS_HOST1X, offset) => {
                     if enabled(Trace::Video) {
@@ -487,7 +559,14 @@ impl MmChannel {
         Ok(())
     }
 
-    fn write_method(&mut self, method: u32, value: u32, mem: &Memory, frames: &mut Frames) {
+    fn write_method(
+        &mut self,
+        method: u32,
+        value: u32,
+        mem: &Memory,
+        frames: &mut Frames,
+        device: &DeviceSpace,
+    ) {
         if let Some(slot) = self.methods.get_mut(method as usize) {
             *slot = value;
         }
@@ -500,43 +579,43 @@ impl MmChannel {
         if method == self.engine.execute_method() {
             self.executes += 1;
             if self.engine == Engine::Nvdec && enabled(Trace::Video) {
-                self.trace_decode(mem);
+                self.trace_decode(mem, device);
             }
             match self.engine {
                 Engine::Nvdec if self.method(NVDEC_SET_APPLICATION_ID) == NVDEC_CODEC_VP9 => {
-                    self.decode_vp9(mem, &mut frames.surfaces)
+                    self.decode_vp9(mem, &mut frames.surfaces, device)
                 }
                 Engine::Nvdec if self.method(NVDEC_SET_APPLICATION_ID) == NVDEC_CODEC_H264 => {
-                    self.decode_h264(mem, frames)
+                    self.decode_h264(mem, frames, device)
                 }
-                Engine::Vic => self.compose(mem, &frames.surfaces),
+                Engine::Vic => self.compose(mem, &frames.surfaces, device),
                 _ => {}
             }
         }
     }
 
     /// Decodes the VP9 frame an nvdec `EXECUTE` describes and keeps it for VIC under its surface.
-    fn decode_vp9(&mut self, mem: &Memory, surfaces: &mut Surfaces) {
+    fn decode_vp9(&mut self, mem: &Memory, surfaces: &mut Surfaces, device: &DeviceSpace) {
         const SETUP_BYTES: usize = 0x100;
         const PROBABILITY_BYTES: usize = 3744;
-        let read = |at: u32, len: usize| {
+        let read = |at: u64, len: usize| {
             let mut buf = vec![0u8; len];
             let _ = mem.read_into(at, &mut buf);
             buf
         };
-        let setup_at = self.address(NVDEC_SET_DRV_PIC_SETUP_OFFSET);
+        let setup_at = self.address(NVDEC_SET_DRV_PIC_SETUP_OFFSET, device);
         let setup = read(setup_at, SETUP_BYTES);
         let size = u32::from_le_bytes(
             setup[VP9_PICTURE_BITSTREAM_SIZE as usize..VP9_PICTURE_BITSTREAM_SIZE as usize + 4]
                 .try_into()
                 .unwrap(),
         ) as usize;
-        let bitstream = read(self.address(NVDEC_SET_IN_BUF_BASE_OFFSET), size);
+        let bitstream = read(self.address(NVDEC_SET_IN_BUF_BASE_OFFSET, device), size);
         let probs = read(
-            self.address(NVDEC_VP9_SET_PROB_TAB_BUF_OFFSET),
+            self.address(NVDEC_VP9_SET_PROB_TAB_BUF_OFFSET, device),
             PROBABILITY_BYTES,
         );
-        let slots = [0, 1, 2, 3].map(|i| self.address(NVDEC_SET_PICTURE_LUMA_OFFSET + i));
+        let slots = [0, 1, 2, 3].map(|i| self.method(NVDEC_SET_PICTURE_LUMA_OFFSET + i));
         let refs = [0, 1, 2].map(|i| surfaces.get(&slots[i]).cloned());
         match self.vp9.decode(&setup, &bitstream, &probs, refs) {
             Ok(frame) => {
@@ -555,7 +634,7 @@ impl MmChannel {
 
     /// Hands the H.264 picture an nvdec `EXECUTE` describes to the host's decoder, behind the
     /// parameter sets its setup was filled from.
-    fn decode_h264(&mut self, mem: &Memory, frames: &mut Frames) {
+    fn decode_h264(&mut self, mem: &Memory, frames: &mut Frames, device: &DeviceSpace) {
         /// Past any picture's size, so a corrupt length reads no further.
         const MAX_STREAM: u32 = 16 << 20;
         let Frames {
@@ -567,20 +646,20 @@ impl MmChannel {
         else {
             return;
         };
-        let read = |at: u32, len: usize| {
+        let read = |at: u64, len: usize| {
             let mut buf = vec![0u8; len];
             let _ = mem.read_into(at, &mut buf);
             buf
         };
         let picture = h264::Picture::parse(&read(
-            self.address(NVDEC_SET_DRV_PIC_SETUP_OFFSET),
+            self.address(NVDEC_SET_DRV_PIC_SETUP_OFFSET, device),
             h264::SETUP_BYTES,
         ));
         let bitstream = read(
-            self.address(NVDEC_SET_IN_BUF_BASE_OFFSET),
+            self.address(NVDEC_SET_IN_BUF_BASE_OFFSET, device),
             picture.stream_len.min(MAX_STREAM) as usize,
         );
-        let surface = self.address(NVDEC_SET_PICTURE_LUMA_OFFSET + picture.current_index);
+        let surface = self.method(NVDEC_SET_PICTURE_LUMA_OFFSET + picture.current_index);
         let refused = |why: &str| {
             if enabled(Trace::Video) {
                 crate::traceln!(
@@ -609,15 +688,18 @@ impl MmChannel {
 
     /// VIC reduced to what the game asks of it: the decoded frame in slot 0 written to the output
     /// surfaces as pitch-linear NV12, scaled if the sizes differ.
-    fn compose(&mut self, mem: &Memory, surfaces: &Surfaces) {
-        let config = self.address(VIC_SET_CONFIG_STRUCT_OFFSET);
-        let word = |at: u32| mem.read_u32(config.wrapping_add(at)).unwrap_or(0);
+    fn compose(&mut self, mem: &Memory, surfaces: &Surfaces, device: &DeviceSpace) {
+        let config = self.address(VIC_SET_CONFIG_STRUCT_OFFSET, device);
+        let word = |at: u32| {
+            mem.read_u32(config.wrapping_add(u64::from(at)))
+                .unwrap_or(0)
+        };
         let out = VIC_CONFIG_OUTPUT_SURFACE;
         let format = word(out) & 0x7f;
         let block_kind = word(out) >> 11 & 0xf;
         let width = (word(out + 8) & 0x3fff) + 1;
         let height = (word(out + 8) >> 14 & 0x3fff) + 1;
-        let Some(frame) = surfaces.get(&self.address(VIC_SLOT0_LUMA_OFFSET)) else {
+        let Some(frame) = surfaces.get(&self.method(VIC_SLOT0_LUMA_OFFSET)) else {
             return;
         };
         if format != VIC_PIXEL_FORMAT_NV12 || block_kind != 0 {
@@ -632,27 +714,28 @@ impl MmChannel {
         let luma_pitch = width.next_multiple_of(VIC_PITCH_ALIGNMENT);
         let chroma_pitch = (width.div_ceil(2) * 2).next_multiple_of(VIC_PITCH_ALIGNMENT);
         let (luma, chroma) = nv12(frame, width, height, luma_pitch, chroma_pitch);
-        let _ = mem.write_bytes(self.address(VIC_SET_OUTPUT_LUMA_OFFSET), &luma);
-        let _ = mem.write_bytes(self.address(VIC_SET_OUTPUT_CHROMA_OFFSET), &chroma);
+        let _ = mem.write_bytes(self.address(VIC_SET_OUTPUT_LUMA_OFFSET, device), &luma);
+        let _ = mem.write_bytes(self.address(VIC_SET_OUTPUT_CHROMA_OFFSET, device), &chroma);
     }
 
-    fn address(&self, method: u32) -> u32 {
-        self.method(method) << 8
+    /// The CPU address a method names: it holds a device address shifted right by 8.
+    fn address(&self, method: u32, device: &DeviceSpace) -> u64 {
+        device.cpu_address(u64::from(self.method(method)) << 8)
     }
 
     /// Trace one nvdec `EXECUTE`'s codec, buffers, picture setup and bitstream head.
-    fn trace_decode(&self, mem: &Memory) {
-        let setup = self.address(NVDEC_SET_DRV_PIC_SETUP_OFFSET);
-        let bitstream = self.address(NVDEC_SET_IN_BUF_BASE_OFFSET);
+    fn trace_decode(&self, mem: &Memory, device: &DeviceSpace) {
+        let setup = self.address(NVDEC_SET_DRV_PIC_SETUP_OFFSET, device);
+        let bitstream = self.address(NVDEC_SET_IN_BUF_BASE_OFFSET, device);
         let size = mem
-            .read_u32(setup.wrapping_add(VP9_PICTURE_BITSTREAM_SIZE))
+            .read_u32(setup.wrapping_add(u64::from(VP9_PICTURE_BITSTREAM_SIZE)))
             .unwrap_or(0);
         let surfaces: Vec<String> = (0..4)
             .map(|i| {
                 format!(
                     "{:#x}/{:#x}",
-                    self.address(NVDEC_SET_PICTURE_LUMA_OFFSET + i),
-                    self.address(NVDEC_SET_PICTURE_CHROMA_OFFSET + i)
+                    self.address(NVDEC_SET_PICTURE_LUMA_OFFSET + i, device),
+                    self.address(NVDEC_SET_PICTURE_CHROMA_OFFSET + i, device)
                 )
             })
             .collect();
@@ -662,10 +745,10 @@ impl MmChannel {
             self.executes,
             self.method(NVDEC_SET_APPLICATION_ID),
             surfaces.join(" "),
-            self.address(NVDEC_VP9_SET_PROB_TAB_BUF_OFFSET),
-            self.address(NVDEC_VP9_SET_CTX_COUNTER_BUF_OFFSET),
+            self.address(NVDEC_VP9_SET_PROB_TAB_BUF_OFFSET, device),
+            self.address(NVDEC_VP9_SET_CTX_COUNTER_BUF_OFFSET, device),
         );
-        let words = |at: u32, count: u32| -> String {
+        let words = |at: u64, count: u64| -> String {
             (0..count)
                 .map(|i| format!("{:08x}", mem.read_u32(at.wrapping_add(4 * i)).unwrap_or(0)))
                 .collect::<Vec<_>>()
@@ -674,7 +757,7 @@ impl MmChannel {
         for row in (0..PICTURE_SETUP_TRACE_BYTES).step_by(32) {
             crate::traceln!(
                 "[video]   setup +{row:#04x}: {}",
-                words(setup.wrapping_add(row), 8)
+                words(setup.wrapping_add(u64::from(row)), 8)
             );
         }
         crate::traceln!("[video]   bitstream: {}", words(bitstream, 8));
@@ -735,27 +818,50 @@ fn nv12(
     (luma, chroma)
 }
 
-/// `MAP_BUFFER`: engines address guest memory directly, so each handle maps to its own address.
-pub fn map_buffer(args: &mut [u8], nvmap: &NvMap) -> bool {
-    let entries = read_u32(args, 0) as usize;
-    if MAP_HEADER + entries * MAP_ENTRY > args.len() {
-        return false;
+impl Video {
+    /// `MAP_BUFFER`: each handle's device address, 0 for a handle with no memory.
+    pub fn map_buffer(&mut self, args: &mut [u8], nvmap: &NvMap) -> bool {
+        let entries = read_u32(args, 0) as usize;
+        if MAP_HEADER + entries * MAP_ENTRY > args.len() {
+            return false;
+        }
+        for i in 0..entries {
+            let at = MAP_HEADER + i * MAP_ENTRY;
+            let address = handle_buffer(nvmap, read_u32(args, at))
+                .map_or(0, |(cpu, size)| self.device.map(cpu, size));
+            write_u32(args, at + 4, address);
+        }
+        true
     }
-    for i in 0..entries {
-        let at = MAP_HEADER + i * MAP_ENTRY;
-        let address = handle_address(nvmap, read_u32(args, at)).unwrap_or(0);
-        write_u32(args, at + 4, address);
+
+    /// `UNMAP_BUFFER`: release the device addresses `MAP_BUFFER` gave room to.
+    pub fn unmap_buffer(&mut self, args: &[u8], nvmap: &NvMap) -> bool {
+        let entries = read_u32(args, 0) as usize;
+        if MAP_HEADER + entries * MAP_ENTRY > args.len() {
+            return false;
+        }
+        for i in 0..entries {
+            if let Some((cpu, _)) = handle_buffer(nvmap, read_u32(args, MAP_HEADER + i * MAP_ENTRY))
+            {
+                self.device.unmap(cpu);
+            }
+        }
+        true
     }
-    true
 }
 
 /// An nvmap handle's address. A driver may pass a buffer id instead; they never collide.
-fn handle_address(nvmap: &NvMap, handle: u32) -> Option<u32> {
+fn handle_address(nvmap: &NvMap, handle: u32) -> Option<u64> {
+    handle_buffer(nvmap, handle).map(|(cpu, _)| cpu)
+}
+
+/// The same with the buffer's size.
+fn handle_buffer(nvmap: &NvMap, handle: u32) -> Option<(u64, u32)> {
     nvmap
         .get(handle)
         .or_else(|| nvmap.by_id(handle))
         .filter(|h| h.cpu_addr != 0)
-        .map(|h| h.cpu_addr)
+        .map(|h| (h.cpu_addr, h.size))
 }
 
 fn read_u32(data: &[u8], at: usize) -> u32 {
@@ -865,7 +971,8 @@ mod tests {
             0x4000_0000 | (THI_INCR_SYNCPT << 16) | syncpt,
         ];
         for (i, word) in stream.iter().enumerate() {
-            mem.write_u32(0x1000_0000 + 4 * i as u32, *word).unwrap();
+            mem.write_u32(u64::from(0x1000_0000 + 4 * i as u32), *word)
+                .unwrap();
         }
         let mut args = vec![0u8; SUBMIT_HEADER + SUBMIT_CMDBUF + SUBMIT_SYNCPT_INCR + SUBMIT_FENCE];
         for (at, value) in [
@@ -942,7 +1049,8 @@ mod tests {
         host1x: &mut Host1x,
     ) -> (Submitted, u32) {
         for (i, word) in stream.iter().enumerate() {
-            mem.write_u32(0x1000_0000 + 4 * i as u32, *word).unwrap();
+            mem.write_u32(u64::from(0x1000_0000 + 4 * i as u32), *word)
+                .unwrap();
         }
         let syncpt = video.channel(id).unwrap().syncpt;
         let mut args = vec![0u8; SUBMIT_HEADER + SUBMIT_CMDBUF + SUBMIT_SYNCPT_INCR + SUBMIT_FENCE];
@@ -972,10 +1080,12 @@ mod tests {
         const OUTPUT: u32 = BASE + 0x4000;
         const SURFACE: u32 = BASE + 0x8000;
         let mem = Memory::new();
-        mem.map_zero(BASE, 0x10000).unwrap();
+        mem.map_zero(u64::from(BASE), 0x10000).unwrap();
         let mut nvmap = NvMap::new();
         let handle = nvmap.create(0x10000);
-        nvmap.alloc(handle, 0, 0, 0x10000, 0, BASE).unwrap();
+        nvmap
+            .alloc(handle, 0, 0, 0x10000, 0, u64::from(BASE))
+            .unwrap();
         let mut host1x = Host1x::new();
         let mut video = Video::default();
         let decoder = Deferred::default();
@@ -995,10 +1105,10 @@ mod tests {
             (0x70, 1),
             (0xb0, 1 << 12),
         ] {
-            mem.write_u32(SETUP + at, value).unwrap();
+            mem.write_u32(u64::from(SETUP + at), value).unwrap();
         }
-        mem.write_bytes(BITSTREAM, &slice).unwrap();
-        mem.write_bytes(BITSTREAM + slice.len() as u32, &tail)
+        mem.write_bytes(u64::from(BITSTREAM), &slice).unwrap();
+        mem.write_bytes(u64::from(BITSTREAM + slice.len() as u32), &tail)
             .unwrap();
         let syncpt = video.channel(nvdec).unwrap().syncpt;
         let decode = method_stream(
@@ -1021,15 +1131,21 @@ mod tests {
             let [(surface, unit, key)] = given.as_slice() else {
                 panic!("{} pictures reached the decoder", given.len());
             };
-            assert_eq!((*surface, *key), (SURFACE, true));
+            assert_eq!((*surface, *key), (SURFACE >> 8, true));
             assert_eq!(&unit[..5], &[0, 0, 0, 1, 0x67], "the SPS first");
             assert!(unit.ends_with(&slice), "then the slice, without the tail");
         }
 
-        mem.write_u32(CONFIG + VIC_CONFIG_OUTPUT_SURFACE, VIC_PIXEL_FORMAT_NV12)
-            .unwrap();
-        mem.write_u32(CONFIG + VIC_CONFIG_OUTPUT_SURFACE + 8, 15 | 31 << 14)
-            .unwrap();
+        mem.write_u32(
+            u64::from(CONFIG + VIC_CONFIG_OUTPUT_SURFACE),
+            VIC_PIXEL_FORMAT_NV12,
+        )
+        .unwrap();
+        mem.write_u32(
+            u64::from(CONFIG + VIC_CONFIG_OUTPUT_SURFACE + 8),
+            15 | 31 << 14,
+        )
+        .unwrap();
         let syncpt = video.channel(vic).unwrap().syncpt;
         let compose = method_stream(
             &[
@@ -1047,11 +1163,11 @@ mod tests {
         );
         let mut frame = vp9::Frame::new(16, 32);
         frame.planes[0].data[0] = 0x5a;
-        ready.borrow_mut().push((SURFACE, Some(frame)));
+        ready.borrow_mut().push((SURFACE >> 8, Some(frame)));
         let (submitted, fence) = submit_stream(&mut video, vic, &compose, memory, &mut host1x);
         assert_eq!(submitted, Submitted::Done);
         assert_eq!(fence, 1, "the wait reserved no increment");
-        assert_eq!(mem.read_u8(OUTPUT).unwrap(), 0x5a);
+        assert_eq!(mem.read_u8(u64::from(OUTPUT)).unwrap(), 0x5a);
     }
 
     #[test]
@@ -1078,12 +1194,130 @@ mod tests {
         write_u32(&mut args, 0, 2);
         write_u32(&mut args, MAP_HEADER, handle);
         write_u32(&mut args, MAP_HEADER + MAP_ENTRY, 0xDEAD);
-        assert!(map_buffer(&mut args, &nvmap));
+        let mut video = Video::default();
+        assert!(video.map_buffer(&mut args, &nvmap));
         assert_eq!(read_u32(&args, MAP_HEADER + 4), 0x2000_0000);
         assert_eq!(
             read_u32(&args, MAP_HEADER + MAP_ENTRY + 4),
             0,
             "no such handle"
+        );
+        assert!(
+            video.device.mappings.is_empty(),
+            "a buffer below 4 GiB needs no room"
+        );
+    }
+
+    /// `MAP_BUFFER` or `UNMAP_BUFFER` of one handle, returning the device address written back.
+    fn map_one(video: &mut Video, nvmap: &NvMap, handle: u32, map: bool) -> u32 {
+        let mut args = vec![0u8; MAP_HEADER + MAP_ENTRY];
+        write_u32(&mut args, 0, 1);
+        write_u32(&mut args, MAP_HEADER, handle);
+        if map {
+            assert!(video.map_buffer(&mut args, nvmap));
+        } else {
+            assert!(video.unmap_buffer(&args, nvmap));
+        }
+        read_u32(&args, MAP_HEADER + 4)
+    }
+
+    #[test]
+    fn a_buffer_above_4_gib_is_named_in_the_device_window() {
+        const COMMANDS: u64 = 0x1000_0000;
+        const HIGH: u64 = 0x20_0000_0000;
+        const TARGET_OFFSET: u32 = 0x200;
+        let mem = Memory::new();
+        mem.map_zero(COMMANDS, 0x1000).unwrap();
+        let mut nvmap = NvMap::new();
+        let commands = nvmap.create(0x1000);
+        nvmap.alloc(commands, 0, 0, 0x1000, 0, COMMANDS).unwrap();
+        let high = nvmap.create(0x3000);
+        nvmap.alloc(high, 0, 0, 0x1000, 0, HIGH).unwrap();
+        let mut host1x = Host1x::new();
+        let mut video = Video::default();
+
+        let device = map_one(&mut video, &nvmap, high, true);
+        assert!(
+            (DEVICE_WINDOW.0..DEVICE_WINDOW.1).contains(&device),
+            "{device:#x} is outside the window"
+        );
+        assert_eq!(
+            map_one(&mut video, &nvmap, high, true),
+            device,
+            "mapping again names the same room"
+        );
+        assert_eq!(
+            video.device.cpu_address(u64::from(device) + 0x2345),
+            HIGH + 0x2345
+        );
+        assert_eq!(
+            video.device.cpu_address(COMMANDS + 0x40),
+            COMMANDS + 0x40,
+            "a buffer below 4 GiB is named by its own address"
+        );
+
+        // A relocation against the buffer patches in its device address, which the method
+        // then resolves back to the buffer.
+        let id = video.open(Engine::Nvdec, &mut host1x).unwrap();
+        let syncpt = video.channel(id).unwrap().syncpt;
+        let stream = method_stream(&[(NVDEC_SET_IN_BUF_BASE_OFFSET, 0)], syncpt);
+        for (i, word) in stream.iter().enumerate() {
+            mem.write_u32(COMMANDS + 4 * i as u64, *word).unwrap();
+        }
+        let mut args = vec![
+            0u8;
+            SUBMIT_HEADER
+                + SUBMIT_CMDBUF
+                + SUBMIT_RELOC
+                + SUBMIT_RELOC_SHIFT
+                + SUBMIT_SYNCPT_INCR
+                + SUBMIT_FENCE
+        ];
+        for (at, value) in [
+            (0, 1),
+            (4, 1),
+            (8, 1),
+            (12, 1),
+            (0x10, commands),
+            (0x14, 0),
+            (0x18, stream.len() as u32),
+            // The method's value is the third word of its write.
+            (0x1C, commands),
+            (0x20, 8),
+            (0x24, high),
+            (0x28, TARGET_OFFSET),
+            (0x2C, 8),
+            (0x30, syncpt),
+            (0x34, 1),
+        ] {
+            write_u32(&mut args, at, value);
+        }
+        assert_eq!(
+            video
+                .submit(id, &mut args, &mem, &nvmap, &mut host1x)
+                .unwrap(),
+            Submitted::Done
+        );
+        let channel = video.channel(id).unwrap();
+        assert_eq!(
+            channel.method(NVDEC_SET_IN_BUF_BASE_OFFSET),
+            (device + TARGET_OFFSET) >> 8
+        );
+        assert_eq!(
+            channel.address(NVDEC_SET_IN_BUF_BASE_OFFSET, &video.device),
+            HIGH + u64::from(TARGET_OFFSET)
+        );
+
+        // Unmapping frees the room for the next buffer.
+        let other = nvmap.create(0x3000);
+        nvmap
+            .alloc(other, 0, 0, 0x1000, 0, HIGH + 0x10_0000)
+            .unwrap();
+        map_one(&mut video, &nvmap, high, false);
+        assert_eq!(map_one(&mut video, &nvmap, other, true), device);
+        assert_eq!(
+            video.device.cpu_address(u64::from(device)),
+            HIGH + 0x10_0000
         );
     }
 }

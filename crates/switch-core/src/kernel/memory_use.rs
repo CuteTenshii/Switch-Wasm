@@ -42,18 +42,24 @@ impl Region {
 
     /// The address range, as `start..end`.
     pub fn range(self, layout: &MemoryLayout) -> (u64, u64) {
-        let span = |start: u32, size: u32| (u64::from(start), u64::from(start) + u64::from(size));
+        let span = |start: u64, size: u64| (start, start + size);
         match self {
             Region::Code => (
                 u64::from(GUEST_ASLR_REGION_ADDR),
                 u64::from(GUEST_STACK_REGION_ADDR),
             ),
-            Region::Stacks => span(GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE),
+            Region::Stacks => span(
+                u64::from(GUEST_STACK_REGION_ADDR),
+                u64::from(GUEST_STACK_REGION_SIZE),
+            ),
             Region::Runtime => (
                 u64::from(SELF_RETURN_TRAMPOLINE),
                 u64::from(RO_MODULE_REGION_ADDR),
             ),
-            Region::Loaded => span(RO_MODULE_REGION_ADDR, RO_MODULE_REGION_SIZE),
+            Region::Loaded => span(
+                u64::from(RO_MODULE_REGION_ADDR),
+                u64::from(RO_MODULE_REGION_SIZE),
+            ),
             Region::Heap => span(layout.heap_addr, layout.heap_size),
             Region::Alias => span(layout.alias_addr, layout.alias_size),
         }
@@ -120,10 +126,9 @@ mod tests {
     #[test]
     fn the_regions_of_every_layout_do_not_overlap() {
         for layout in [
-            MemoryLayout::PLAIN,
-            MemoryLayout::VIRTUAL_ADDRESS,
-            MemoryLayout::APPLET,
-            MemoryLayout::HEAP_BESIDE_VAMM,
+            MemoryLayout::WIDE,
+            MemoryLayout::LOW,
+            MemoryLayout::LOW_VAMM,
         ] {
             let mut ranges: Vec<_> = Region::ALL.iter().map(|r| r.range(&layout)).collect();
             ranges.sort_unstable();
@@ -137,12 +142,12 @@ mod tests {
     fn backed_pages_are_counted_in_the_region_they_fall_in() {
         let mut cpu = Cpu::new();
         cpu.bootstrap();
-        let page = crate::mem::PAGE_SIZE as u32;
+        let page = crate::mem::PAGE_SIZE as u64;
         cpu.mem
-            .write_u32(GUEST_STACK_REGION_ADDR + 0x10, 1)
+            .write_u32(u64::from(GUEST_STACK_REGION_ADDR) + 0x10, 1)
             .unwrap();
-        cpu.mem.write_u32(GUEST_HEAP_REGION_ADDR, 1).unwrap();
-        cpu.mem.write_u32(GUEST_HEAP_REGION_ADDR + page, 1).unwrap();
+        cpu.mem.write_u32(HEAP_REGION_ADDR, 1).unwrap();
+        cpu.mem.write_u32(HEAP_REGION_ADDR + page, 1).unwrap();
         let report = cpu.title_memory();
         let bytes = |wanted| {
             report
@@ -152,8 +157,8 @@ mod tests {
                 .map(|&(_, _, bytes)| bytes)
                 .unwrap()
         };
-        assert_eq!(bytes(Region::Stacks), u64::from(page));
-        assert_eq!(bytes(Region::Heap), 2 * u64::from(page));
+        assert_eq!(bytes(Region::Stacks), page);
+        assert_eq!(bytes(Region::Heap), 2 * page);
         let in_regions: u64 = report.regions.iter().map(|&(_, _, b)| b).sum();
         assert_eq!(in_regions + report.elsewhere, report.backed);
         assert_eq!(report.all_processes, report.backed);

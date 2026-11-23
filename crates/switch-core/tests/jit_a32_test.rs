@@ -91,7 +91,7 @@ fn snapshot(cpu: &Cpu) -> State {
         cycles: cpu.cycles,
         steps: cpu.steps,
         halted: cpu.halted,
-        memory: cpu.mem.dump(BASE, 0x1000).unwrap(),
+        memory: cpu.mem.dump(u64::from(BASE), 0x1000).unwrap(),
     }
 }
 
@@ -126,18 +126,20 @@ fn loaded(code: &[u32], jit: bool) -> Cpu {
     cpu.set_jit_enabled(jit);
     cpu.set_pc_and_sp(BASE, u64::from(SCRATCH) + 0x800);
     let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
-    cpu.mem.write_bytes(BASE, &bytes).unwrap();
+    cpu.mem.write_bytes(u64::from(BASE), &bytes).unwrap();
     for (i, word) in [0x1122_3344u32, 0x5566_7788, 0x99aa_bbcc, 0xddee_ff00]
         .into_iter()
         .enumerate()
     {
-        cpu.mem.write_u32(SCRATCH + 4 * i as u32, word).unwrap();
+        cpu.mem
+            .write_u32(u64::from(SCRATCH + 4 * i as u32), word)
+            .unwrap();
     }
     cpu
 }
 
 fn scratch(cpu: &Cpu) -> Vec<u8> {
-    cpu.mem.dump(SCRATCH, 0x1000).unwrap()
+    cpu.mem.dump(u64::from(SCRATCH), 0x1000).unwrap()
 }
 
 fn compare(code: &[u32], steps: u64, what: &str) {

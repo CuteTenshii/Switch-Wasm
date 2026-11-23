@@ -137,13 +137,10 @@ pub fn load_elf(mem: &Memory, data: &[u8]) -> Result<LoadedElf> {
     for seg in &elf.segments {
         if seg.filesz > 0 {
             let start = seg.offset as usize;
-            mem.map(seg.vaddr as u32, &data[start..start + seg.filesz as usize])?;
+            mem.map(seg.vaddr, &data[start..start + seg.filesz as usize])?;
         }
         if seg.memsz > seg.filesz {
-            mem.map_zero(
-                (seg.vaddr + seg.filesz) as u32,
-                (seg.memsz - seg.filesz) as usize,
-            )?;
+            mem.map_zero(seg.vaddr + seg.filesz, seg.memsz - seg.filesz)?;
         }
     }
     Ok(elf)

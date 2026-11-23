@@ -5,7 +5,7 @@ use super::*;
 impl Cpu {
     /// `set:sys`. `Get*`/`Set*` pairs read and write [`SystemSettings`]; the
     /// rest (firmware version, model, serial) are constants.
-    pub(crate) fn set_sys_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn set_sys_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
@@ -336,7 +336,8 @@ impl Cpu {
                 if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
                     if addr != 0 {
                         for (index, &byte) in version.iter().take(size as usize).enumerate() {
-                            self.mem.write_u8(addr.wrapping_add(index as u32), byte)?;
+                            self.mem
+                                .write_u8(addr.wrapping_add(u64::from(index as u32)), byte)?;
                         }
                     }
                 }
@@ -403,7 +404,7 @@ impl Cpu {
 
     /// `GetSettingsItemValueSize` (37) and `GetSettingsItemValue` (38). Unknown
     /// items are refused, since callers read back the size and then that many bytes.
-    fn set_sys_item_request(&mut self, tls: u32, with_value: bool) -> Result<()> {
+    fn set_sys_item_request(&mut self, tls: u64, with_value: bool) -> Result<()> {
         /// `nn::settings::ResultSettingsItemNotFound`.
         const SETTINGS_ITEM_NOT_FOUND: u32 = 105 | (11 << 9);
         /// `nn::settings::SettingItemName`.
@@ -445,7 +446,7 @@ impl Cpu {
 
     /// Write as many whole `size`-byte entries as the first output buffer fits,
     /// and return how many.
-    fn write_whole_entries(&mut self, tls: u32, entries: &[u8], size: usize) -> usize {
+    fn write_whole_entries(&mut self, tls: u64, entries: &[u8], size: usize) -> usize {
         let room = self.ipc_output_buffer(tls, 0).map_or(0, |(addr, len)| {
             if addr == 0 {
                 0
@@ -459,20 +460,20 @@ impl Cpu {
     }
 
     /// A fixed-width block from a request's raw data.
-    fn request_block<const N: usize>(&self, tls: u32) -> [u8; N] {
+    fn request_block<const N: usize>(&self, tls: u64) -> [u8; N] {
         let mut block = [0u8; N];
         let data = self.ipc_request_data(tls);
         for (offset, byte) in block.iter_mut().enumerate() {
             *byte = self
                 .mem
-                .read_u8(data.wrapping_add(offset as u32))
+                .read_u8(data.wrapping_add(u64::from(offset as u32)))
                 .unwrap_or(0);
         }
         block
     }
 
     /// A fixed-width block from a request's first input buffer.
-    fn input_block<const N: usize>(&self, tls: u32) -> [u8; N] {
+    fn input_block<const N: usize>(&self, tls: u64) -> [u8; N] {
         let mut block = [0u8; N];
         if let Some((addr, size)) = self.ipc_input_buffer(tls, 0) {
             if addr != 0 {
@@ -484,7 +485,7 @@ impl Cpu {
     }
 
     /// Whole fixed-width entries from a request's first input buffer.
-    fn request_list<const N: usize>(&self, tls: u32) -> Vec<[u8; N]> {
+    fn request_list<const N: usize>(&self, tls: u64) -> Vec<[u8; N]> {
         let Some((addr, size)) = self.ipc_input_buffer(tls, 0) else {
             return Vec::new();
         };

@@ -119,22 +119,22 @@ impl ExecCtx<'_> {
     }
 
     /// The CPU address of a `len`-byte span, if one mapping holds all of it.
-    pub fn span(&self, gpu_va: u64, len: u64) -> Option<u32> {
+    pub fn span(&self, gpu_va: u64, len: u64) -> Option<u64> {
         match self.vmm.translate(gpu_va) {
             Some((cpu, left)) if left >= len => Some(cpu),
             _ => None,
         }
     }
 
-    pub fn read_span(&self, cpu: u32, out: &mut [u8]) -> Result<()> {
+    pub fn read_span(&self, cpu: u64, out: &mut [u8]) -> Result<()> {
         self.mem.read_into(cpu, out)
     }
 
-    pub fn write_span(&mut self, cpu: u32, bytes: &[u8]) -> Result<()> {
+    pub fn write_span(&mut self, cpu: u64, bytes: &[u8]) -> Result<()> {
         self.mem.write_from(cpu, bytes)
     }
 
-    fn pixel_addr(&self, gpu_va: u64, len: u32) -> Result<u32> {
+    fn pixel_addr(&self, gpu_va: u64, len: u32) -> Result<u64> {
         match self.vmm.translate(gpu_va) {
             Some((cpu, left)) if left >= u64::from(len) => Ok(cpu),
             _ => Err(Error::Gpu(format!(

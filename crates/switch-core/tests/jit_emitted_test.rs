@@ -174,12 +174,12 @@ fn loaded(jit: bool) -> Cpu {
 fn running(jit: bool, program: &[u32]) -> Cpu {
     let mut cpu = Cpu::new();
     cpu.set_jit_enabled(jit);
-    cpu.mem.map_zero(CODE, 0x1000).unwrap();
+    cpu.mem.map_zero(u64::from(CODE), 0x1000).unwrap();
     let mut bytes = Vec::with_capacity(program.len() * 4);
     for insn in program {
         bytes.extend_from_slice(&insn.to_le_bytes());
     }
-    cpu.mem.map(CODE, &bytes).unwrap();
+    cpu.mem.map(u64::from(CODE), &bytes).unwrap();
     cpu.set_pc(CODE);
     cpu
 }
@@ -310,7 +310,7 @@ fn overwriting_the_code_releases_its_emitted_form() {
     );
 
     // Rewrite the `nop`, invalidating the translated page.
-    cpu.mem.write_u32(CODE + 8, 0xD2800021).unwrap(); // movz x1, #1
+    cpu.mem.write_u32(u64::from(CODE + 8), 0xD2800021).unwrap(); // movz x1, #1
     cpu.run(TRIP * 4).unwrap();
     assert_eq!(
         RELEASED.load(Ordering::SeqCst),

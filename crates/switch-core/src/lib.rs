@@ -96,13 +96,13 @@ pub use error::{Error, Result};
 
 /// A fixed RGBA framebuffer in guest memory, presented when nothing has drawn
 /// through the GPU. Not a console facility; for programs with no graphics stack.
-pub const FB_BASE: u32 = 0xFE00_0000;
+pub const FB_BASE: u64 = 0xFE00_0000;
 pub const FB_WIDTH: u32 = 640;
 pub const FB_HEIGHT: u32 = 360;
 pub const FB_STRIDE: u32 = FB_WIDTH * 4;
 /// Memory-mapped pad state (buttons then four stick axes), the input
 /// counterpart to [`FB_BASE`].
-pub const INPUT_ADDR: u32 = 0xFE10_0000;
+pub const INPUT_ADDR: u64 = 0xFE10_0000;
 
 #[cfg(test)]
 mod tests {

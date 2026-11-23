@@ -161,14 +161,14 @@ pub struct Cpu {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(C)]
 pub(crate) struct Monitor {
-    pub(crate) addr: u32,
+    pub(crate) addr: u64,
     /// Nonzero while the monitor is armed.
     pub(crate) armed: u32,
     pub(crate) value: [u64; 2],
 }
 
 impl Monitor {
-    pub(crate) fn arm(&mut self, addr: u32, value: [u64; 2]) {
+    pub(crate) fn arm(&mut self, addr: u64, value: [u64; 2]) {
         *self = Monitor {
             addr,
             armed: 1,
@@ -181,7 +181,7 @@ impl Monitor {
     }
 
     /// Disarm, answering what it read if it was armed at `addr`.
-    pub(crate) fn take_at(&mut self, addr: u32) -> Option<[u64; 2]> {
+    pub(crate) fn take_at(&mut self, addr: u64) -> Option<[u64; 2]> {
         let held = self.armed != 0 && self.addr == addr;
         self.armed = 0;
         held.then_some(self.value)
@@ -650,7 +650,7 @@ impl Cpu {
         // Pre-map the fixed framebuffer and input regions.
         let _ = cpu.mem.map_zero(
             crate::FB_BASE,
-            (crate::FB_WIDTH * crate::FB_HEIGHT * 4) as usize,
+            u64::from(crate::FB_WIDTH * crate::FB_HEIGHT * 4),
         );
         let _ = cpu.mem.map_zero(crate::INPUT_ADDR, 4096);
         cpu

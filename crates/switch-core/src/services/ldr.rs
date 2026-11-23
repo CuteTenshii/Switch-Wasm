@@ -10,8 +10,9 @@ const RO_RESULT_MODULE: u32 = 22;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RoModule {
     /// The caller's NRO buffer, so an unload naming the source still finds the module.
-    source: u32,
-    /// The image at `base` followed by its zero-filled BSS, `size` bytes in total.
+    source: u64,
+    /// The image at `base` followed by its zero-filled BSS, `size` bytes in total; below
+    /// 4 GiB, in the module region, as all code is.
     base: u32,
     size: u32,
     text: (u32, u32),
@@ -23,7 +24,7 @@ impl Cpu {
     /// verified.
     pub(crate) fn ldr_ro_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -44,7 +45,7 @@ impl Cpu {
         for (index, arg) in args.iter_mut().enumerate() {
             *arg = self
                 .mem
-                .read_u64(data.wrapping_add(8 * (index as u32 + 1)))
+                .read_u64(data.wrapping_add(8 * (index as u64 + 1)))
                 .unwrap_or(0);
         }
         match cmd_id {
@@ -57,7 +58,7 @@ impl Cpu {
             // UnregisterModuleInfo(pid, nrr_address).
             Some(3) => {
                 const NOT_REGISTERED: u32 = RO_RESULT_MODULE | (1029 << 9);
-                let nrr_address = args[0] as u32;
+                let nrr_address = args[0];
                 match self.process_mut().ro_registrations.remove(&nrr_address) {
                     Some(_) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                     None => self.write_ipc_response(tls, NOT_REGISTERED, &[], &[], &[]),
@@ -73,7 +74,7 @@ impl Cpu {
     /// kernel this is a copy, not an alias; guests never write the source after.
     fn ldr_ro_load_module(
         &mut self,
-        tls: u32,
+        tls: u64,
         nro_address: u64,
         nro_size: u64,
         bss_address: u64,
@@ -84,10 +85,6 @@ impl Cpu {
         const INVALID_ADDRESS: u32 = RO_RESULT_MODULE | (1025 << 9);
         const INVALID_SIZE: u32 = RO_RESULT_MODULE | (1026 << 9);
 
-        // Reject rather than truncate addresses beyond 32 bits.
-        if nro_address > u64::from(u32::MAX) || bss_address > u64::from(u32::MAX) {
-            return self.write_ipc_response(tls, INVALID_ADDRESS, &[], &[], &[]);
-        }
         if !Self::ro_is_page_aligned(nro_address) || !Self::ro_is_page_aligned(bss_address) {
             return self.write_ipc_response(tls, INVALID_ADDRESS, &[], &[], &[]);
         }
@@ -102,7 +99,7 @@ impl Cpu {
             return self.write_ipc_response(tls, INVALID_SIZE, &[], &[], &[]);
         }
 
-        let image = self.read_bytes(nro_address as u32, nro_size as u32);
+        let image = self.read_bytes(nro_address, nro_size as u32);
         let header = match crate::nro::NroHeader::parse(&image) {
             Ok(header) => header,
             Err(e) => {
@@ -141,7 +138,7 @@ impl Cpu {
         // One write so the BSS is zero, not leftovers from an unloaded module.
         let mut mapped = image;
         mapped.resize(size as usize, 0);
-        self.mem.map(base, &mapped)?;
+        self.mem.map(u64::from(base), &mapped)?;
         let text = (
             base.wrapping_add(header.text_offset),
             base.wrapping_add(header.text_offset)
@@ -149,14 +146,12 @@ impl Cpu {
         );
         // `.text` is read-execute; `UnloadModule` must undo this.
         self.quiesce_cores();
-        self.mem.mark_readonly(text.0, text.1);
+        self.mem.mark_readonly(u64::from(text.0), u64::from(text.1));
         // Run-time modules carry the `Alias*` memory states; see `Memory::mark_module`.
+        let data_at = u64::from(base.wrapping_add(header.data_offset));
         self.mem.mark_module(
-            (text.0, base.wrapping_add(header.data_offset)),
-            (
-                base.wrapping_add(header.data_offset),
-                base.wrapping_add(size),
-            ),
+            (u64::from(text.0), data_at),
+            (data_at, u64::from(base.wrapping_add(size))),
             true,
         );
         self.record_module_name(
@@ -167,7 +162,7 @@ impl Cpu {
         self.process_mut().ro_modules.insert(
             base,
             RoModule {
-                source: nro_address as u32,
+                source: nro_address,
                 base,
                 size,
                 text,
@@ -195,11 +190,13 @@ impl Cpu {
     }
 
     /// Unmap a module by the address `LoadModule` returned, or by its source buffer.
-    fn ldr_ro_unload_module(&mut self, tls: u32, address: u64) -> Result<()> {
+    fn ldr_ro_unload_module(&mut self, tls: u64, address: u64) -> Result<()> {
         const NOT_LOADED: u32 = RO_RESULT_MODULE | (1028 << 9);
-        let address = address as u32;
-        let base = if self.process().ro_modules.contains_key(&address) {
-            Some(address)
+        let loaded = u32::try_from(address)
+            .ok()
+            .filter(|base| self.process().ro_modules.contains_key(base));
+        let base = if loaded.is_some() {
+            loaded
         } else {
             self.process()
                 .ro_modules
@@ -211,10 +208,14 @@ impl Cpu {
             return self.write_ipc_response(tls, NOT_LOADED, &[], &[], &[]);
         };
         self.quiesce_cores();
-        self.mem.unmark_readonly(module.text.0, module.text.1);
+        let (start, end) = (
+            u64::from(module.base),
+            u64::from(module.base) + u64::from(module.size),
+        );
         self.mem
-            .unmark_module(module.base, module.base.wrapping_add(module.size));
-        self.mem.unmap(module.base, module.size as usize);
+            .unmark_readonly(u64::from(module.text.0), u64::from(module.text.1));
+        self.mem.unmark_module(start, end);
+        self.mem.unmap(start, u64::from(module.size));
         self.forget_module_name(module.base);
         self.log(
             Level::Debug,
@@ -230,7 +231,7 @@ impl Cpu {
     /// chain cannot be verified without console keys.
     fn ldr_ro_register_module_info(
         &mut self,
-        tls: u32,
+        tls: u64,
         nrr_address: u64,
         nrr_size: u64,
     ) -> Result<()> {
@@ -240,19 +241,19 @@ impl Cpu {
         const INVALID_ADDRESS: u32 = RO_RESULT_MODULE | (1025 << 9);
         const INVALID_SIZE: u32 = RO_RESULT_MODULE | (1026 << 9);
 
-        if nrr_address > u64::from(u32::MAX) || !Self::ro_is_page_aligned(nrr_address) {
+        if !Self::ro_is_page_aligned(nrr_address) {
             return self.write_ipc_response(tls, INVALID_ADDRESS, &[], &[], &[]);
         }
         if nrr_size == 0 || !Self::ro_is_page_aligned(nrr_size) || nrr_size > u64::from(u32::MAX) {
             return self.write_ipc_response(tls, INVALID_SIZE, &[], &[], &[]);
         }
-        if self.mem.read_u32(nrr_address as u32).unwrap_or(0) != NRR0_MAGIC {
+        if self.mem.read_u32(nrr_address).unwrap_or(0) != NRR0_MAGIC {
             self.log(Level::Warn, &format!("[ro] no NRR at {nrr_address:#010x}"));
             return self.write_ipc_response(tls, INVALID_NRR, &[], &[], &[]);
         }
         self.process_mut()
             .ro_registrations
-            .insert(nrr_address as u32, nrr_size as u32);
+            .insert(nrr_address, nrr_size);
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 

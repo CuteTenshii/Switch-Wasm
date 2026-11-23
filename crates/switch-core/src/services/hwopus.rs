@@ -120,7 +120,7 @@ fn work_buffer_size_multistream(
 impl Cpu {
     pub(crate) fn hwopus_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -198,7 +198,7 @@ impl Cpu {
         }
     }
 
-    fn hwopus_reply_size(&mut self, tls: u32, size: core::result::Result<u32, u32>) -> Result<()> {
+    fn hwopus_reply_size(&mut self, tls: u64, size: core::result::Result<u32, u32>) -> Result<()> {
         match size {
             Ok(size) => self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[]),
             Err(error) => self.write_ipc_response(tls, error, &[], &0u32.to_le_bytes(), &[]),
@@ -207,7 +207,7 @@ impl Cpu {
 
     fn hwopus_open(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         sample_rate: u32,
         channels: u32,
@@ -231,7 +231,7 @@ impl Cpu {
         Ok(())
     }
 
-    fn hwopus_multistream_params(&self, tls: u32, extended: bool) -> MultiStreamParams {
+    fn hwopus_multistream_params(&self, tls: u64, extended: bool) -> MultiStreamParams {
         let Some((addr, size)) = self.ipc_input_buffer(tls, 0) else {
             return MultiStreamParams {
                 sample_rate: 0,
@@ -242,7 +242,11 @@ impl Cpu {
                 mapping: Vec::new(),
             };
         };
-        let read = |offset: u32| self.mem.read_u32(addr.wrapping_add(offset)).unwrap_or(0);
+        let read = |offset: u32| {
+            self.mem
+                .read_u32(addr.wrapping_add(u64::from(offset)))
+                .unwrap_or(0)
+        };
         let channels = read(4);
         let (large_frame, mapping_at) = if extended {
             (
@@ -254,7 +258,7 @@ impl Cpu {
         };
         let mapping = if mapping_at < size {
             self.read_bytes(
-                addr.wrapping_add(mapping_at),
+                addr.wrapping_add(u64::from(mapping_at)),
                 channels.min(size - mapping_at),
             )
         } else {
@@ -272,7 +276,7 @@ impl Cpu {
 
     fn hwopus_open_multistream(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         params: MultiStreamParams,
     ) -> Result<()> {
@@ -311,7 +315,7 @@ impl Cpu {
         Ok(())
     }
 
-    fn hwopus_decoder_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    fn hwopus_decoder_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const WITH_PERF: [bool; 10] = [
             false, false, false, false, true, true, true, true, true, true,
         ];
@@ -332,7 +336,7 @@ impl Cpu {
         }
     }
 
-    fn hwopus_decode(&mut self, tls: u32, key: u64, reset: bool, with_perf: bool) -> Result<()> {
+    fn hwopus_decode(&mut self, tls: u64, key: u64, reset: bool, with_perf: bool) -> Result<()> {
         let Some((input, input_len)) = self.ipc_input_buffer(tls, 0) else {
             return self.write_ipc_response(tls, OPUS_INPUT_TOO_SMALL, &[], &[], &[]);
         };
@@ -345,7 +349,7 @@ impl Cpu {
         if size == 0 || size > input_len - PACKET_HEADER_LEN {
             return self.write_ipc_response(tls, OPUS_BUFFER_TOO_SMALL, &[], &[], &[]);
         }
-        let packet = self.read_bytes(input.wrapping_add(PACKET_HEADER_LEN), size);
+        let packet = self.read_bytes(input.wrapping_add(u64::from(PACKET_HEADER_LEN)), size);
         let output_room = self
             .ipc_output_buffer(tls, 0)
             .map_or(0, |(_, size)| size as usize);

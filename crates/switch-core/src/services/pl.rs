@@ -5,7 +5,7 @@ use crate::Result;
 
 impl Cpu {
     /// `pl:u` (`IPlatformServiceManager`): every font type is answered.
-    pub(crate) fn pl_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn pl_request(&mut self, tls: u64, cmd_id: Option<u32>) -> Result<()> {
         // Which font a per-type command is asking about.
         let font_type = self.mem.read_u32(self.ipc_request_data(tls)).unwrap_or(0);
         let region = self
@@ -39,7 +39,7 @@ impl Cpu {
                 for (i, region) in regions.iter().enumerate().take(count as usize) {
                     let values = [i as u32, region.offset, region.size];
                     for (buffer, value) in recv.iter().zip(values) {
-                        self.mem.write_u32(buffer.0 + i as u32 * 4, value)?;
+                        self.mem.write_u32(buffer.0 + i as u64 * 4, value)?;
                     }
                 }
                 let mut raw = [0u8; 8];
@@ -60,7 +60,7 @@ mod tests {
     #[test]
     fn pl_serves_the_host_font_from_its_shared_memory() {
         // With no firmware fonts, the host font stands in for every type.
-        const BUFFERS: u32 = 0x3000;
+        const BUFFERS: u64 = 0x3000;
         const TYPES: u32 = 7;
         // 40 bytes, a whole number of words, so no padding is in play.
         let font = b"not really a font, but bytes are bytes!!".to_vec();
@@ -91,22 +91,32 @@ mod tests {
         cpu.mem.map_zero(BUFFERS, 0x100).unwrap();
         cpu.mem.write_u32(TLS, 4 | (3 << 24)).unwrap(); // 3 recv buffers
         cpu.mem.write_u32(TLS + 4, 8).unwrap();
-        for i in 0..3u32 {
+        for i in 0..3u64 {
             let at = TLS + 8 + 12 * i;
-            cpu.mem.write_u32(at, 4 * TYPES).unwrap();
-            cpu.mem.write_u32(at + 4, BUFFERS + 0x20 * i).unwrap();
+            for (word, value) in map_descriptor(BUFFERS + 0x20 * i, 4 * TYPES)
+                .into_iter()
+                .enumerate()
+            {
+                cpu.mem.write_u32(at + 4 * word as u64, value).unwrap();
+            }
         }
         let data_area = cpu.ipc_reply_start(TLS);
-        cpu.mem.write_u32(TLS + data_area, SFCI).unwrap();
-        cpu.mem.write_u32(TLS + data_area + 8, 5).unwrap();
+        cpu.mem.write_u32(TLS + u64::from(data_area), SFCI).unwrap();
+        cpu.mem
+            .write_u32(TLS + u64::from(data_area) + 8, 5)
+            .unwrap();
         cpu.pl_request(TLS, Some(5)).unwrap();
         // { u8 fonts_loaded, u8 pad[3], s32 total_fonts }
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1);
         assert_eq!(cpu.mem.read_u32(TLS + 0x24).unwrap(), TYPES);
         for i in 0..TYPES {
-            assert_eq!(cpu.mem.read_u32(BUFFERS + 4 * i).unwrap(), i, "type {i}");
-            let offset = cpu.mem.read_u32(BUFFERS + 0x20 + 4 * i).unwrap() as usize;
-            let size = cpu.mem.read_u32(BUFFERS + 0x40 + 4 * i).unwrap() as usize;
+            assert_eq!(
+                cpu.mem.read_u32(BUFFERS + 4 * u64::from(i)).unwrap(),
+                i,
+                "type {i}"
+            );
+            let offset = cpu.mem.read_u32(BUFFERS + 0x20 + 4 * u64::from(i)).unwrap() as usize;
+            let size = cpu.mem.read_u32(BUFFERS + 0x40 + 4 * u64::from(i)).unwrap() as usize;
             assert_eq!(size, font.len(), "font {i}'s size");
             // Each font's data really is at the offset it was promised at.
             let image = cpu.shared_font_image();
@@ -152,21 +162,28 @@ mod tests {
     #[test]
     fn pl_reports_only_as_many_fonts_as_the_caller_left_room_for() {
         // The reply count must match the entries written.
-        const BUFFERS: u32 = 0x3000;
+        const BUFFERS: u64 = 0x3000;
         let mut cpu = Cpu::new();
         cpu.set_shared_font(b"font".to_vec());
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         cpu.mem.map_zero(BUFFERS, 0x100).unwrap();
         cpu.mem.write_u32(TLS, 4 | (3 << 24)).unwrap();
         cpu.mem.write_u32(TLS + 4, 8).unwrap();
-        for i in 0..3u32 {
+        for i in 0..3u64 {
             let at = TLS + 8 + 12 * i;
-            cpu.mem.write_u32(at, 4 * 2).unwrap(); // room for two entries
-            cpu.mem.write_u32(at + 4, BUFFERS + 0x20 * i).unwrap();
+            // Room for two entries.
+            for (word, value) in map_descriptor(BUFFERS + 0x20 * i, 4 * 2)
+                .into_iter()
+                .enumerate()
+            {
+                cpu.mem.write_u32(at + 4 * word as u64, value).unwrap();
+            }
         }
         let data_area = cpu.ipc_reply_start(TLS);
-        cpu.mem.write_u32(TLS + data_area, SFCI).unwrap();
-        cpu.mem.write_u32(TLS + data_area + 8, 5).unwrap();
+        cpu.mem.write_u32(TLS + u64::from(data_area), SFCI).unwrap();
+        cpu.mem
+            .write_u32(TLS + u64::from(data_area) + 8, 5)
+            .unwrap();
         cpu.pl_request(TLS, Some(5)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x24).unwrap(), 2);
         assert_eq!(
@@ -179,7 +196,7 @@ mod tests {
     #[test]
     fn without_a_font_pl_reports_an_empty_set() {
         // A well-formed "no fonts" answer, not a spin in `_plRequestLoadWait`.
-        const BUFFERS: u32 = 0x3000;
+        const BUFFERS: u64 = 0x3000;
         let mut cpu = request(false, 1, &[]);
         cpu.pl_request(TLS, Some(1)).unwrap();
         assert_eq!(
@@ -193,14 +210,21 @@ mod tests {
         cpu.mem.map_zero(BUFFERS, 0x100).unwrap();
         cpu.mem.write_u32(TLS, 4 | (3 << 24)).unwrap();
         cpu.mem.write_u32(TLS + 4, 8).unwrap();
-        for i in 0..3u32 {
+        for i in 0..3u64 {
             let at = TLS + 8 + 12 * i;
-            cpu.mem.write_u32(at, 0x20).unwrap(); // room for eight entries
-            cpu.mem.write_u32(at + 4, BUFFERS + 0x20 * i).unwrap();
+            // Room for eight entries.
+            for (word, value) in map_descriptor(BUFFERS + 0x20 * i, 0x20)
+                .into_iter()
+                .enumerate()
+            {
+                cpu.mem.write_u32(at + 4 * word as u64, value).unwrap();
+            }
         }
         let data_area = cpu.ipc_reply_start(TLS);
-        cpu.mem.write_u32(TLS + data_area, SFCI).unwrap();
-        cpu.mem.write_u32(TLS + data_area + 8, 5).unwrap();
+        cpu.mem.write_u32(TLS + u64::from(data_area), SFCI).unwrap();
+        cpu.mem
+            .write_u32(TLS + u64::from(data_area) + 8, 5)
+            .unwrap();
         cpu.pl_request(TLS, Some(5)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 1, "loaded");

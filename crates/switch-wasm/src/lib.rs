@@ -66,7 +66,7 @@ use switch_core::source::{ByteSource, Window};
 /// Framebuffer base address, width, height and stride (RGBA, little-endian).
 pub use switch_core::{FB_BASE, FB_HEIGHT, FB_STRIDE, FB_WIDTH};
 /// Memory-mapped input register: JS writes an ASCII key, homebrew acknowledges with 0.
-pub const INPUT_ADDR: u32 = switch_core::INPUT_ADDR;
+pub const INPUT_ADDR: u64 = switch_core::INPUT_ADDR;
 
 struct Session {
     /// The open container, read from the host by range.

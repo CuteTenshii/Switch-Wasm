@@ -11,7 +11,7 @@ impl Cpu {
     /// `INvDrvServices`; command ids follow libnx's `services/nv.c`.
     pub(crate) fn nvdrv_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         cmd_id: Option<u32>,
         _handle: u64,
     ) -> Result<()> {
@@ -123,13 +123,15 @@ impl Cpu {
                 }
                 if let Some(&(addr, len)) = recv.first() {
                     for (i, &byte) in argp.iter().take(len as usize).enumerate() {
-                        self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
+                        self.mem
+                            .write_u8(addr.wrapping_add(u64::from(i as u32)), byte)?;
                     }
                 }
                 // `nvIoctl3`'s second receive buffer, for out-of-line payloads.
                 if let Some(&(addr, len)) = recv.get(1) {
                     for (i, &byte) in inline_out.iter().take(len as usize).enumerate() {
-                        self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
+                        self.mem
+                            .write_u8(addr.wrapping_add(u64::from(i as u32)), byte)?;
                     }
                 }
                 self.write_ipc_response(tls, 0, &[], &error.to_le_bytes(), &[])

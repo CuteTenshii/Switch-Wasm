@@ -21,7 +21,7 @@ pub struct NvMapHandle {
     /// Size requested by `NVMAP_IOC_CREATE`.
     pub size: u32,
     /// CPU address passed to `NVMAP_IOC_ALLOC`; 0 until allocated.
-    pub cpu_addr: u32,
+    pub cpu_addr: u64,
     pub align: u32,
     pub heap_mask: u32,
     pub flags: u32,
@@ -87,7 +87,7 @@ impl NvMap {
         flags: u32,
         align: u32,
         kind: u8,
-        cpu_addr: u32,
+        cpu_addr: u64,
     ) -> Result<()> {
         let h = self
             .handles
@@ -149,7 +149,8 @@ impl NvMap {
         Ok(match param {
             PARAM_SIZE => h.size,
             PARAM_ALIGNMENT => h.align,
-            PARAM_BASE => h.cpu_addr,
+            // The ioctl's out-field is a `u32`, as on the console.
+            PARAM_BASE => h.cpu_addr as u32,
             PARAM_HEAP => h.heap_mask,
             PARAM_KIND => h.kind as u32,
             PARAM_COMPR => 0,

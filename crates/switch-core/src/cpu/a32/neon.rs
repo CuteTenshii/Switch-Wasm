@@ -1167,26 +1167,28 @@ impl Cpu {
                             let current = self.vfp_d(d);
                             if load {
                                 let value = match ebytes {
-                                    1 => u64::from(self.mem.read_u8(addr)?),
-                                    2 => u64::from(self.mem.read_u16(addr)?),
-                                    4 => u64::from(self.mem.read_u32(addr)?),
+                                    1 => u64::from(self.mem.read_u8(u64::from(addr))?),
+                                    2 => u64::from(self.mem.read_u16(u64::from(addr))?),
+                                    4 => u64::from(self.mem.read_u32(u64::from(addr))?),
                                     _ => {
-                                        u64::from(self.mem.read_u32(addr)?)
-                                            | u64::from(self.mem.read_u32(addr.wrapping_add(4))?)
-                                                << 32
+                                        u64::from(self.mem.read_u32(u64::from(addr))?)
+                                            | u64::from(
+                                                self.mem
+                                                    .read_u32(u64::from(addr.wrapping_add(4)))?,
+                                            ) << 32
                                     }
                                 };
                                 self.set_vfp_d(d, current & !mask | (value << shift) & mask);
                             } else {
                                 let value = (current & mask) >> shift;
                                 match ebytes {
-                                    1 => self.mem.write_u8(addr, value as u8)?,
-                                    2 => self.mem.write_u16(addr, value as u16)?,
-                                    4 => self.mem.write_u32(addr, value as u32)?,
+                                    1 => self.mem.write_u8(u64::from(addr), value as u8)?,
+                                    2 => self.mem.write_u16(u64::from(addr), value as u16)?,
+                                    4 => self.mem.write_u32(u64::from(addr), value as u32)?,
                                     _ => {
-                                        self.mem.write_u32(addr, value as u32)?;
+                                        self.mem.write_u32(u64::from(addr), value as u32)?;
                                         self.mem.write_u32(
-                                            addr.wrapping_add(4),
+                                            u64::from(addr.wrapping_add(4)),
                                             (value >> 32) as u32,
                                         )?;
                                     }
@@ -1202,14 +1204,14 @@ impl Cpu {
                 for i in 0..registers {
                     let d = (vd + i) & 0x1F;
                     if load {
-                        let lo = self.mem.read_u32(addr)?;
-                        let hi = self.mem.read_u32(addr.wrapping_add(4))?;
+                        let lo = self.mem.read_u32(u64::from(addr))?;
+                        let hi = self.mem.read_u32(u64::from(addr.wrapping_add(4)))?;
                         self.set_vfp_d(d, u64::from(lo) | (u64::from(hi) << 32));
                     } else {
                         let val = self.vfp_d(d);
-                        self.mem.write_u32(addr, val as u32)?;
+                        self.mem.write_u32(u64::from(addr), val as u32)?;
                         self.mem
-                            .write_u32(addr.wrapping_add(4), (val >> 32) as u32)?;
+                            .write_u32(u64::from(addr.wrapping_add(4)), (val >> 32) as u32)?;
                     }
                     addr = addr.wrapping_add(8);
                 }
@@ -1223,9 +1225,9 @@ impl Cpu {
                 return Err(self.neon_unimplemented(insn));
             }
             let value = match size {
-                8 => u64::from(self.mem.read_u8(addr)?),
-                16 => u64::from(self.mem.read_u16(addr)?),
-                _ => u64::from(self.mem.read_u32(addr)?),
+                8 => u64::from(self.mem.read_u8(u64::from(addr))?),
+                16 => u64::from(self.mem.read_u16(u64::from(addr))?),
+                _ => u64::from(self.mem.read_u32(u64::from(addr))?),
             };
             let mut lanes = [0u64; 16];
             for slot in lanes.iter_mut().take((64 / size) as usize) {
@@ -1253,18 +1255,18 @@ impl Cpu {
             let mut split = lanes_of(current, esize, lanes);
             if load {
                 split[index as usize] = match esize {
-                    8 => u64::from(self.mem.read_u8(addr)?),
-                    16 => u64::from(self.mem.read_u16(addr)?),
-                    _ => u64::from(self.mem.read_u32(addr)?),
+                    8 => u64::from(self.mem.read_u8(u64::from(addr))?),
+                    16 => u64::from(self.mem.read_u16(u64::from(addr))?),
+                    _ => u64::from(self.mem.read_u32(u64::from(addr))?),
                 };
                 let value = from_lanes(&split, esize, lanes) as u64;
                 self.set_vfp_d(vd, value);
             } else {
                 let value = split[index as usize];
                 match esize {
-                    8 => self.mem.write_u8(addr, value as u8)?,
-                    16 => self.mem.write_u16(addr, value as u16)?,
-                    _ => self.mem.write_u32(addr, value as u32)?,
+                    8 => self.mem.write_u8(u64::from(addr), value as u8)?,
+                    16 => self.mem.write_u16(u64::from(addr), value as u16)?,
+                    _ => self.mem.write_u32(u64::from(addr), value as u32)?,
                 }
             }
             esize / 8

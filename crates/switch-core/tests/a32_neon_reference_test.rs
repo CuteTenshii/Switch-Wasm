@@ -19264,14 +19264,20 @@ fn the_neon_forms_agree_with_qemu() {
             .collect();
         load(&mut cpu, &code);
         for (i, &word) in before.iter().enumerate() {
-            cpu.mem.write_u32(SCRATCH + 4 * i as u32, word).unwrap();
+            cpu.mem
+                .write_u32(u64::from(SCRATCH + 4 * i as u32), word)
+                .unwrap();
         }
         if let Err(error) = cpu.run(code.len() as u64 + 1) {
             wrong.push(format!("{insn:08x?}: {error}"));
             continue;
         }
         let got: Vec<u32> = (0..13)
-            .map(|i| cpu.mem.read_u32(SCRATCH + 0x100 + 4 * i).unwrap())
+            .map(|i| {
+                cpu.mem
+                    .read_u32(u64::from(SCRATCH + 0x100 + 4 * i))
+                    .unwrap()
+            })
             .collect();
         if got != after {
             wrong.push(format!(

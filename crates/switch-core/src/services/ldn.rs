@@ -140,7 +140,7 @@ impl Cpu {
     /// `ldn:u` (`IUserServiceCreator`) and the interfaces it hands out.
     pub(crate) fn ldn_user_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
@@ -169,7 +169,7 @@ impl Cpu {
     /// `IUserLocalCommunicationService`.
     fn ldn_session_request(
         &mut self,
-        tls: u32,
+        tls: u64,
         handle: u64,
         cmd_id: Option<u32>,
         iface: &str,
@@ -382,7 +382,7 @@ impl Cpu {
     }
 
     /// Check and keep `CreateNetwork`'s arguments; returns the result to reply with.
-    fn ldn_create_network(&mut self, tls: u32, key: u64, private: bool) -> u32 {
+    fn ldn_create_network(&mut self, tls: u64, key: u64, private: bool) -> u32 {
         let parameter_size = if private { SECURITY_PARAMETER_SIZE } else { 0 };
         let user_at = SECURITY_CONFIG_SIZE + parameter_size;
         let config_at = user_at + USER_CONFIG_SIZE + 4;
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn a_scan_finds_no_networks() {
-        const BUFFER: u32 = 0x3000;
+        const BUFFER: u64 = 0x3000;
         let mut cpu = auto_select_request(102, &[], BUFFER, NETWORK_INFO_SIZE as u32 * 2, false);
         cpu.register_service_handle(SESSION, "ldn:user");
         cpu.ldn_session(KEY).state = LdnState::Station;

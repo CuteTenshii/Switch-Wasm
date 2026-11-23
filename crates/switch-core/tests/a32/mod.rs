@@ -11,8 +11,8 @@ pub const HALT: u32 = 0xEF00_0000;
 /// An AArch32 core with program, scratch and stack mapped.
 pub fn cpu() -> Cpu {
     let mut cpu = Cpu::new();
-    cpu.mem.map_zero(BASE, 0x1000).unwrap();
-    cpu.mem.map_zero(SCRATCH, 0x1000).unwrap();
+    cpu.mem.map_zero(u64::from(BASE), 0x1000).unwrap();
+    cpu.mem.map_zero(u64::from(SCRATCH), 0x1000).unwrap();
     cpu.set_mode(ExecMode::A32);
     cpu.set_pc_and_sp(BASE, 0x9000);
     cpu
@@ -39,7 +39,7 @@ pub fn load(cpu: &mut Cpu, code: &[u32]) {
     for insn in code.iter().chain(std::iter::once(&HALT)) {
         bytes.extend_from_slice(&insn.to_le_bytes());
     }
-    cpu.mem.map(BASE, &bytes).unwrap();
+    cpu.mem.map(u64::from(BASE), &bytes).unwrap();
 }
 
 pub fn r(cpu: &Cpu, n: u8) -> u32 {

@@ -2,7 +2,7 @@
 //! Linux-style ioctls with one in/out argument struct, laid out as in libnx's
 //! `nvidia/ioctl` sources.
 
-use crate::gpu::multimedia::{self, Engine, Submitted, Video};
+use crate::gpu::multimedia::{Engine, Submitted, Video};
 use crate::gpu::syncpt::NvFence;
 use crate::gpu::vmm::{
     BIG_REGION_END, FLAG_FIXED_OFFSET, FLAG_REMAP_SUB_RANGE, SMALL_PAGE_SIZE, SMALL_REGION_BASE,
@@ -10,7 +10,7 @@ use crate::gpu::vmm::{
 };
 use crate::gpu::Gpu;
 use crate::mem::Memory;
-use crate::{Error, Result};
+use crate::Result;
 use std::collections::HashMap;
 
 /// `NvError` values the driver returns in the ioctl reply.
@@ -354,12 +354,6 @@ impl NvDrv {
                 let align = read_u32(data, 0x0C);
                 let kind = data.get(0x10).copied().unwrap_or(0);
                 let addr = read_u64(data, 0x18);
-                if addr > u32::MAX as u64 {
-                    return Err(Error::Gpu(format!(
-                        "nvmap: buffer address {:#x} is outside the emulated 32-bit space",
-                        addr
-                    )));
-                }
                 if crate::trace::enabled(crate::trace::Trace::Nv) {
                     let was = self
                         .gpu
@@ -368,12 +362,12 @@ impl NvDrv {
                         .map(|h| (h.cpu_addr, h.allocated));
                     crate::traceln!(
                         "[nv] nvmap alloc handle={handle} addr={:#x} (was {was:x?})",
-                        addr as u32
+                        addr
                     );
                 }
                 self.gpu
                     .nvmap
-                    .alloc(handle, heap_mask, flags, align, kind, addr as u32)?;
+                    .alloc(handle, heap_mask, flags, align, kind, addr)?;
                 Ok(NV_OK)
             }
             // Free { in handle; pad; out u64 refcount; out u32 size; out u32 flags }
@@ -752,7 +746,7 @@ impl NvDrv {
                 } else {
                     page_size as u64
                 };
-                let cpu_addr = handle.cpu_addr.wrapping_add(buffer_offset as u32);
+                let cpu_addr = handle.cpu_addr.wrapping_add(buffer_offset);
                 let offset = self.gpu.address_space_mut(as_id)?.map(
                     cpu_addr,
                     size,
@@ -831,7 +825,7 @@ impl NvDrv {
                         Some(_) => return Ok(NV_INVALID_STATE),
                         None => return Ok(NV_BAD_PARAMETER),
                     };
-                    let cpu_addr = handle.cpu_addr.wrapping_add(map_offset as u32);
+                    let cpu_addr = handle.cpu_addr.wrapping_add(map_offset);
                     let space = self.gpu.address_space_mut(as_id)?;
                     let page_size = space.big_page_size;
                     space.unmap_range(gpu_va, size);
@@ -909,12 +903,16 @@ impl NvDrv {
                 Ok(NV_OK)
             }
             // MapBuffer / UnmapBuffer { num_entries; reserved; attach; entries... }
-            (TYPE_NVHOST, 0x09) => Ok(if multimedia::map_buffer(data, &self.gpu.nvmap) {
+            (TYPE_NVHOST, 0x09) => Ok(if self.video.map_buffer(data, &self.gpu.nvmap) {
                 NV_OK
             } else {
                 NV_BAD_PARAMETER
             }),
-            (TYPE_NVHOST, 0x0A) => Ok(NV_OK),
+            (TYPE_NVHOST, 0x0A) => Ok(if self.video.unmap_buffer(data, &self.gpu.nvmap) {
+                NV_OK
+            } else {
+                NV_BAD_PARAMETER
+            }),
             _ => Ok(NV_NOT_IMPLEMENTED),
         }
     }
@@ -1544,7 +1542,7 @@ mod tests {
         for offset in [0u64, 0xFFF, 0x1000, 0x1FFF, 0x2000, 0x3FFF] {
             assert_eq!(
                 space.translate(gpu_va + offset).map(|(cpu, _)| cpu),
-                Some(0x3000_0000 + offset as u32),
+                Some(0x3000_0000 + offset),
                 "{offset:#x}"
             );
         }
@@ -1689,7 +1687,8 @@ mod tests {
             2 | (1 << 7) | (1 << 8),
         ];
         for (i, &word) in words.iter().enumerate() {
-            mem.write_u32(0x3000_0000 + i as u32 * 4, word).unwrap();
+            mem.write_u32(u64::from(0x3000_0000 + i as u32 * 4), word)
+                .unwrap();
         }
         drv.gpu
             .set_renderer(Box::new(crate::gpu::tests::Landing { left: 1 }));
@@ -1748,7 +1747,8 @@ mod tests {
             (0x360) | (0 << 13) | (0x55 << 16) | (4 << 29), // Inline write
         ];
         for (i, w) in words.iter().enumerate() {
-            mem.write_u32(0x3000_0000 + (i * 4) as u32, *w).unwrap();
+            mem.write_u32(u64::from(0x3000_0000 + (i * 4) as u32), *w)
+                .unwrap();
         }
         let entry = (gpu_va & 0xFF_FFFF_FFFC) | ((words.len() as u64) << 42);
 

@@ -10,17 +10,13 @@
 mod common;
 
 use clap::Parser;
-use common::emit::{self, LAYOUT, TABLE_AT, TABLE_BYTES};
+use common::emit::{self, LAYOUT, POOL_AT};
 use std::fmt::Write as _;
 use switch_core::cpu::{Cpu, ExecMode};
 
 const PAGE_BYTES: u32 = 4096;
 const WINDOW_PAGES: u32 = 17;
 const WINDOW_BYTES: u32 = WINDOW_PAGES * PAGE_BYTES;
-/// Where the mapped guest pages live, one 4 KiB slot each.
-const POOL_AT: u32 = TABLE_AT + TABLE_BYTES;
-const BITMAP_AT: u32 = POOL_AT + WINDOW_BYTES;
-const BITMAP_BYTES: u32 = (1 << 20) / 8;
 /// Slot of the `n`th window page, scattered so page-boundary checks are exercised.
 /// [`WINDOW_PAGES`] is prime, so the stepping reaches every slot.
 const SCATTER: u32 = 7;
@@ -256,7 +252,7 @@ fn main() {
             cpu.mem.map(0, &baseline).expect("the window is mapped");
             cpu.mem.take_read_hit();
             cpu.mem.take_watch_hit();
-            cpu.mem.mark_code_page(WATCHED_PAGE_AT);
+            cpu.mem.mark_code_page(u64::from(WATCHED_PAGE_AT));
             cpu.mem.dirty_code_pages(0);
             let mut fault = false;
             for _ in 0..ops {
@@ -278,7 +274,7 @@ fn main() {
             // A store over the block's own code leaves the interpreter running other words.
             let mut now = vec![0u8; code.len()];
             cpu.mem
-                .read_into(CODE_AT, &mut now)
+                .read_into(u64::from(CODE_AT), &mut now)
                 .expect("the code is mapped");
             if now != code {
                 rewrote += 1;
@@ -378,8 +374,7 @@ fn main() {
 
     let header = emit::header()
         + &format!(
-            "bitmap_at {BITMAP_AT}\n\
-             code_at {CODE_AT}\n\
+            "code_at {CODE_AT}\n\
              read_watch {READ_WATCH_AT} {}\n\
              watch {WATCH_AT} {}\n\
              watched_page {WATCHED_PAGE_AT} {}\n\
@@ -389,7 +384,7 @@ fn main() {
             READ_WATCH_AT + READ_WATCH_BYTES,
             WATCH_AT + WATCH_BYTES,
             READONLY.0,
-            (BITMAP_AT + BITMAP_BYTES).div_ceil(64 * 1024),
+            (POOL_AT + WINDOW_BYTES).div_ceil(64 * 1024),
             page_lines(),
         );
     std::fs::write(format!("{out_dir}/manifest.txt"), header + &manifest)
@@ -881,14 +876,14 @@ fn arm_monitor(cpu: &mut Cpu, insn: u32, set: usize) {
     let store = insn & 0x0F90_00F0 == 0x0180_0090 && (insn >> 8) & 0b11 != 0;
     let addr = cpu.reg_slots()[(insn >> 16) as usize & 0xF] as u32;
     let held = match (insn >> 21) & 0b11 {
-        0b10 => cpu.mem.read_u8(addr).map(u32::from),
-        0b11 => cpu.mem.read_u16(addr).map(u32::from),
-        _ => cpu.mem.read_u32(addr),
+        0b10 => cpu.mem.read_u8(u64::from(addr)).map(u32::from),
+        0b11 => cpu.mem.read_u16(u64::from(addr)).map(u32::from),
+        _ => cpu.mem.read_u32(u64::from(addr)),
     };
     match held {
         Ok(held) if store && !set.is_multiple_of(3) => {
             let value = if set % 3 == 1 { held } else { held ^ 1 };
-            cpu.set_exclusive(true, addr, [u64::from(value), 0]);
+            cpu.set_exclusive(true, u64::from(addr), [u64::from(value), 0]);
         }
         _ => cpu.set_exclusive(false, 0, [0, 0]),
     }
@@ -1065,15 +1060,20 @@ fn mapped_cpu(code: &[u8]) -> Cpu {
     let mut cpu = common::new_cpu();
     cpu.set_mode(ExecMode::A32);
     cpu.mem
-        .map_zero(0, WINDOW_BYTES as usize)
+        .map_zero(0, u64::from(WINDOW_BYTES))
         .expect("cannot map the guest window");
     cpu.mem
         .write_bytes(0, &window_bytes())
         .expect("cannot fill the guest window");
-    cpu.mem.map(CODE_AT, code).expect("cannot write the code");
-    cpu.mem.mark_readonly(READONLY.0, READONLY.1);
-    cpu.mem.watch_reads(READ_WATCH_AT, READ_WATCH_BYTES);
-    cpu.mem.watch_writes(WATCH_AT, WATCH_BYTES);
+    cpu.mem
+        .map(u64::from(CODE_AT), code)
+        .expect("cannot write the code");
+    cpu.mem
+        .mark_readonly(u64::from(READONLY.0), u64::from(READONLY.1));
+    cpu.mem
+        .watch_reads(u64::from(READ_WATCH_AT), u64::from(READ_WATCH_BYTES));
+    cpu.mem
+        .watch_writes(u64::from(WATCH_AT), u64::from(WATCH_BYTES));
     cpu
 }
 

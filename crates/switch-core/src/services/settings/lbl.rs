@@ -5,7 +5,7 @@ use super::*;
 impl Cpu {
     /// `lbl` (`nn::lbl::detail::ILblController`): setter/getter pairs over
     /// [`Backlight`]. No ambient light sensor, so no auto-brightness.
-    pub(crate) fn lbl_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(crate) fn lbl_request(&mut self, tls: u64, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         /// `LblBacklightSwitchStatus`.
         const BACKLIGHT_DISABLED: u32 = 0;
         const BACKLIGHT_ENABLED: u32 = 1;
