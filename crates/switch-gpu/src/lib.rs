@@ -502,6 +502,22 @@ struct OpenPass {
     depth: Option<wgpu::Texture>,
     /// Buffers held on the device that its draws bind, and whether writable.
     globals: Vec<(wgpu::Buffer, bool)>,
+    /// What its draws last set, so a draw joining it sets only what changed: each call
+    /// crosses into JavaScript in a browser.
+    set: PassState,
+}
+
+/// The state a render pass was last given. Viewport and blend constant compare as floats, so a
+/// NaN only costs a call that was not needed.
+#[derive(Debug, Default)]
+struct PassState {
+    groups: [Option<(wgpu::BindGroup, Vec<u32>)>; 2],
+    vertex: Vec<Option<wgpu::Buffer>>,
+    index: Option<(wgpu::Buffer, wgpu::IndexFormat)>,
+    pipeline: Option<wgpu::RenderPipeline>,
+    scissor: Option<[u32; 4]>,
+    viewport: Option<[f32; 6]>,
+    blend_constant: Option<[f32; 4]>,
 }
 
 /// A buffer's bytes and the device buffer holding them; see [`Gpu::shared_buffer`].
@@ -754,6 +770,9 @@ pub struct Gpu {
     pub compute_dispatched: u64,
     /// Draws recorded into the pass the draw before them opened.
     pub passes_joined: u64,
+    /// Bind group, buffer, pipeline, viewport, scissor and blend constant calls left out
+    /// because the pass already had that state.
+    pub pass_calls_skipped: u64,
     /// Vertex and index buffers uploaded, and draws that bound one already on the device.
     pub buffers_uploaded: u64,
     pub buffers_reused: u64,
@@ -780,12 +799,13 @@ impl Drop for Gpu {
     fn drop(&mut self) {
         eprintln!(
             "[gpu] {} draws rendered, {} fell back, from {} pipelines and {} modules; {} joined \
-             the pass before them",
+             the pass before them, {} pass calls left out as already set",
             self.drawn,
             self.fallbacks,
             self.pipelines.len(),
             self.modules.len(),
             self.passes_joined,
+            self.pass_calls_skipped,
         );
         if self.expanded + self.multisampled + self.per_pixel > 0 {
             eprintln!(
@@ -1370,6 +1390,7 @@ impl Renderer for Gpu {
             .field("heldCopiesUpdated", self.held_copies_updated)
             .field("croppedBinds", self.cropped_binds)
             .field("passesJoined", self.passes_joined)
+            .field("passCallsSkipped", self.pass_calls_skipped)
             .field("buffersUploaded", self.buffers_uploaded)
             .field("buffersReused", self.buffers_reused)
             .field("computeDispatched", self.compute_dispatched)

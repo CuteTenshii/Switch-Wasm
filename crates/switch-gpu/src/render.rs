@@ -568,18 +568,36 @@ impl Gpu {
                 colour: colour_target,
                 depth: depth_target,
                 globals: held_globals,
+                set: crate::PassState::default(),
             });
         }
         {
-            let pass = &mut self
-                .pass
-                .as_mut()
-                .expect("a pass was opened or joined")
-                .pass;
-            pass.set_bind_group(0, &groups.vs, &groups.offsets[0]);
-            pass.set_bind_group(1, &groups.fs, &groups.offsets[1]);
+            let open = self.pass.as_mut().expect("a pass was opened or joined");
+            let (pass, set) = (&mut open.pass, &mut open.set);
+            let mut skipped = 0u64;
+            let mut fresh = |changed: bool| {
+                skipped += u64::from(!changed);
+                changed
+            };
+            for (slot, (group, offsets)) in [&groups.vs, &groups.fs]
+                .into_iter()
+                .zip(&groups.offsets)
+                .enumerate()
+            {
+                let now = Some((group.clone(), offsets.clone()));
+                if fresh(set.groups[slot] != now) {
+                    pass.set_bind_group(slot as u32, group, offsets);
+                    set.groups[slot] = now;
+                }
+            }
             for (slot, b) in bound.iter().enumerate() {
-                pass.set_vertex_buffer(slot as u32, b.buffer.slice(..));
+                if set.vertex.len() <= slot {
+                    set.vertex.resize(slot + 1, None);
+                }
+                if fresh(set.vertex[slot].as_ref() != Some(&b.buffer)) {
+                    pass.set_vertex_buffer(slot as u32, b.buffer.slice(..));
+                    set.vertex[slot] = Some(b.buffer.clone());
+                }
             }
             // In pixels, except on the expanded route where the attachment is in texels.
             let (sx, sy) = match p.render {
@@ -588,14 +606,19 @@ impl Gpu {
             };
             let viewport = &p.state.viewport;
             let scissor = p.state.scissor;
-            pass.set_scissor_rect(
+            let rect = [
                 scissor.x0 * sx,
                 scissor.y0 * sy,
                 scissor.x1.saturating_sub(scissor.x0) * sx,
                 scissor.y1.saturating_sub(scissor.y0) * sy,
-            );
-            if let Some(constant) = p.state.target.and_then(|t| t.blend) {
-                let _ = constant;
+            ];
+            if fresh(set.scissor != Some(rect)) {
+                pass.set_scissor_rect(rect[0], rect[1], rect[2], rect[3]);
+                set.scissor = Some(rect);
+            }
+            if p.state.target.and_then(|t| t.blend).is_some()
+                && fresh(set.blend_constant != Some(p.state.blend_constant))
+            {
                 let [r, g, b, a] = p.state.blend_constant;
                 pass.set_blend_constant(wgpu::Color {
                     r: f64::from(r),
@@ -603,11 +626,16 @@ impl Gpu {
                     b: f64::from(b),
                     a: f64::from(a),
                 });
+                set.blend_constant = Some(p.state.blend_constant);
             }
             // One instance, numbered so `instance_index` matches `gl_InstanceID`.
             let instances = p.instance..p.instance + 1;
             if let Some((buffer, format, _)) = &index {
-                pass.set_index_buffer(buffer.slice(..), *format);
+                let now = Some((buffer.clone(), *format));
+                if fresh(set.index != now) {
+                    pass.set_index_buffer(buffer.slice(..), *format);
+                    set.index = now;
+                }
             }
             // One pipeline, or one per sample with the geometry moved onto it.
             for (sample, pipeline) in pipelines.iter().enumerate() {
@@ -615,21 +643,29 @@ impl Gpu {
                     1 => (0.0, 0.0),
                     _ => p.state.grid.texel_shift(sample as u32),
                 };
-                pass.set_pipeline(pipeline);
-                pass.set_viewport(
+                if fresh(set.pipeline.as_ref() != Some(pipeline)) {
+                    pass.set_pipeline(pipeline);
+                    set.pipeline = Some(pipeline.clone());
+                }
+                let rect = [
                     viewport.x * sx as f32 + shift_x,
                     viewport.y * sy as f32 + shift_y,
                     viewport.width * sx as f32,
                     viewport.height * sy as f32,
                     viewport.min_depth.clamp(0.0, 1.0),
                     viewport.max_depth.clamp(0.0, 1.0),
-                );
+                ];
+                if fresh(set.viewport != Some(rect)) {
+                    pass.set_viewport(rect[0], rect[1], rect[2], rect[3], rect[4], rect[5]);
+                    set.viewport = Some(rect);
+                }
                 match &index {
                     // The vertex buffer starts at the draw's lowest index.
                     Some((_, _, base)) => pass.draw_indexed(0..p.count, *base, instances.clone()),
                     None => pass.draw(0..p.count, instances.clone()),
                 }
             }
+            self.pass_calls_skipped += skipped;
         }
         if stores {
             self.end_pass();

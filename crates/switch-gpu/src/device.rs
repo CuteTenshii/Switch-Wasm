@@ -55,6 +55,7 @@ impl Gpu {
             translations: 0,
             no_fragment: None,
             constant_arena: None,
+            pass_calls_skipped: 0,
             constant_staging: Vec::new(),
             constants_flushed: 0,
             constants_unrecorded: false,
