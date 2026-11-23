@@ -589,6 +589,7 @@ impl Emitter<'_> {
             | Op::Bar { .. }
             | Op::Suld { .. }
             | Op::Sust { .. }
+            | Op::Sured { .. }
             | Op::Unimplemented { .. } => return Err(Unsupported::Op { at, op }),
 
             // Handled by `emit_terminator` and `emit_instruction`.

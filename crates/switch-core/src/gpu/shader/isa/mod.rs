@@ -159,6 +159,8 @@ fn decode_op(insn: u64, pc: u32) -> Op {
         0xeb00 | 0xeb08 | 0xeb10 | 0xeb18 | 0xeb20 | 0xeb28 | 0xeb30 | 0xeb38 => {
             decode_surface(insn).unwrap_or(un)
         }
+        // sured 0xeb40/0xffe0.
+        0xeb40 | 0xeb48 | 0xeb50 | 0xeb58 => decode_sured(insn).unwrap_or(un),
         // red.
         0xebf8 => {
             let (Some(op), Some(ty)) = (atom_op(field(insn, 23, 3)), atom_type(field(insn, 20, 3)))

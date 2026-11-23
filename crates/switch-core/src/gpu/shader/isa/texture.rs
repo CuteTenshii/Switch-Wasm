@@ -2,6 +2,53 @@
 
 use super::*;
 
+/// `sured`, fields as Eden's `surface_atomic_operations.cpp` reads them. Only the 32-bit
+/// integer forms, whose size codes Eden and the hardware agree on.
+pub(super) fn decode_sured(insn: u64) -> Option<Op> {
+    const IGN: u64 = 0;
+    if field(insn, 49, 2) != IGN {
+        return None;
+    }
+    let ty = match field(insn, 20, 3) {
+        0 => AtomType::U32,
+        1 => AtomType::S32,
+        _ => return None,
+    };
+    let op = match field(insn, 24, 3) {
+        0 => AtomOp::Add,
+        1 => AtomOp::Min,
+        2 => AtomOp::Max,
+        3 => AtomOp::Inc,
+        4 => AtomOp::Dec,
+        5 => AtomOp::And,
+        6 => AtomOp::Or,
+        _ => AtomOp::Xor,
+    };
+    let dim = match field(insn, 33, 3) {
+        0 => SurfaceDim::D1,
+        1 => SurfaceDim::Buffer1d,
+        2 => SurfaceDim::Array1d,
+        3 => SurfaceDim::D2,
+        4 => SurfaceDim::Array2d,
+        5 => SurfaceDim::D3,
+        _ => return None,
+    };
+    let (handle, handle_reg) = if field(insn, 51, 1) != 0 {
+        (field(insn, 36, 13) as u16, None)
+    } else {
+        (0, Some(reg(insn, 39, 8)))
+    };
+    Some(Op::Sured {
+        src: reg(insn, 0, 8),
+        coords: reg(insn, 8, 8),
+        handle,
+        handle_reg,
+        dim,
+        op,
+        ty,
+    })
+}
+
 /// `suld`/`sust`, fields as Eden's `surface_load_store.cpp` reads them.
 pub(super) fn decode_surface(insn: u64) -> Option<Op> {
     const IGN: u64 = 0;

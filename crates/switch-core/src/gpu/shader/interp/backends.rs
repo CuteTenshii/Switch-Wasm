@@ -263,6 +263,36 @@ pub trait TextureSource {
             "shader: surface store to handle {handle:#x} with no surface source bound"
         )))
     }
+
+    /// `sured`: combine `value` into the 32-bit texel `at` of the image `handle` names.
+    fn surface_reduce(
+        &self,
+        handle: u32,
+        _at: [u32; 3],
+        _op: AtomOp,
+        _ty: AtomType,
+        _value: u32,
+    ) -> ShaderResult<()> {
+        Err(fault(format!(
+            "shader: surface reduction on handle {handle:#x} with no surface source bound"
+        )))
+    }
+}
+
+/// What `sured` leaves in a texel holding `old`. Only 32-bit texels take a reduction.
+pub fn surface_reduced(
+    texel_bytes: u32,
+    old: u32,
+    op: AtomOp,
+    ty: AtomType,
+    value: u32,
+) -> ShaderResult<u32> {
+    if texel_bytes != 4 {
+        return Err(fault(format!(
+            "shader: a surface reduction on a {texel_bytes}-byte texel"
+        )));
+    }
+    Ok(atom_apply(op, ty, u64::from(old), u64::from(value), 0)? as u32)
 }
 
 /// No texture backend: every `texs` is an error.
@@ -577,6 +607,40 @@ impl TextureSource for MemoryTextures<'_, '_> {
         if let Some(write) = crate::gpu::texture::surface_write(&image, at, data, regs)? {
             stores.borrow_mut().push(write);
         }
+        Ok(())
+    }
+
+    fn surface_reduce(
+        &self,
+        handle: u32,
+        at: [u32; 3],
+        op: AtomOp,
+        ty: AtomType,
+        value: u32,
+    ) -> ShaderResult<()> {
+        let Some(stores) = self.surface_stores else {
+            return Err(fault(format!(
+                "shader: surface reduction on handle {handle:#x} from a stage that cannot store"
+            )));
+        };
+        let Some(image) = self.surface(handle)? else {
+            return Ok(());
+        };
+        let Some((addr, bytes)) = image.surface_texel(at)? else {
+            return Ok(());
+        };
+        let queued = stores
+            .borrow()
+            .iter()
+            .rev()
+            .find(|&&(to, len, _)| to == addr && len == bytes)
+            .map(|&(_, _, raw)| raw);
+        let old = match queued {
+            Some(raw) => raw as u32,
+            None => self.ctx.read_pixel(addr, bytes)? as u32,
+        };
+        let new = surface_reduced(bytes, old, op, ty, value)?;
+        stores.borrow_mut().push((addr, bytes, u128::from(new)));
         Ok(())
     }
 }

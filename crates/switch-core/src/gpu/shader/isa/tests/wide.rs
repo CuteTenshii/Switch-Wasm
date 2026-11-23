@@ -270,6 +270,28 @@ fn a_negative_immediate_does_not_change_the_opcode() {
     ));
 }
 
+/// Pokémon Legends: Z-A's surface reduction, read with Eden's fields.
+#[test]
+fn a_surface_reduction_decodes_with_its_operation_and_type() {
+    assert_eq!(
+        op(0xeb50_0608_0207_000f),
+        Op::Sured {
+            src: 15,
+            coords: 0,
+            handle: 0,
+            handle_reg: Some(12),
+            dim: SurfaceDim::Array2d,
+            op: AtomOp::Max,
+            ty: AtomType::U32,
+        }
+    );
+    // A 64-bit or float reduction is left undecoded.
+    assert!(matches!(
+        op(0xeb50_0608_0227_000f),
+        Op::Unimplemented { .. }
+    ));
+}
+
 #[test]
 fn surface_accesses_decode_as_envydis_reads_them() {
     assert_eq!(

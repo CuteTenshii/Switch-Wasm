@@ -259,6 +259,18 @@ pub(super) fn reads(op: &Op) -> Vec<u8> {
             v.extend(handle_reg);
             v
         }
+        Op::Sured {
+            src,
+            coords,
+            handle_reg,
+            dim,
+            ..
+        } => {
+            let mut v = surface_coord_regs(coords, dim);
+            v.push(src);
+            v.extend(handle_reg);
+            v
+        }
         _ => Vec::new(),
     };
     out.retain(|&r| r != RZ);

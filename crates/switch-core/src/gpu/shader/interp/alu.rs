@@ -1139,7 +1139,8 @@ impl Invocation {
             | Op::Tld4 { .. }
             | Op::Tld4s { .. }
             | Op::Suld { .. }
-            | Op::Sust { .. } => unreachable!("control flow is dispatched in execute"),
+            | Op::Sust { .. }
+            | Op::Sured { .. } => unreachable!("control flow is dispatched in execute"),
         }
         Ok(())
     }

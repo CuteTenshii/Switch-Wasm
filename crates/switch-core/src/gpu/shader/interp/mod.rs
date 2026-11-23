@@ -608,6 +608,20 @@ impl Invocation {
                     });
                     env.textures.surface_store(handle, at, data, regs)?;
                 }
+                Op::Sured {
+                    src,
+                    coords,
+                    handle,
+                    handle_reg,
+                    dim,
+                    op,
+                    ty,
+                } => {
+                    let handle = self.surface_handle(handle, handle_reg, env)?;
+                    let at = self.surface_coords(coords, dim);
+                    env.textures
+                        .surface_reduce(handle, at, op, ty, self.reg(src))?;
+                }
                 other => self.run_alu(other, env)?,
             }
             pc += 1;

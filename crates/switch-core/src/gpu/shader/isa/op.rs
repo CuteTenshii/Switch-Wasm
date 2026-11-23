@@ -712,6 +712,16 @@ pub enum Op {
         dim: SurfaceDim,
         data: SurfaceData,
     },
+    /// `sured.op.ty [coords], src, handle`: an atomic on one 32-bit texel, nothing returned.
+    Sured {
+        src: u8,
+        coords: u8,
+        handle: u16,
+        handle_reg: Option<u8>,
+        dim: SurfaceDim,
+        op: AtomOp,
+        ty: AtomType,
+    },
     /// `vote.mode dst, pred, src`.
     Vote {
         dst: u8,

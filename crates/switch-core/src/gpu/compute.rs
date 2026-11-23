@@ -10,7 +10,7 @@ use crate::gpu::shader::interp::{
     resolve_warp, ConstCache, ConstantSource, Env, GlobalMemory, Halt, Invocation, MemoryTextures,
     ShaderResult, SharedMemory, TextureSource, WARP_LANES,
 };
-use crate::gpu::shader::isa::SurfaceData;
+use crate::gpu::shader::isa::{AtomOp, AtomType, SurfaceData};
 use crate::gpu::shader::{decode_program_from_memory, Op};
 use crate::gpu::texture::{self, BlockCache, DescriptorCache, Texture};
 use crate::{Error, Result};
@@ -410,6 +410,26 @@ impl TextureSource for DispatchMemory<'_, '_> {
             regs,
         )?)
     }
+
+    fn surface_reduce(
+        &self,
+        handle: u32,
+        at: [u32; 3],
+        op: AtomOp,
+        ty: AtomType,
+        value: u32,
+    ) -> ShaderResult<()> {
+        let Some(image) = self.surface(handle)? else {
+            return Ok(());
+        };
+        let Some((addr, bytes)) = image.surface_texel(at)? else {
+            return Ok(());
+        };
+        let mut ctx = self.ctx.borrow_mut();
+        let old = ctx.read_pixel(addr, bytes)? as u32;
+        let new = crate::gpu::shader::interp::surface_reduced(bytes, old, op, ty, value)?;
+        Ok(ctx.write_pixel(addr, bytes, u128::from(new))?)
+    }
 }
 
 #[cfg(test)]
@@ -558,6 +578,28 @@ mod tests {
                 handle_reg: Some(handle_reg),
                 dim: isa::SurfaceDim::D2,
                 data: isa::SurfaceData::Formatted([true; 4]),
+            },
+        )
+    }
+
+    /// `sured.op.u32 [coords], src, handle_reg` on a 2D image, Pokémon Legends: Z-A's form.
+    fn sured_2d(op: isa::AtomOp, code: u64, coords: u8, src: u8, handle_reg: u8) -> u64 {
+        encode(
+            0xeb50u64 << 48
+                | u64::from(handle_reg) << 39
+                | 3 << 33
+                | code << 24
+                | PT
+                | u64::from(coords) << 8
+                | u64::from(src),
+            Op::Sured {
+                src,
+                coords,
+                handle: 0,
+                handle_reg: Some(handle_reg),
+                dim: isa::SurfaceDim::D2,
+                op,
+                ty: isa::AtomType::U32,
             },
         )
     }
@@ -868,6 +910,66 @@ mod tests {
         let mut expected = vec![u32::MAX; 32];
         expected.extend([0xf; 4]);
         assert_eq!(h.read_output(36), expected);
+    }
+
+    /// Ten threads reduce into three texels of a 4x2 `R32_UINT` image: each adds one to the
+    /// first, raises the second to its id, and decrements the third, wrapping at five.
+    #[test]
+    fn a_dispatch_reduces_into_an_image() {
+        use isa::AtomOp;
+        const TIC_POOL_AT: u64 = 0x3000;
+        const IMAGE_AT: u64 = 0x4000;
+        const PITCH: u32 = 64;
+        let mut h = Harness::new();
+        let image = h.base + IMAGE_AT;
+        let tic = [
+            // R32 (0x0f) of UINT (4) data.
+            0x0f | 4 << 7,
+            image as u32,
+            (image >> 32) as u32 | 2 << 21,
+            PITCH / 32,
+            3 | 1 << 23,
+            1,
+            0,
+            0,
+        ];
+        h.write_words(TIC_POOL_AT, &tic);
+        let program = [
+            s2r(0, SR_TIDX),
+            mov32i(39, 0),
+            mov32i(20, 0),
+            mov32i(21, 0),
+            mov32i(5, 1),
+            sured_2d(AtomOp::Add, 0, 20, 5, 39),
+            mov32i(22, 1),
+            mov32i(23, 0),
+            sured_2d(AtomOp::Max, 2, 22, 0, 39),
+            mov32i(24, 2),
+            mov32i(25, 0),
+            mov32i(6, 5),
+            sured_2d(AtomOp::Dec, 4, 24, 6, 39),
+            exit(),
+        ];
+        let launch = Launch {
+            grid: [1, 1, 1],
+            block: [10, 1, 1],
+            ..Launch::default()
+        };
+        h.write_words(QMD_AT, &launch.words());
+        h.write_program(&program);
+        let mut engine = h.engine();
+        let pool = h.base + TIC_POOL_AT;
+        engine.regs.set(0x55D, (pool >> 32) as u32);
+        engine.regs.set(0x55E, pool as u32);
+        dispatch(&engine, &mut h.ctx()).unwrap();
+
+        let base = h.base;
+        let ctx = h.ctx();
+        let row: Vec<u32> = (0..4)
+            .map(|x| ctx.read_u32(base + IMAGE_AT + x * 4).unwrap())
+            .collect();
+        // Ten decrements from zero: 5, 4, 3, 2, 1, 0, 5, 4, 3, 2.
+        assert_eq!(row, vec![10, 9, 2, 0]);
     }
 
     /// Five threads store `100 + tid` to texel `tid` of a 4x2 `R32F` image, then read
