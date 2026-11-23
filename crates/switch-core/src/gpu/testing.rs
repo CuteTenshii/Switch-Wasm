@@ -872,6 +872,9 @@ impl Harness {
         self.engine.regs.set(0x705, (addr >> 32) as u32);
         self.engine.regs.set(0x706, addr as u32);
         self.engine.regs.set(0x707, 1); // divisor
+
+        // VertexArrayPerInstance[1]: without it the engine ignores the divisor.
+        self.engine.regs.set(0x621, 1);
         self.engine.regs.set(0x7C2, (addr >> 32) as u32);
         self.engine
             .regs
