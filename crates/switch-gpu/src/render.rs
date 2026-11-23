@@ -237,7 +237,7 @@ impl Gpu {
             state::Topology::LineStrip | state::Topology::TriangleStrip => draw_index_format,
             _ => None,
         };
-        let key = PipelineKey {
+        let mut key = PipelineKey {
             vs: vs_key,
             fs: fs_key,
             target: target_format,
@@ -280,10 +280,7 @@ impl Gpu {
         let mut pipelines = Vec::with_capacity(passes.len());
         let mut layout = None;
         for sample_pass in passes {
-            let key = PipelineKey {
-                sample_pass,
-                ..key.clone()
-            };
+            key.sample_pass = sample_pass;
             if let Some(pipeline) = self.pipelines.get(&key) {
                 pipelines.push(pipeline.clone());
                 continue;
@@ -367,7 +364,7 @@ impl Gpu {
                 pipeline,
                 self.device.create_render_pipeline(&descriptor)
             );
-            self.pipelines.insert(key, pipeline.clone());
+            self.pipelines.insert(key.clone(), pipeline.clone());
             pipelines.push(pipeline);
         }
         self.encode(p, &pipelines, &groups, &bound, ctx)
