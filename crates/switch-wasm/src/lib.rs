@@ -81,6 +81,8 @@ struct Session {
     keys: switch_core::keys::KeySet,
     /// Control data from the last Control NCA read, cached so the icon can be fetched separately.
     control: Option<switch_core::control::Control>,
+    /// The icon of the last file `switch_peek_title` read, until `switch_peek_icon` takes it.
+    peeked_icon: Vec<u8>,
     /// The open container's NACP, given to the process each launch of it boots in.
     container_nacp: Option<switch_core::control::Nacp>,
     /// Users staged by `switch_user_stage`, installed whole by `switch_users_commit`.
@@ -199,6 +201,7 @@ pub fn switch_init() {
             dlc: Vec::new(),
             keys: switch_core::keys::KeySet::default(),
             control: None,
+            peeked_icon: Vec::new(),
             container_nacp: None,
             staged_users: Vec::new(),
             cpu,

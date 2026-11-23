@@ -135,6 +135,27 @@ export type OpenedContainer =
   | { kind: 'dlc'; packs: DlcEntry[] }
   | { kind: 'container'; files: NspFile[] };
 
+// What a file holds, read without opening it. Details a file lacks are empty strings.
+export type PeekedTitle =
+  | {
+    kind: 'game' | 'homebrew';
+    // Empty for homebrew.
+    title_id: string;
+    name?: string;
+    publisher?: string;
+    version?: string;
+    icon_mime?: string;
+    icon_size?: number;
+  }
+  | ({ kind: 'update'; title_id: string; version: string })
+  | { kind: 'dlc'; title_id: string; packs: DlcEntry[] };
+
+// A peeked file with its icon, or null.
+export interface Peek {
+  title: PeekedTitle;
+  icon: Bytes | null;
+}
+
 // An installed NAND title with the size of its content.
 export interface NandTitle {
   id: string;
@@ -277,6 +298,9 @@ export interface Commands {
 
   // Throws the reason if it is no container.
   openContainer(file: File): OpenedContainer;
+  // What `file` holds; the open container, update and add-on content are left as they are.
+  // Throws the reason when it is neither a container nor an NRO, or holds no title.
+  peekTitle(file: File): Peek;
   openNca(file: File): number;
   restoreNand(): number;
   nandIdentify(content: Blob): NandIdentity;

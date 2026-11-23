@@ -887,6 +887,104 @@ pub fn find_html_document<'a, S: ByteSource>(
     })
 }
 
+/// NCA fixtures; not `#[cfg(test)]` so `switch-wasm` can use them (see [`crate::nsp::testing`]).
+pub mod testing {
+    use super::*;
+    use crate::crypto::aes128_encrypt_block;
+
+    /// XTS-encrypt `data` from `sector`, as an NCA header is stored.
+    pub fn encrypt_xts(key: &[u8; 32], data: &[u8], sector: u64, sector_size: usize) -> Vec<u8> {
+        // Standard XTS encrypt: E(K1, P ^ T) ^ T.
+        let mut key1 = [0u8; 16];
+        let mut key2 = [0u8; 16];
+        key1.copy_from_slice(&key[..16]);
+        key2.copy_from_slice(&key[16..]);
+        let mut out = Vec::with_capacity(data.len());
+        for (s, chunk) in (sector..).zip(data.chunks(sector_size)) {
+            let mut tweak = [0u8; 16];
+            let mut sv = s;
+            for i in (0..16).rev() {
+                tweak[i] = (sv & 0xff) as u8;
+                sv >>= 8;
+            }
+            let mut tweak = aes128_encrypt_block(&key2, &tweak);
+            for blk in chunk.chunks(16) {
+                let mut p = [0u8; 16];
+                p[..blk.len()].copy_from_slice(blk);
+                let mut x = [0u8; 16];
+                for (i, b) in x.iter_mut().enumerate() {
+                    *b = p[i] ^ tweak[i];
+                }
+                let c = aes128_encrypt_block(&key1, &x);
+                for i in 0..16 {
+                    out.push(c[i] ^ tweak[i]);
+                }
+                // multiply tweak by x (little-endian left shift)
+                let carry = tweak[15] & 0x80;
+                for i in (0..15).rev() {
+                    tweak[i + 1] = (tweak[i + 1] << 1) | (tweak[i] >> 7);
+                }
+                tweak[0] <<= 1;
+                if carry != 0 {
+                    tweak[0] ^= 0x87;
+                }
+            }
+        }
+        out
+    }
+
+    /// An NCA of `content_type` and `title_id` whose one section is the RomFS `image`, stored
+    /// unencrypted, with its header XTS-encrypted under `header_key` so its FS header parses.
+    /// `encryption_type` is the section's declared encryption: [`ENCRYPTION_AES_CTR_EX`] marks
+    /// an update's patch RomFS, which is never read as an image.
+    pub fn romfs_nca(
+        header_key: &[u8; 32],
+        content_type: ContentType,
+        title_id: u64,
+        image: &[u8],
+        encryption_type: u8,
+    ) -> Vec<u8> {
+        const SECTION_OFFSET: usize = 0x1000;
+        // Real RomFS data lives at IVFC level 5, past the hash levels.
+        const LEVEL5_OFFSET: usize = 0x40;
+        let mut section = vec![0u8; LEVEL5_OFFSET];
+        section.extend_from_slice(image);
+        section.resize(section.len().next_multiple_of(0x200), 0);
+
+        let content_type = match content_type {
+            ContentType::Program => 0,
+            ContentType::Meta => 1,
+            ContentType::Control => 2,
+            ContentType::Manual => 3,
+            ContentType::Data => 4,
+            ContentType::PublicData => 5,
+            ContentType::Unknown(raw) => raw,
+        };
+        let mut header = vec![0u8; NCA_FULL_HEADER_SIZE];
+        let h = NCA_HEADER_OFFSET;
+        header[h..h + 4].copy_from_slice(&NCA_MAGIC.to_le_bytes());
+        header[h + 0x05] = content_type;
+        header[h + 0x10..h + 0x18].copy_from_slice(&title_id.to_le_bytes());
+        let start = (SECTION_OFFSET / 0x200) as u32;
+        let end = start + (section.len() / 0x200) as u32;
+        header[h + 0x40..h + 0x44].copy_from_slice(&start.to_le_bytes());
+        header[h + 0x44..h + 0x48].copy_from_slice(&end.to_le_bytes());
+
+        let fs = 0x400;
+        header[fs + 0x02] = 0; // partition type: RomFS
+        header[fs + 0x03] = HASH_TYPE_IVFC;
+        header[fs + 0x04] = encryption_type;
+        let level5 = fs + 0x18 + 5 * 24;
+        header[level5..level5 + 8].copy_from_slice(&(LEVEL5_OFFSET as u64).to_le_bytes());
+        header[level5 + 8..level5 + 16].copy_from_slice(&(image.len() as u64).to_le_bytes());
+
+        let mut raw = encrypt_xts(header_key, &header, 0, 0x200);
+        raw.resize(SECTION_OFFSET, 0);
+        raw.extend_from_slice(&section);
+        raw
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1018,49 +1116,10 @@ mod tests {
 
 #[cfg(test)]
 mod decrypt_tests {
+    use super::testing::encrypt_xts;
     use super::*;
-    use crate::crypto::{aes128_encrypt_block, aes128_xts_decrypt};
+    use crate::crypto::aes128_xts_decrypt;
     use crate::keys::{KeySet, KEY_GENERATION_COUNT};
-
-    fn encrypt_xts(key: &[u8; 32], data: &[u8], sector: u64, sector_size: usize) -> Vec<u8> {
-        // Standard XTS encrypt: E(K1, P ^ T) ^ T.
-        let mut key1 = [0u8; 16];
-        let mut key2 = [0u8; 16];
-        key1.copy_from_slice(&key[..16]);
-        key2.copy_from_slice(&key[16..]);
-        let mut out = Vec::with_capacity(data.len());
-        for (s, chunk) in (sector..).zip(data.chunks(sector_size)) {
-            let mut tweak = [0u8; 16];
-            let mut sv = s;
-            for i in (0..16).rev() {
-                tweak[i] = (sv & 0xff) as u8;
-                sv >>= 8;
-            }
-            let mut tweak = aes128_encrypt_block(&key2, &tweak);
-            for blk in chunk.chunks(16) {
-                let mut p = [0u8; 16];
-                p[..blk.len()].copy_from_slice(blk);
-                let mut x = [0u8; 16];
-                for (i, b) in x.iter_mut().enumerate() {
-                    *b = p[i] ^ tweak[i];
-                }
-                let c = aes128_encrypt_block(&key1, &x);
-                for i in 0..16 {
-                    out.push(c[i] ^ tweak[i]);
-                }
-                // multiply tweak by x (little-endian left shift)
-                let carry = tweak[15] & 0x80;
-                for i in (0..15).rev() {
-                    tweak[i + 1] = (tweak[i + 1] << 1) | (tweak[i] >> 7);
-                }
-                tweak[0] <<= 1;
-                if carry != 0 {
-                    tweak[0] ^= 0x87;
-                }
-            }
-        }
-        out
-    }
 
     #[test]
     fn decrypts_encrypted_header_with_header_key() {

@@ -11,6 +11,25 @@ declare module '*?url' {
   export default url;
 }
 
+// The File System Access API's folder picker, permissions and listing, which Chromium has and
+// TypeScript's DOM library leaves out.
+interface FileSystemHandlePermissionDescriptor {
+  mode?: 'read' | 'readwrite';
+}
+interface FileSystemHandle {
+  queryPermission(descriptor?: FileSystemHandlePermissionDescriptor): Promise<PermissionState>;
+  requestPermission(descriptor?: FileSystemHandlePermissionDescriptor): Promise<PermissionState>;
+}
+interface FileSystemDirectoryHandle {
+  values(): AsyncIterableIterator<FileSystemFileHandle | FileSystemDirectoryHandle>;
+}
+interface Window {
+  showDirectoryPicker?(options?: {
+    id?: string;
+    mode?: 'read' | 'readwrite';
+  }): Promise<FileSystemDirectoryHandle>;
+}
+
 // The wasm-bindgen core, declared because it does not exist until `make wasm`.
 declare module '@core/switch_wasm.js' {
   export default function init(
@@ -87,6 +106,10 @@ declare module '@core/switch_wasm.js' {
   export function switch_inspect_nca(index?: number | null): string;
   export function switch_control_json(): string;
   export function switch_control_icon(): Uint8Array<ArrayBuffer>;
+  // A `PeekedTitle` as JSON; throws the reason when the file holds no title.
+  export function switch_peek_title(file: Blob): string;
+  // The icon of the file last peeked, or empty; taken, so asked once.
+  export function switch_peek_icon(): Uint8Array<ArrayBuffer>;
   export function switch_load_keys(prod: Uint8Array | null, title: Uint8Array | null): void;
   export function switch_load_control(): Promise<void>;
   // `boot.rs` and `nand.rs`: the entry address; they throw the reason when a program will not boot.

@@ -2,7 +2,7 @@
 
 use switch_core::json;
 use switch_core::nca::{ContentType, Nca};
-use switch_core::source::Window;
+use switch_core::source::{ByteSource, Window};
 use switch_core::trace::Level;
 
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -173,21 +173,133 @@ fn hold_update(
 }
 
 /// The NACP display version of the Control NCA among `ncas`, or empty.
-fn display_version(
+fn display_version<S: ByteSource>(
     files: &[switch_core::nsp::Pfs0File],
     ncas: &[(usize, Nca)],
-    src: &HostSource,
+    src: &S,
     keys: &switch_core::keys::KeySet,
 ) -> String {
-    let control = || {
-        let (index, _) = ncas
-            .iter()
-            .find(|(_, nca)| nca.content_type == ContentType::Control)?;
-        let f = files.get(*index)?;
-        let window = Window::new(*src, f.offset, f.size, &f.name).ok()?;
-        switch_core::control::Control::from_source(window, keys).ok()
+    read_control(files, ncas, src, keys)
+        .map_or_else(String::new, |control| control.nacp.display_version)
+}
+
+/// The control data of the Control NCA among `ncas`, if one reads.
+fn read_control<S: ByteSource>(
+    files: &[switch_core::nsp::Pfs0File],
+    ncas: &[(usize, Nca)],
+    src: &S,
+    keys: &switch_core::keys::KeySet,
+) -> Option<switch_core::control::Control> {
+    let (index, _) = ncas
+        .iter()
+        .find(|(_, nca)| nca.content_type == ContentType::Control)?;
+    let f = files.get(*index)?;
+    let window = Window::new(src, f.offset, f.size, &f.name).ok()?;
+    switch_core::control::Control::from_source(window, keys).ok()
+}
+
+/// Read what `file` is without opening it: the open container, its update and its add-on
+/// content stay as they are. Returns `{ kind, .. }` as JSON, or fails with the reason (see
+/// [`peek`]). The icon waits for [`switch_peek_icon`].
+#[wasm_bindgen]
+pub fn switch_peek_title(file: &web_sys::Blob) -> Result<String, String> {
+    let index = crate::hostfiles::add(file);
+    let src = HostSource {
+        file: index,
+        len: file.size() as u64,
     };
-    control().map_or_else(String::new, |control| control.nacp.display_version)
+    let peeked = peek(session(), &src);
+    crate::hostfiles::forget(index);
+    peeked
+}
+
+/// The icon of the file [`switch_peek_title`] last read, or empty; taken, so asked once.
+#[wasm_bindgen]
+pub fn switch_peek_icon() -> Vec<u8> {
+    std::mem::take(&mut session().peeked_icon)
+}
+
+/// What `src` holds, as JSON:
+/// - `game` or `homebrew`: `title_id` (empty for homebrew), `name`, `publisher`, `version`,
+///   `icon_mime` and `icon_size`, any of them empty when the file has no control data;
+/// - `update`: `title_id`, the program it patches, and its display `version`;
+/// - `dlc`: `title_id`, the title it belongs to, and its `packs` as `switch_open_container`
+///   lists them.
+///
+/// Its tickets are read into a copy of the session's keys. Fails with the reason when it is
+/// neither a container nor an NRO, or holds none of these (as when no `prod.keys` are loaded).
+pub(crate) fn peek<S: ByteSource>(s: &mut Session, src: &S) -> Result<String, String> {
+    s.peeked_icon.clear();
+    let files = match switch_core::xci::read_container(src) {
+        Ok(container) => container.files,
+        Err(e) => {
+            let control =
+                switch_core::control::Control::from_nro_source(src).ok_or_else(|| e.to_string())?;
+            return Ok(peeked_title(s, "homebrew", "", &control));
+        }
+    };
+    let mut keys = s.keys.clone();
+    let ncas = switch_core::nca::parse_ncas(&files, src, &keys);
+    for (_, nca) in &ncas {
+        let _ = switch_core::ticket::load_bundled_title_key(&mut keys, nca, &files, src);
+    }
+    if let Some((_, program)) = ncas
+        .iter()
+        .find(|(_, nca)| nca.content_type == ContentType::Program)
+    {
+        if program.is_update() {
+            let version = display_version(&files, &ncas, src, &keys);
+            return Ok(json::object(|o| {
+                o.field("kind", "update")
+                    .field("title_id", format!("{:016x}", program.program_id))
+                    .field("version", version);
+            }));
+        }
+        let title_id = format!("{:016x}", program.program_id);
+        return Ok(match read_control(&files, &ncas, src, &keys) {
+            Some(control) => peeked_title(s, "game", &title_id, &control),
+            None => json::object(|o| {
+                o.field("kind", "game").field("title_id", title_id);
+            }),
+        });
+    }
+    let packs: Vec<u64> = ncas
+        .iter()
+        .filter(|(_, nca)| {
+            matches!(
+                nca.content_type,
+                ContentType::Data | ContentType::PublicData
+            ) && is_add_on_content_id(nca.title_id)
+        })
+        .map(|(_, nca)| nca.title_id)
+        .collect();
+    let first = packs.first().ok_or(
+        "holds no game, update or add-on content (or its headers couldn't be decrypted; load prod.keys)",
+    )?;
+    Ok(json::object(|o| {
+        o.field("kind", "dlc")
+            .field("title_id", format!("{:016x}", first & !0x1FFF));
+        o.array("packs", |a| add_on_content_entries(a, &packs));
+    }))
+}
+
+/// A peeked game or homebrew from its control data, keeping its icon for `switch_peek_icon`.
+fn peeked_title(
+    s: &mut Session,
+    kind: &str,
+    title_id: &str,
+    control: &switch_core::control::Control,
+) -> String {
+    s.peeked_icon = control.icon.clone();
+    json::object(|o| {
+        o.field("kind", kind)
+            .field("title_id", title_id)
+            .field("name", &control.name)
+            .field("publisher", &control.publisher)
+            .field("version", &control.nacp.display_version)
+            .field("icon_mime", control.icon_mime())
+            .field("icon_size", control.icon.len());
+    })
 }
 
 /// Hold the add-on content `src` holds, for the launches of its title: `{ kind, packs }` as

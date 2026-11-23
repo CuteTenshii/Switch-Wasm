@@ -3,7 +3,7 @@ use switch_core::cpu::SaveKey;
 
 use crate::activity::switch_log_activity;
 use crate::boot::switch_launch;
-use crate::container::open_file;
+use crate::container::{open_file, peek, switch_peek_icon};
 use crate::debug::switch_set_trace_channels;
 use crate::log::switch_log_drain;
 use crate::storage::{switch_fs_create_dir, switch_fs_write};
@@ -471,6 +471,89 @@ fn a_launch_finds_the_program_the_open_scanned() {
     open_host_container(image, "empty.nsp").unwrap();
     let text = switch_launch(None).unwrap_err();
     assert!(text.contains("no Program NCA"), "{text}");
+}
+
+/// A peek says what a file holds, by its control data, and leaves the open container be.
+#[test]
+fn a_peek_says_what_a_file_holds_and_leaves_the_open_container_alone() {
+    use switch_core::control::testing::nacp;
+    use switch_core::nca::testing::romfs_nca;
+    use switch_core::nca::{ContentType, ENCRYPTION_AES_CTR_EX, ENCRYPTION_NONE};
+    use switch_core::source::SliceSource;
+
+    const BASE: u64 = 0x0100_BCE0_0059_8000;
+    const ICON: &[u8] = b"\xFF\xD8\xFF\xE0jpeg";
+    let _host = new_session();
+    let key = [0x42u8; 32];
+    session().keys.header_key = Some(key);
+    let romfs = |files: &[(&str, &[u8])]| switch_core::romfs::build(files).unwrap();
+    let control = |version: &str| {
+        let nacp = nacp("Just Dance 2017", "Ubisoft", version);
+        let image = romfs(&[("control.nacp", &nacp), ("icon_AmericanEnglish.dat", ICON)]);
+        romfs_nca(&key, ContentType::Control, BASE, &image, ENCRYPTION_NONE)
+    };
+    let program = |encryption: u8| {
+        romfs_nca(
+            &key,
+            ContentType::Program,
+            BASE,
+            &romfs(&[("data", b"x")]),
+            encryption,
+        )
+    };
+    open_host_container(build_nsp(&[("notes.txt", b"hello")]), "open.nsp").unwrap();
+
+    let game = build_nsp(&[
+        ("program.nca", &program(ENCRYPTION_NONE)),
+        ("control.nca", &control("1.0.0")),
+    ]);
+    assert_eq!(
+        peek(session(), &SliceSource(&game)).unwrap(),
+        r#"{"kind":"game","title_id":"0100bce000598000","name":"Just Dance 2017","publisher":"Ubisoft","version":"1.0.0","icon_mime":"image/jpeg","icon_size":8}"#
+    );
+    assert_eq!(switch_peek_icon(), ICON);
+    assert!(switch_peek_icon().is_empty());
+
+    let update = build_nsp(&[
+        ("program.nca", &program(ENCRYPTION_AES_CTR_EX)),
+        ("control.nca", &control("1.0.1")),
+    ]);
+    assert_eq!(
+        peek(session(), &SliceSource(&update)).unwrap(),
+        r#"{"kind":"update","title_id":"0100bce000598000","version":"1.0.1"}"#
+    );
+
+    let pack = romfs_nca(
+        &key,
+        ContentType::Data,
+        BASE + 0x1001,
+        &romfs(&[("song", b"x")]),
+        ENCRYPTION_NONE,
+    );
+    let dlc = build_nsp(&[("pack.nca", &pack)]);
+    assert_eq!(
+        peek(session(), &SliceSource(&dlc)).unwrap(),
+        r#"{"kind":"dlc","title_id":"0100bce000598000","packs":[{"id":"0100bce000599001","title_id":"0100bce000598000","index":1}]}"#
+    );
+
+    let nro = switch_core::nro::testing::with_assets(
+        ICON,
+        &nacp("NX-Shell", "DefenderOfHyrule", "4.0.2"),
+    );
+    assert_eq!(
+        peek(session(), &SliceSource(&nro)).unwrap(),
+        r#"{"kind":"homebrew","title_id":"","name":"NX-Shell","publisher":"DefenderOfHyrule","version":"4.0.2","icon_mime":"image/jpeg","icon_size":8}"#
+    );
+
+    let text = peek(session(), &SliceSource(&[b'x'; 0x400])).unwrap_err();
+    assert!(text.contains("magic"), "{text}");
+    session().keys.header_key = None;
+    let text = peek(session(), &SliceSource(&game)).unwrap_err();
+    assert!(text.contains("load prod.keys"), "{text}");
+
+    // The container opened before is still the one open, with nothing held for it.
+    assert_eq!(read_nsp_file(0, 0, 5), b"hello");
+    assert!(session().update.is_none() && session().dlc.is_empty());
 }
 
 /// A cartridge image opens through the same entry point as an `.nsp`.

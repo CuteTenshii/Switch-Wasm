@@ -2,7 +2,7 @@
 
 import type {
   CommandHandlers, ControlData, ControlInfo, GpuReport, JitStats, MemoryReport, NandIdentity, NcaInfo,
-  OpenedContainer,
+  OpenedContainer, PeekedTitle,
 } from '../shared/protocol';
 import { noteRegistered } from './activity';
 import { flushLog } from './log';
@@ -16,7 +16,7 @@ import {
   switch_net_connect,
   switch_net_connections_json, switch_net_disconnect, switch_net_status_json, switch_next_load,
   switch_open_nca,
-  switch_inspect_nca, switch_open_container, switch_reg_dump, switch_restore_nand, switch_restore_storage, switch_run,
+  switch_inspect_nca, switch_open_container, switch_peek_icon, switch_peek_title, switch_reg_dump, switch_restore_nand, switch_restore_storage, switch_run,
   switch_set_battery, switch_set_jit, switch_set_operation_mode, switch_set_touch,
   switch_set_trace, switch_set_trace_channels, switch_store_profile_edits, switch_thread_dump,
   switch_user_stage, switch_users_commit,
@@ -57,6 +57,11 @@ export const CMD = {
   // The File is kept and read by range.
   openContainer(file) {
     return JSON.parse(switch_open_container(file, file.name)) as OpenedContainer;
+  },
+  peekTitle(file) {
+    const title = JSON.parse(switch_peek_title(file)) as PeekedTitle;
+    const icon = switch_peek_icon();
+    return { title, icon: icon.length ? icon : null };
   },
   openNca(file) {
     return switch_open_nca(file, file.name);
