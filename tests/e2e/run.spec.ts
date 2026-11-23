@@ -88,9 +88,9 @@ test('a guest crash says why and offers the log, the console and Stop', async ({
   await bootElf(page, aarch64Elf([...ASM.unmappedRead]), 'fault');
 
   await expect(crash.getByRole('heading')).toHaveText('Guest crashed');
-  await expect(crash.locator('#crash-message')).toHaveText('CPU: read from unmapped address 0xfff00000');
+  await expect(crash.locator('#crash-message')).toHaveText('CPU: read from unmapped address 0x00001000');
   await expect(page.locator('#console .error', {
-    hasText: 'Fault: CPU: read from unmapped address 0xfff00000',
+    hasText: 'Fault: CPU: read from unmapped address 0x00001000',
   })).toHaveCount(1);
 
   const download = page.waitForEvent('download');

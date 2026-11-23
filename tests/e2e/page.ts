@@ -87,6 +87,6 @@ export const ASM = {
   exitProcess: 0xd40000e1,
   // svc #0x29 (GetInfo)
   getInfo: 0xd4000521,
-  // movz x1, #0xfff0, lsl #16; ldr x0, [x1]: a read above the guest address space.
-  unmappedRead: [0xd2bffe01, 0xf9400020],
+  // movz x1, #0x1000; ldr x0, [x1]: a read below the guest address space, where a NULL lands.
+  unmappedRead: [0xd2820001, 0xf9400020],
 } as const;
