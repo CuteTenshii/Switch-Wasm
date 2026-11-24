@@ -35,13 +35,15 @@ impl Gpu {
         let target_format = target.map(|(format, _)| format);
         // A blend the device cannot do must fall back here; a rejected pipeline silently draws nothing.
         let features = self.features();
+        let constant = p.state.blend_constant;
         let blendable = |(format, widen): (wgpu::TextureFormat, Widen),
                          blend: Option<state::Blend>|
          -> std::result::Result<(), String> {
-            if blend.is_none() {
+            let Some(blend) = blend else {
                 return Ok(());
-            }
-            if widen == Widen::Unorm16 {
+            };
+            // A blend that cannot leave [0, 1] needs no clamp, which a float stand-in lacks.
+            if widen == Widen::Unorm16 && !blend.stays_in_unit_range(constant) {
                 return Err(format!(
                     "blending into a 16-bit unorm target held as {format:?}, which would not \
                      clamp as the surface does"

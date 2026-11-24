@@ -359,6 +359,53 @@ pub struct Blend {
     pub alpha: BlendComponent,
 }
 
+impl BlendComponent {
+    /// Whether the result stays within `[0, 1]` for a source and destination already there,
+    /// `constant` being the blend constant's channels this component reads.
+    fn stays_in_unit_range(&self, constant: &[f32]) -> bool {
+        use BlendFactor::*;
+        let constant_in_range = constant.iter().all(|c| (0.0..=1.0).contains(c));
+        let in_range = |factor: BlendFactor| match factor {
+            Constant | OneMinusConstant => constant_in_range,
+            _ => true,
+        };
+        if !in_range(self.src_factor) || !in_range(self.dst_factor) {
+            return false;
+        }
+        // Factors summing to one weigh the two terms into a mix of them.
+        let complements = matches!(
+            (self.src_factor, self.dst_factor),
+            (Src, OneMinusSrc)
+                | (OneMinusSrc, Src)
+                | (SrcAlpha, OneMinusSrcAlpha)
+                | (OneMinusSrcAlpha, SrcAlpha)
+                | (Dst, OneMinusDst)
+                | (OneMinusDst, Dst)
+                | (DstAlpha, OneMinusDstAlpha)
+                | (OneMinusDstAlpha, DstAlpha)
+                | (Constant, OneMinusConstant)
+                | (OneMinusConstant, Constant)
+        );
+        match self.operation {
+            BlendOperation::Min | BlendOperation::Max => true,
+            BlendOperation::Add => {
+                complements || self.src_factor == Zero || self.dst_factor == Zero
+            }
+            BlendOperation::Subtract => self.dst_factor == Zero,
+            BlendOperation::ReverseSubtract => self.src_factor == Zero,
+        }
+    }
+}
+
+impl Blend {
+    /// Whether every channel stays within `[0, 1]` for a source and destination already there:
+    /// blending into a float surface standing in for a unorm one then needs no clamp.
+    pub fn stays_in_unit_range(&self, constant: [f32; 4]) -> bool {
+        self.color.stays_in_unit_range(&constant[..3])
+            && self.alpha.stays_in_unit_range(&constant[3..])
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ColorTarget {
     pub format: Format,
@@ -943,6 +990,56 @@ fn step_mode(array: VertexArray) -> Result<StepMode, Unsupported> {
 
 #[cfg(test)]
 mod tests {
+    use super::{Blend, BlendComponent, BlendFactor, BlendOperation};
+
+    fn component(
+        src_factor: BlendFactor,
+        dst_factor: BlendFactor,
+        operation: BlendOperation,
+    ) -> BlendComponent {
+        BlendComponent {
+            src_factor,
+            dst_factor,
+            operation,
+        }
+    }
+
+    fn both(c: BlendComponent) -> Blend {
+        Blend { color: c, alpha: c }
+    }
+
+    /// Breath of the Wild's `R16G16B16A16_UNORM` probes blend a constant alpha against its
+    /// complement, which a float stand-in can do without the clamp.
+    #[test]
+    fn a_constant_mix_stays_in_range_while_its_constant_does() {
+        use BlendFactor::*;
+        let mix = both(component(Constant, OneMinusConstant, BlendOperation::Add));
+        assert!(mix.stays_in_unit_range([0.25; 4]));
+        assert!(!mix.stays_in_unit_range([1.5; 4]));
+        assert!(!mix.stays_in_unit_range([-0.5; 4]));
+    }
+
+    #[test]
+    fn adding_both_terms_whole_leaves_the_range() {
+        use BlendFactor::*;
+        assert!(!both(component(One, One, BlendOperation::Add)).stays_in_unit_range([0.0; 4]));
+        assert!(both(component(One, Zero, BlendOperation::Add)).stays_in_unit_range([0.0; 4]));
+        assert!(
+            both(component(SrcAlpha, OneMinusSrcAlpha, BlendOperation::Add))
+                .stays_in_unit_range([0.0; 4])
+        );
+    }
+
+    #[test]
+    fn subtracting_stays_in_range_only_with_nothing_taken_away() {
+        use BlendFactor::*;
+        assert!(!both(component(One, One, BlendOperation::Subtract)).stays_in_unit_range([0.0; 4]));
+        assert!(both(component(One, Zero, BlendOperation::Subtract)).stays_in_unit_range([0.0; 4]));
+        assert!(both(component(Zero, One, BlendOperation::ReverseSubtract))
+            .stays_in_unit_range([0.0; 4]));
+        assert!(both(component(One, One, BlendOperation::Max)).stays_in_unit_range([0.0; 4]));
+    }
+
     use super::*;
 
     #[test]
