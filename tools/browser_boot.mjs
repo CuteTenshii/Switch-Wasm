@@ -496,6 +496,9 @@ try {
     try {
       await openDebugTab();
       await page.getByRole('button', { name: 'Graphics' }).click();
+      // The worker answers between run slices, which a slow title stretches to seconds.
+      await page.locator('#render-debug-data').waitFor({ state: 'visible', timeout: 60_000 })
+        .catch(() => say('the Rendering section had no device report after 60 s'));
       await page.waitForTimeout(3000);
       rendering = await page.locator('#render-debug-section').innerText();
       rendering += `\n${await page.locator('#display-debug-section').innerText()}`;
