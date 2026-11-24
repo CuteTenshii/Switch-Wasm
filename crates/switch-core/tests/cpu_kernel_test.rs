@@ -3,6 +3,7 @@
 mod cpu;
 
 use cpu::*;
+use switch_core::npdm::AddressSpaceType;
 
 #[test]
 fn bootstrap_provides_stack_and_low_memory() {
@@ -177,6 +178,27 @@ fn horizon_query_memory_and_get_info() {
             expected,
             "InfoType {info_type} with a system resource"
         );
+    }
+
+    // A 36-bit title is told regions that end below 2^36.
+    use switch_core::cpu::{
+        NARROW_ALIAS_REGION_ADDR, NARROW_ALIAS_REGION_SIZE, NARROW_HEAP_REGION_ADDR,
+        NARROW_HEAP_REGION_SIZE,
+    };
+    for (info_type, expected) in [
+        (2u64, NARROW_ALIAS_REGION_ADDR),
+        (3, NARROW_ALIAS_REGION_SIZE),
+        (4, NARROW_HEAP_REGION_ADDR),
+        (5, NARROW_HEAP_REGION_SIZE),
+    ] {
+        let mut cpu = cpu_at(0x1000);
+        cpu.set_address_space(AddressSpaceType::Bits36);
+        cpu.set_reg(1, info_type);
+        cpu.set_reg(2, 0xffff_8001);
+        cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
+        cpu.run(1).unwrap();
+        assert_eq!(cpu.read_x(0), 0);
+        assert_eq!(cpu.read_x(1), expected, "InfoType {info_type} in 36 bits");
     }
 
     // InfoType 12 = AslrRegionAddress.
@@ -1126,8 +1148,11 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     assert!(APPLET_TOTAL_MEMORY_SIZE <= GUEST_TOTAL_MEMORY_SIZE);
 
     // What a process gets, by its instruction set, program and system resource.
-    assert_eq!(MemoryLayout::for_process(true, 0, 0), wide);
-    let vamm = MemoryLayout::for_process(true, 0, 0x0100_0000);
+    assert_eq!(
+        MemoryLayout::for_process(true, AddressSpaceType::Bits39, 0, 0),
+        wide
+    );
+    let vamm = MemoryLayout::for_process(true, AddressSpaceType::Bits39, 0, 0x0100_0000);
     assert_eq!(vamm.system_resource, 0x0100_0000, "the NPDM's, as declared");
     assert_eq!(
         MemoryLayout {
@@ -1138,17 +1163,49 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
         "a system resource changes nothing else"
     );
     // `LibAppletWeb`, a library applet.
-    let applet = MemoryLayout::for_process(true, 0x0100_0000_0000_1010, 0x0100_0000);
+    let applet = MemoryLayout::for_process(
+        true,
+        AddressSpaceType::Bits39,
+        0x0100_0000_0000_1010,
+        0x0100_0000,
+    );
     assert_eq!(applet.total_memory, APPLET_TOTAL_MEMORY_SIZE);
     assert_eq!(applet.heap_addr, wide.heap_addr);
 
-    let low = MemoryLayout::for_process(false, 0, 0);
+    // A 36-bit process's regions sit between everything below 4 GiB and 2^36, which its
+    // `nnSdk` cannot describe an IPC buffer past (Breath of the Wild 1.0.0).
+    let narrow = MemoryLayout::for_process(true, AddressSpaceType::Bits36, 0, 0);
+    assert_eq!(narrow, MemoryLayout::NARROW);
+    assert_eq!(narrow.space_end, 1 << 36);
+    assert!(narrow.heap_addr >= 1 << 32);
+    assert!(narrow.heap_addr + narrow.heap_size <= narrow.alias_addr);
+    assert!(narrow.alias_addr + narrow.alias_size <= narrow.space_end);
+    assert!(GUEST_TOTAL_MEMORY_SIZE <= narrow.heap_size);
+    assert_eq!(
+        MemoryLayout::for_process(true, AddressSpaceType::Bits36, 0x0100_0000_0000_1010, 0)
+            .total_memory,
+        APPLET_TOTAL_MEMORY_SIZE
+    );
+    // The type matters only to a 64-bit process.
+    for address_space in [
+        AddressSpaceType::Bits32,
+        AddressSpaceType::Bits36,
+        AddressSpaceType::Bits39,
+    ] {
+        assert_eq!(
+            MemoryLayout::for_process(false, address_space, 0, 0),
+            MemoryLayout::LOW
+        );
+    }
+
+    let low = MemoryLayout::for_process(false, AddressSpaceType::Bits32NoReserved, 0, 0);
     assert_eq!(low, MemoryLayout::LOW);
     assert_eq!(
         low.system_resource, 0,
         "zero is what keeps a title off Vamm"
     );
-    let low_vamm = MemoryLayout::for_process(false, 0, 0x0100_0000);
+    let low_vamm =
+        MemoryLayout::for_process(false, AddressSpaceType::Bits32NoReserved, 0, 0x0100_0000);
     assert_eq!(
         MemoryLayout {
             system_resource: 0,

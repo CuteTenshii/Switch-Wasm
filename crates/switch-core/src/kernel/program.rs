@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use crate::cpu::*;
 use crate::nca::Nca;
-use crate::npdm::Npdm;
+use crate::npdm::{AddressSpaceType, Npdm};
 use crate::nsp::Pfs0;
 use crate::source::ByteSource;
 use crate::trace::Level;
@@ -48,6 +48,10 @@ impl Program {
 
     pub fn is_64_bit(&self) -> bool {
         Npdm::is_64_bit_of(&self.pfs0, &self.exefs)
+    }
+
+    pub fn address_space(&self) -> AddressSpaceType {
+        Npdm::address_space_of(&self.pfs0, &self.exefs)
     }
 
     pub fn system_resource_size(&self) -> u32 {
@@ -100,6 +104,7 @@ impl Cpu {
         }
         self.set_program_id(program.program_id);
         self.set_64_bit(program.is_64_bit());
+        self.set_address_space(program.address_space());
         let system_resource = program.system_resource_size();
         self.log(
             Level::Debug,

@@ -127,6 +127,7 @@ mod tests {
     fn the_regions_of_every_layout_do_not_overlap() {
         for layout in [
             MemoryLayout::WIDE,
+            MemoryLayout::NARROW,
             MemoryLayout::LOW,
             MemoryLayout::LOW_VAMM,
         ] {

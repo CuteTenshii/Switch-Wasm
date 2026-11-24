@@ -117,7 +117,7 @@ Section headings are paths under `crates/switch-core/src/`; a heading that start
 
 ## `npdm.rs`
 
-- `system_resource_size` is what `svcGetInfo` reports as `SystemResourceSizeTotal`, which puts `nnSdk` on its Vamm manager when nonzero: Just Dance 2019 declares 0 (plain heap), Just Dance 2023 16 MiB. For a 32-bit title it also picks the layout ([kernel.md](kernel.md)). The NPDM's `Is64BitInstruction` flag picks between the 39-bit and 32-bit layouts.
+- `system_resource_size` is what `svcGetInfo` reports as `SystemResourceSizeTotal`, which puts `nnSdk` on its Vamm manager when nonzero: Just Dance 2019 declares 0 (plain heap), Just Dance 2023 16 MiB. For a 32-bit title it also picks the layout ([kernel.md](kernel.md)). The NPDM's `Is64BitInstruction` flag picks between the 64-bit and 32-bit layouts, and for a 64-bit title the address-space type (flags bits 1:3) picks between the 39-bit and 36-bit ones: Breath of the Wild 1.0.0 declares type 1, the 36-bit space.
 - Mario Kart 8 Deluxe (`0100152000022000`) is AArch32: its `rtld` opens with `b #+8`, which decodes as `ANDS x0, x0, x0` in A64 and then runs the `MOD0` offset word.
 - A system applet like Data Erase gets core 3 alone; refusing it that core panics.
 - Missing NPDM means 64-bit (homebrew NROs have none).

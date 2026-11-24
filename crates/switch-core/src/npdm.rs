@@ -2,6 +2,7 @@
 //!
 //! `system_resource_size` selects [`crate::cpu::MemoryLayout`]: non-zero means
 //! virtual address memory via `nn::os::detail::VammManager`, zero the plain heap.
+//! So does the address-space type: a 36-bit title's regions must end below 2^36.
 //!
 //! META header (offsets from the start of the file):
 //!
@@ -32,10 +33,36 @@ const ACI0_MAGIC: u32 = 0x3049_4341; // "ACI0", little-endian
 /// The fallback core mask: cores 0 to 2, as retail applications get. Core 3 is the system's.
 pub const APPLICATION_CORE_MASK: u64 = 0b0111;
 
+/// The META flags' address-space type (bits 1:3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressSpaceType {
+    /// `AddressSpace32Bit`.
+    Bits32,
+    /// `AddressSpace64BitOld`: early titles (Breath of the Wild 1.0.0). Their `nnSdk` packs
+    /// only 36 address bits into IPC buffer descriptors.
+    Bits36,
+    /// `AddressSpace32BitNoReserved` (Mario Kart 8 Deluxe).
+    Bits32NoReserved,
+    /// `AddressSpace64Bit`, and what a manifest with a reserved value gets.
+    Bits39,
+}
+
+impl AddressSpaceType {
+    pub fn from_flags(flags: u8) -> AddressSpaceType {
+        match (flags >> 1) & 7 {
+            0 => AddressSpaceType::Bits32,
+            1 => AddressSpaceType::Bits36,
+            2 => AddressSpaceType::Bits32NoReserved,
+            _ => AddressSpaceType::Bits39,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Npdm {
     /// Whether the process runs in AArch64 (Mario Kart 8 Deluxe does not).
     pub is_64_bit: bool,
+    pub address_space: AddressSpaceType,
     /// The kernel's per-process reservation; non-zero means virtual address
     /// memory, and `svcGetInfo` must report the same figure.
     pub system_resource_size: u32,
@@ -74,6 +101,7 @@ impl Npdm {
             .unwrap_or(name_bytes.len());
         Ok(Npdm {
             is_64_bit: data[0x0C] & 1 != 0,
+            address_space: AddressSpaceType::from_flags(data[0x0C]),
             system_resource_size: crate::nsp::read_u32(data, 0x14),
             main_thread_priority: data[0x0E],
             main_thread_core: data[0x0F],
@@ -86,6 +114,13 @@ impl Npdm {
     /// Whether an ExeFS's `main.npdm` declares AArch64; missing or unreadable means yes.
     pub fn is_64_bit_of(exefs: &crate::nsp::Pfs0, data: &[u8]) -> bool {
         Npdm::of(exefs, data).map(|n| n.is_64_bit).unwrap_or(true)
+    }
+
+    /// A missing or unreadable manifest means the 39-bit space.
+    pub fn address_space_of(exefs: &crate::nsp::Pfs0, data: &[u8]) -> AddressSpaceType {
+        Npdm::of(exefs, data)
+            .map(|n| n.address_space)
+            .unwrap_or(AddressSpaceType::Bits39)
     }
 
     pub fn of(exefs: &crate::nsp::Pfs0, data: &[u8]) -> Option<Npdm> {
@@ -208,6 +243,7 @@ mod tests {
     fn parses_a_manifest() {
         let parsed = Npdm::parse(&npdm(0x0100_0000)).unwrap();
         assert!(parsed.is_64_bit);
+        assert_eq!(parsed.address_space, AddressSpaceType::Bits39);
         assert_eq!(parsed.system_resource_size, 0x0100_0000);
         assert_eq!(parsed.main_thread_priority, 0x2C);
         assert_eq!(parsed.main_thread_core, 1);
@@ -226,7 +262,37 @@ mod tests {
     fn a_thirty_two_bit_title_says_so_in_bit_zero() {
         let mut data = npdm(0);
         data[0x0C] = 0x04;
-        assert!(!Npdm::parse(&data).unwrap().is_64_bit);
+        let parsed = Npdm::parse(&data).unwrap();
+        assert!(!parsed.is_64_bit);
+        assert_eq!(parsed.address_space, AddressSpaceType::Bits32NoReserved);
+    }
+
+    /// Breath of the Wild 1.0.0's flags byte: A64 code in the 36-bit space.
+    #[test]
+    fn an_early_title_declares_the_36_bit_space() {
+        let mut data = npdm(0);
+        data[0x0C] = 0x03;
+        let parsed = Npdm::parse(&data).unwrap();
+        assert!(parsed.is_64_bit);
+        assert_eq!(parsed.address_space, AddressSpaceType::Bits36);
+    }
+
+    #[test]
+    fn every_address_space_type_decodes() {
+        let types = (0u8..8).map(|t| AddressSpaceType::from_flags(t << 1 | 1));
+        assert_eq!(
+            types.collect::<Vec<_>>(),
+            [
+                AddressSpaceType::Bits32,
+                AddressSpaceType::Bits36,
+                AddressSpaceType::Bits32NoReserved,
+                AddressSpaceType::Bits39,
+                AddressSpaceType::Bits39,
+                AddressSpaceType::Bits39,
+                AddressSpaceType::Bits39,
+                AddressSpaceType::Bits39,
+            ]
+        );
     }
 
     #[test]

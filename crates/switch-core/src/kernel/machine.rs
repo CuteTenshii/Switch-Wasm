@@ -1,6 +1,7 @@
 //! Host-configured machine state.
 
 use crate::cpu::*;
+use crate::npdm::AddressSpaceType;
 use crate::services::fs;
 
 impl Cpu {
@@ -51,11 +52,18 @@ impl Cpu {
         self.refresh_memory_layout();
     }
 
-    /// Re-choose the layout from the instruction set, program id and system resource size,
-    /// set in any order, and soft-map the space it ends at.
+    /// Set the NPDM's address-space type, which narrows a 64-bit program's [`MemoryLayout`].
+    pub fn set_address_space(&mut self, address_space: AddressSpaceType) {
+        self.process_mut().address_space = address_space;
+        self.refresh_memory_layout();
+    }
+
+    /// Re-choose the layout from the instruction set, address-space type, program id and
+    /// system resource size, set in any order, and soft-map the space it ends at.
     pub(crate) fn refresh_memory_layout(&mut self) {
         let layout = MemoryLayout::for_process(
             self.process().is_64_bit,
+            self.process().address_space,
             self.process().program_id,
             self.process().system_resource_size,
         );

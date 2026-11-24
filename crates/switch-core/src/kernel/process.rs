@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::cpu::*;
 use crate::mem::AddressSpace;
+use crate::npdm::AddressSpaceType;
 use crate::services::*;
 use crate::trace::Level;
 use crate::IdMap;
@@ -58,6 +59,8 @@ pub(crate) struct Process {
     pub(crate) system_resource_size: u32,
     /// Whether the program runs A64 code; a 32-bit one has a 4 GiB address space.
     pub(crate) is_64_bit: bool,
+    /// The NPDM's; a 64-bit program's is 36 or 39 bits wide.
+    pub(crate) address_space: AddressSpaceType,
     /// Application proxy (told `FocusStateChanged`) vs applet (told `ChangeIntoForeground`).
     pub(crate) applet_is_application: bool,
     /// `ISelfController` auto-sleep settings, stored so getters read them back.
@@ -188,6 +191,7 @@ impl Process {
             memory_layout: MemoryLayout::WIDE,
             system_resource_size: 0,
             is_64_bit: true,
+            address_space: AddressSpaceType::Bits39,
             in_focus: true,
             applet_focus_announced: false,
             applet_is_application: true,

@@ -1,6 +1,7 @@
 //! Guest address space layout and operation modes.
 
 use crate::mem::ADDRESS_SPACE_SIZE;
+use crate::npdm::AddressSpaceType;
 
 /// Host-provided stack for [`Cpu::bootstrap`]: 1 MiB full-descending, top at `STACK_TOP`,
 /// between the ASLR region and the heap.
@@ -137,6 +138,15 @@ pub const ALIAS_REGION_ADDR: u64 = 0x20_0000_0000;
 pub const ALIAS_REGION_SIZE: u64 = 0x10_0000_0000;
 const _: () = assert!(ALIAS_REGION_ADDR + ALIAS_REGION_SIZE <= ADDRESS_SPACE_SIZE);
 
+/// A 36-bit process's heap and alias regions, at Horizon's 36-bit sizes. Its `nnSdk` drops
+/// address bits above 35 when it describes IPC buffers, so nothing it is given may lie higher.
+pub const NARROW_HEAP_REGION_ADDR: u64 = 0x1_0000_0000;
+pub const NARROW_HEAP_REGION_SIZE: u64 = 0x1_8000_0000;
+pub const NARROW_ALIAS_REGION_ADDR: u64 = 0x4_0000_0000;
+pub const NARROW_ALIAS_REGION_SIZE: u64 = 0x1_8000_0000;
+pub const NARROW_SPACE_END: u64 = 1 << 36;
+const _: () = assert!(NARROW_ALIAS_REGION_ADDR + NARROW_ALIAS_REGION_SIZE <= NARROW_SPACE_END);
+
 /// `svcGetInfo`'s total memory for an application, which `nn::init` sizes its heap from: about
 /// the 3.2 GiB a console gives. Titles size pools from hardcoded constants (Just Dance 2019's
 /// 699 MiB graphics pool), so less than a console's fails their allocations.
@@ -163,7 +173,7 @@ pub struct MemoryLayout {
 }
 
 impl MemoryLayout {
-    /// A 64-bit process's, before its total memory and system resource are known.
+    /// A 39-bit process's, before its total memory and system resource are known.
     pub const WIDE: MemoryLayout = MemoryLayout {
         heap_addr: HEAP_REGION_ADDR,
         heap_size: HEAP_REGION_SIZE,
@@ -172,6 +182,17 @@ impl MemoryLayout {
         total_memory: GUEST_TOTAL_MEMORY_SIZE,
         system_resource: 0,
         space_end: ADDRESS_SPACE_SIZE,
+    };
+
+    /// A 36-bit process's, before its total memory and system resource are known.
+    pub const NARROW: MemoryLayout = MemoryLayout {
+        heap_addr: NARROW_HEAP_REGION_ADDR,
+        heap_size: NARROW_HEAP_REGION_SIZE,
+        alias_addr: NARROW_ALIAS_REGION_ADDR,
+        alias_size: NARROW_ALIAS_REGION_SIZE,
+        total_memory: GUEST_TOTAL_MEMORY_SIZE,
+        system_resource: 0,
+        space_end: NARROW_SPACE_END,
     };
 
     /// A 32-bit process's on the heap route.
@@ -196,12 +217,19 @@ impl MemoryLayout {
         space_end: GUEST_SPACE_END as u64,
     };
 
-    /// The layout of a process: 64-bit or not, which program, and the NPDM's system resource.
-    pub fn for_process(is_64_bit: bool, program_id: u64, system_resource: u32) -> MemoryLayout {
-        let base = match (is_64_bit, system_resource) {
-            (true, _) => MemoryLayout::WIDE,
-            (false, 0) => MemoryLayout::LOW,
-            (false, _) => MemoryLayout::LOW_VAMM,
+    /// The layout of a process: 64-bit or not, its NPDM address-space type, which program,
+    /// and the NPDM's system resource. A 32-bit process's address-space type changes nothing.
+    pub fn for_process(
+        is_64_bit: bool,
+        address_space: AddressSpaceType,
+        program_id: u64,
+        system_resource: u32,
+    ) -> MemoryLayout {
+        let base = match (is_64_bit, address_space, system_resource) {
+            (true, AddressSpaceType::Bits36, _) => MemoryLayout::NARROW,
+            (true, _, _) => MemoryLayout::WIDE,
+            (false, _, 0) => MemoryLayout::LOW,
+            (false, _, _) => MemoryLayout::LOW_VAMM,
         };
         let total_memory = if is_64_bit && crate::services::am::is_library_applet(program_id) {
             APPLET_TOTAL_MEMORY_SIZE
