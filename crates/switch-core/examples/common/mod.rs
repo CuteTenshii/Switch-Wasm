@@ -30,6 +30,9 @@ pub struct Shared {
     /// Trace channels to switch on (`svc`, `ipc`, ...).
     #[arg(long, value_delimiter = ',', value_parser = channel)]
     trace: Vec<Trace>,
+    /// Leave `--trace` off until this presented frame, to trace a late scene with its history drawn.
+    #[arg(long, value_name = "N")]
+    trace_from_frame: Option<u64>,
     /// Run the interpreter only.
     #[arg(long)]
     no_jit: bool,
@@ -181,7 +184,9 @@ pub fn parse<C: Parser>(groups_of: impl FnOnce(&C) -> Flags) -> C {
     if flags.report.dump_wgsl.is_some() && !channels.contains(&Trace::Wgsl) {
         channels.push(Trace::Wgsl);
     }
-    switch_core::trace::set_mask(&channels);
+    if flags.shared.trace_from_frame.is_none() {
+        switch_core::trace::set_mask(&channels);
+    }
     switch_core::dump::install(Box::new(DumpDirs {
         texture: flags.report.dump_tex.clone(),
         raster_wgsl: flags.report.dump_wgsl.clone(),
@@ -855,8 +860,13 @@ pub fn drive(
     let mut run = Run::default();
     let mut frames = FrameTimes::new(cpu);
     let mut player = PLAYER.take();
+    let mut trace_from = flags().shared.trace_from_frame;
     while run.steps < budget && !cpu.halted {
         frames.sample(cpu);
+        if trace_from.is_some_and(|from| cpu.nv.gpu.frames >= from) {
+            trace_from = None;
+            switch_core::trace::set_mask(&flags().shared.trace);
+        }
         if let Some(player) = player.as_mut() {
             if let Some(gate) = player.gate.as_mut() {
                 gate.tick(cpu);
