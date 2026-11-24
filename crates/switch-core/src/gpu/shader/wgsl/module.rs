@@ -1089,16 +1089,26 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
             .find(|(t, _)| *t == target)
             .map(|&(_, max)| max);
         let uint = max.is_some();
+        // Mapped as `raster` maps it; a headerless program's colours are `r0` onward in fours.
+        let header = translated.header.filter(|h| h.writes_any_color());
         let components: Vec<String> = (0..4)
             .map(|c| {
-                let reg = (target * 4 + c) as u8;
-                match (translated.registers.contains(&reg), max) {
-                    (true, Some(u32::MAX)) => format!("r{reg}"),
-                    (true, Some(max)) => format!("min(r{reg}, {max:#x}u)"),
-                    (true, None) => format!("bitcast<f32>(r{reg})"),
-                    // An unwritten channel is zero.
-                    (false, Some(_)) => "0u".to_string(),
-                    (false, None) => "0.0".to_string(),
+                let reg = match header {
+                    Some(header) => header.fragment_output_reg(target, c),
+                    None => Some((target * 4 + c) as u8),
+                };
+                match (reg, max) {
+                    // A component the header leaves out: colour zero, alpha opaque.
+                    (None, Some(_)) => format!("{}u", u32::from(c == 3)),
+                    (None, None) => format!("{:?}", f32::from(u8::from(c == 3))),
+                    (Some(reg), _) if !translated.registers.contains(&reg) => match max {
+                        // A register the program never writes is zero.
+                        Some(_) => "0u".to_string(),
+                        None => "0.0".to_string(),
+                    },
+                    (Some(reg), Some(u32::MAX)) => format!("r{reg}"),
+                    (Some(reg), Some(max)) => format!("min(r{reg}, {max:#x}u)"),
+                    (Some(reg), None) => format!("bitcast<f32>(r{reg})"),
                 }
             })
             .collect();

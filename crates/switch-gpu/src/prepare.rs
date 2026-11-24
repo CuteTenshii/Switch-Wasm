@@ -40,38 +40,6 @@ impl Gpu {
             .target
             .is_some_and(|t| t.write_mask.iter().all(|&on| !on));
         let color = color.filter(|_| !(masked && depth.is_some()));
-        // Attachments must match in size, so the pass covers the intersection. A depth surface is
-        // cropped along each axis it is larger; a colour target larger along either draws into a
-        // scratch texture copied back afterwards.
-        let mut depth = depth;
-        let mut color_scratch = None;
-        if let (Some(full_color), Some(full_depth)) = (color, depth) {
-            let (cw, ch) = (full_color.width, full_color.height);
-            let (dw, dh) = (full_depth.width, full_depth.height);
-            if dw >= cw && dh >= ch {
-                depth = Some(crate::crop_depth(full_depth, Some(full_color)));
-            } else {
-                let (width, height) = (cw.min(dw), ch.min(dh));
-                depth = Some(crate::crop_depth(full_depth, Some(full_color)));
-                color_scratch = Some((width, height));
-                // The scissor is confined to the depth surface only for draws that reach it.
-                let (pixels_x, pixels_y) = state.grid.pixels(width, height);
-                state.scissor.x1 = state.scissor.x1.min(pixels_x);
-                state.scissor.y1 = state.scissor.y1.min(pixels_y);
-                state.scissor.x0 = state.scissor.x0.min(state.scissor.x1);
-                state.scissor.y0 = state.scissor.y0.min(state.scissor.y1);
-            }
-        }
-        if color.is_none() && depth.is_none() {
-            return Err("a draw into neither a colour nor a depth surface".into());
-        }
-        let render = self.route(&state, color, depth)?;
-        if color_scratch.is_some() && matches!(render, Render::Companion(_)) {
-            return Err(
-                "a colour target larger than its depth surface, drawn through a multisample companion"
-                    .into(),
-            );
-        }
 
         // Unfolded, so a module depends only on the shader binary.
         let vs = timed!(
@@ -85,10 +53,77 @@ impl Gpu {
             self.translate(engine, ctx, ShaderStage::Fragment)
         );
         let ((vs, vs_serial), (fs, fs_serial)) = (vs?, fs?);
+        let extra_colors = extra_attachments(engine, &state, &fs)?;
+        let extras = extra_colors.iter().any(Option::is_some);
+        // The first attached colour sets the pass's size, which every other one must have.
+        let sizing = color.or_else(|| extra_colors.iter().flatten().next().copied());
+        if let Some(sizing) = sizing {
+            if let Some(other) = std::iter::once(color)
+                .chain(extra_colors.iter().copied())
+                .flatten()
+                .find(|t| (t.width, t.height) != (sizing.width, sizing.height))
+            {
+                return Err(format!(
+                    "colour outputs of different sizes, {}x{} at {:#x} beside {}x{} at {:#x}",
+                    other.width, other.height, other.addr, sizing.width, sizing.height, sizing.addr
+                ));
+            }
+        }
+        // WebGPU refuses one texture attached twice to a pass.
+        let attached: Vec<u64> = std::iter::once(color)
+            .chain(extra_colors.iter().copied())
+            .chain(std::iter::once(depth))
+            .flatten()
+            .map(|t| t.addr)
+            .collect();
+        for (at, addr) in attached.iter().enumerate() {
+            if attached[at + 1..].contains(addr) {
+                return Err(format!("one surface at {addr:#x} attached twice to a draw"));
+            }
+        }
+
+        // Attachments must match in size, so the pass covers the intersection. A depth surface is
+        // cropped along each axis it is larger; a colour target larger along either draws into a
+        // scratch texture copied back afterwards.
+        let mut depth = depth;
+        let mut color_scratch = None;
+        if let (Some(full_color), Some(full_depth)) = (sizing, depth) {
+            let (cw, ch) = (full_color.width, full_color.height);
+            let (dw, dh) = (full_depth.width, full_depth.height);
+            if dw >= cw && dh >= ch {
+                depth = Some(crate::crop_depth(full_depth, Some(full_color)));
+            } else if extras {
+                return Err("several colour outputs larger than their depth surface".into());
+            } else {
+                let (width, height) = (cw.min(dw), ch.min(dh));
+                depth = Some(crate::crop_depth(full_depth, Some(full_color)));
+                color_scratch = Some((width, height));
+                // The scissor is confined to the depth surface only for draws that reach it.
+                let (pixels_x, pixels_y) = state.grid.pixels(width, height);
+                state.scissor.x1 = state.scissor.x1.min(pixels_x);
+                state.scissor.y1 = state.scissor.y1.min(pixels_y);
+                state.scissor.x0 = state.scissor.x0.min(state.scissor.x1);
+                state.scissor.y0 = state.scissor.y0.min(state.scissor.y1);
+            }
+        }
+        if sizing.is_none() && depth.is_none() {
+            return Err("a draw into neither a colour nor a depth surface".into());
+        }
+        let render = self.route(&state, sizing, depth)?;
+        if color_scratch.is_some() && matches!(render, Render::Companion(_)) {
+            return Err(
+                "a colour target larger than its depth surface, drawn through a multisample companion"
+                    .into(),
+            );
+        }
+        if extras && render != Render::Direct {
+            return Err("several colour outputs drawn multisampled".into());
+        }
         Ok(Checked {
             state,
             render,
             color,
+            extra_colors,
             color_scratch,
             depth,
             vs,
@@ -106,6 +141,7 @@ impl Gpu {
             state,
             render,
             color,
+            extra_colors,
             color_scratch,
             depth,
             vs,
@@ -138,17 +174,31 @@ impl Gpu {
         }
         let origin = engine.window_origin();
         fs_layout.window_height = origin.lower_left.then(|| engine.surface_clip_height());
-        // A depth-only pass has no colour output.
-        fs_layout.targets = u32::from(color.is_some());
-        // An integer target takes raw words.
-        if let Some(max) = color.and_then(|target| target.format.uint_max()) {
-            fs_layout.uint_targets = vec![(0, max)];
-        }
-        if color.is_some_and(|target| {
-            held_attachment_format(self.features(), target.format)
+        // A depth-only pass has no colour output; past output 0, each output up to the last
+        // attached one is declared, the unattached ones landing nowhere.
+        let attached_outputs = extra_colors
+            .iter()
+            .rposition(Option::is_some)
+            .map_or(0, |last| last as u32 + 1);
+        fs_layout.targets = match (color, attached_outputs) {
+            (None, 0) => 0,
+            _ => 1 + attached_outputs,
+        };
+        let outputs = std::iter::once(color).chain(extra_colors.iter().copied());
+        for (output, target) in outputs.enumerate().take(fs_layout.targets as usize) {
+            let Some(target) = target else {
+                continue;
+            };
+            let output = output as u32;
+            // An integer target takes raw words.
+            if let Some(max) = target.format.uint_max() {
+                fs_layout.uint_targets.push((output, max));
+            }
+            if held_attachment_format(self.features(), target.format)
                 .is_ok_and(|(_, widen)| widen == Widen::Unorm16)
-        }) {
-            fs_layout.unorm16_targets = vec![0];
+            {
+                fs_layout.unorm16_targets.push(output);
+            }
         }
         // Both stages must name the same varyings; missing ones read as zero.
         let mut varyings = vs_layout.varyings.clone();
@@ -203,7 +253,12 @@ impl Gpu {
         // One bind group per stage; see `Layout::group`.
         vs_layout.group = 0;
         fs_layout.group = 1;
-        let images = self.draw_images(engine, ctx, &vs_layout, &mut fs_layout, [color, depth])?;
+        let drawn_surfaces: Vec<Target> = std::iter::once(color)
+            .chain(extra_colors.iter().copied())
+            .chain(std::iter::once(depth))
+            .flatten()
+            .collect();
+        let images = self.draw_images(engine, ctx, &vs_layout, &mut fs_layout, &drawn_surfaces)?;
 
         // The layouts' textures: the translations' and the levels bound beside them.
         let mut slots: Vec<(ShaderStage, TextureSlot)> = Vec::new();
@@ -285,7 +340,7 @@ impl Gpu {
 
         self.fill_texture_bindings(&mut vs_layout, ShaderStage::VertexB, &uploads.textures)?;
         self.fill_texture_bindings(&mut fs_layout, ShaderStage::Fragment, &uploads.textures)?;
-        let drawn = [color.map(|c| c.addr), depth.map(|d| d.addr)];
+        let drawn: Vec<u64> = drawn_surfaces.iter().map(|t| t.addr).collect();
         for (layout, stage, translation) in [
             (&mut vs_layout, ShaderStage::VertexB, &vs),
             (&mut fs_layout, ShaderStage::Fragment, &fs),
@@ -297,7 +352,7 @@ impl Gpu {
                     .find(|t| t.stage == stage && t.slot == binding.slot)
                 {
                     binding.crop =
-                        self.crop_of_held(upload, binding, &translation.read_otherwise, drawn);
+                        self.crop_of_held(upload, binding, &translation.read_otherwise, &drawn);
                 }
             }
         }
@@ -472,6 +527,7 @@ impl Gpu {
             state,
             render,
             color,
+            extra_colors,
             color_scratch,
             depth,
             vs,
@@ -500,7 +556,7 @@ impl Gpu {
         ctx: &ExecCtx,
         vs_layout: &Layout,
         fs_layout: &mut Layout,
-        drawn: [Option<Target>; 2],
+        drawn: &[Target],
     ) -> std::result::Result<Vec<crate::DrawImage>, String> {
         if !vs_layout.images.is_empty() {
             return Err("a vertex stage stores to an image, which WebGPU cannot".into());
@@ -519,10 +575,14 @@ impl Gpu {
         let targets = self.storage_images(fs_layout, pools, ctx)?;
         // A texture bound for storage cannot also be an attachment of the pass.
         for image in targets.iter().flatten() {
-            for (what, surface) in ["colour", "depth"].iter().zip(drawn) {
-                let Some(surface) = surface else { continue };
-                if spans_overlap(&surface_span(&surface), &surface_span(image)) {
+            for surface in drawn {
+                if spans_overlap(&surface_span(surface), &surface_span(image)) {
                     let state = Pipeline::of(engine).map_err(|e| e.to_string())?;
+                    let what = if surface.depth.is_some() {
+                        "depth"
+                    } else {
+                        "colour"
+                    };
                     return Err(format!(
                         "stores to an image at {:#x} ({}x{}) over the {what} target at {:#x} \
                          ({}x{}); colour writes {:?}, depth {:?}",
@@ -749,6 +809,31 @@ impl Gpu {
             }
         }
     }
+}
+
+/// The surfaces colour outputs 1 onward are attached to: each one bound, written by at least
+/// one channel, and named by the fragment program's output map. A headerless program writes
+/// output 0 alone.
+fn extra_attachments(
+    engine: &Engine3D,
+    state: &Pipeline,
+    fs: &Translation,
+) -> std::result::Result<Vec<Option<Target>>, String> {
+    if engine.program(ShaderStage::Fragment).is_none() {
+        return Ok(Vec::new());
+    }
+    let header = fs.header.filter(|h| h.writes_any_color());
+    let surfaces = Targets::extra_colors(engine).map_err(|e| format!("{e:?}"))?;
+    Ok(surfaces
+        .into_iter()
+        .zip(&state.extra_targets)
+        .enumerate()
+        .map(|(index, (surface, target))| {
+            let written = header.is_some_and(|h| h.writes_target(index as u32 + 1));
+            let unmasked = target.is_some_and(|t| t.write_mask.contains(&true));
+            surface.filter(|_| written && unmasked)
+        })
+        .collect())
 }
 
 /// The most levels a `tlds` naming its level binds; each is a texture binding of its own.

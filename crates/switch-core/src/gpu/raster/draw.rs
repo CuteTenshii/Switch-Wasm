@@ -1,6 +1,8 @@
 //! The draw entry point: index fetch, culling, clipping and the pixel loop.
 
-use super::fragment::{quad_pixel, shade_fragment, shade_quad, with_fragment_env, Fragments, QUAD};
+use super::fragment::{
+    quad_pixel, shade_fragment, shade_quad, with_fragment_env, Fragments, OutputTarget, QUAD,
+};
 use super::setup::TriangleSetup;
 use super::vertex::{shade_vertex, to_screen, ShadedVertex, MAX_VERTEX_ATTRIBS, NUM_VARYINGS};
 use super::{assemble, Bounds, Primitive, ScreenVertex};
@@ -300,8 +302,30 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let depth = engine.depth_target()?;
     // Draw bounds are in pixels, target sizes in texels. A depth-only pass
     // takes its extent from whichever target is bound.
+    // A draw with no fragment program writes depth only, as does one whose mask is empty.
+    let outputs = engine.color_outputs();
+    let mut targets = Vec::new();
+    if fs_binding.is_some() {
+        for output in 0..outputs {
+            let slot = engine.render_target_slot(output);
+            let Some(rt) = engine.draw_target(slot)? else {
+                continue;
+            };
+            let mask = engine.color_mask(slot);
+            if !mask.contains(&true) {
+                continue;
+            }
+            targets.push(OutputTarget {
+                output: output as usize,
+                rt,
+                blend: engine.blend_target(output),
+                mask,
+            });
+        }
+    }
     let Some((target_width, target_height)) = crate::gpu::engine::threed::draw_extent(
-        rt.map(|rt| (rt.width, rt.height)),
+        rt.or(targets.first().map(|t| t.rt))
+            .map(|rt| (rt.width, rt.height)),
         depth.map(|dt| (dt.width, dt.height)),
         engine.depth_state(),
     ) else {
@@ -325,14 +349,6 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let depth_state = engine.depth_state();
     let blend_target = engine.blend_target(0);
     let blend_constant = engine.blend_constant();
-    // A mask with nothing set writes depth only, as a draw with no fragment program does.
-    let color_mask = if fs_binding.is_some() {
-        engine.color_mask(engine.render_target_slot(0))
-    } else {
-        [false; 4]
-    };
-    let writes_all_channels = color_mask == [true; 4];
-    let writes_any_channel = color_mask.iter().any(|&channel| channel);
     let cull = engine.cull_state();
 
     let triangles = assemble(primitive, call.count);
@@ -346,12 +362,8 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         sample_mask,
         depth,
         depth_state,
-        rt,
-        blend_target,
+        targets,
         blend_constant,
-        color_mask,
-        writes_all_channels,
-        writes_any_channel,
         alpha_to_coverage,
     };
     // Parsed TIC/TSC pairs and decoded blocks, shared by the draw.
@@ -590,7 +602,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         tally.covered += 1;
 
                         let weights = tri.weights(x as f32 + 0.5, y as f32 + 0.5);
-                        let color = with_fragment_env(
+                        let colors = with_fragment_env(
                             engine,
                             &*ctx,
                             &fs_const_cache,
@@ -607,17 +619,18 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                                     weights,
                                     (x, y),
                                     env,
+                                    outputs,
                                 )
                             },
                         )?;
                         MemoryGlobal::land(ctx, &global_stores)?;
                         MemoryTextures::land(ctx, &surface_stores)?;
                         // `kil` skips the depth write too, so it waits for shading.
-                        let Some(color) = color else {
+                        let Some(colors) = colors else {
                             tally.killed += 1;
                             continue;
                         };
-                        fragments.write((x, y), covered, &sample_z, color, ctx, &mut tally)?;
+                        fragments.write((x, y), covered, &sample_z, &colors, ctx, &mut tally)?;
                     }
                 }
                 continue;
@@ -664,7 +677,18 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         &blocks,
                         &global_stores,
                         &surface_stores,
-                        |env| shade_quad(quad, &fs_program, &shaded, inv_w, weights, (x, y), env),
+                        |env| {
+                            shade_quad(
+                                quad,
+                                &fs_program,
+                                &shaded,
+                                inv_w,
+                                weights,
+                                (x, y),
+                                env,
+                                outputs,
+                            )
+                        },
                     )?;
                     MemoryGlobal::land(ctx, &global_stores)?;
                     MemoryTextures::land(ctx, &surface_stores)?;
@@ -672,7 +696,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         if covered[lane] == 0 {
                             continue;
                         }
-                        let Some(color) = colors[lane] else {
+                        let Some(lane_colors) = &colors[lane] else {
                             tally.killed += 1;
                             continue;
                         };
@@ -680,7 +704,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                             quad_pixel(x, y, lane),
                             covered[lane],
                             &sample_z[lane],
-                            color,
+                            lane_colors,
                             ctx,
                             &mut tally,
                         )?;

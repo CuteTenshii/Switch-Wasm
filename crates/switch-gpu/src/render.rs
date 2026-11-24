@@ -34,19 +34,55 @@ impl Gpu {
         };
         let target_format = target.map(|(format, _)| format);
         // A blend the device cannot do must fall back here; a rejected pipeline silently draws nothing.
-        if let Some((format, widen)) = target {
-            let blends = p.state.target.is_some_and(|t| t.blend.is_some());
-            if blends && widen == Widen::Unorm16 {
+        let features = self.features();
+        let blendable = |(format, widen): (wgpu::TextureFormat, Widen),
+                         blend: Option<state::Blend>|
+         -> std::result::Result<(), String> {
+            if blend.is_none() {
+                return Ok(());
+            }
+            if widen == Widen::Unorm16 {
                 return Err(format!(
                     "blending into a 16-bit unorm target held as {format:?}, which would not \
                      clamp as the surface does"
                 ));
             }
-            if blends && !can_blend(format, self.features()) {
+            if !can_blend(format, features) {
                 return Err(format!(
                     "blending into a {format:?} target, which this device cannot blend"
                 ));
             }
+            Ok(())
+        };
+        if let Some(held) = target {
+            blendable(held, p.state.target.and_then(|t| t.blend))?;
+        }
+        let mut extra_targets = Vec::with_capacity(p.extra_colors.len());
+        for (surface, state) in p.extra_colors.iter().zip(&p.state.extra_targets) {
+            let (Some(surface), Some(state)) = (surface, state) else {
+                extra_targets.push(None);
+                continue;
+            };
+            let held =
+                held_attachment_format(features, surface.format).map_err(|e| format!("{e:?}"))?;
+            blendable(held, state.blend)?;
+            extra_targets.push(Some((held.0, state.blend, state.write_mask)));
+        }
+        // A pipeline past the per-sample byte limit is rejected, which draws nothing.
+        let formats = target_format
+            .into_iter()
+            .chain(extra_targets.iter().flatten().map(|&(format, _, _)| format));
+        let mut bytes = 0u32;
+        for format in formats {
+            let cost = format.target_pixel_byte_cost().unwrap_or(0);
+            let align = format.target_component_alignment().unwrap_or(1).max(1);
+            bytes = bytes.next_multiple_of(align) + cost;
+        }
+        let limit = self.device_limits.max_color_attachment_bytes_per_sample;
+        if bytes > limit {
+            return Err(format!(
+                "colour outputs of {bytes} bytes a sample, past the device's {limit}"
+            ));
         }
         let depth_format = p
             .depth
@@ -235,6 +271,7 @@ impl Gpu {
                 vs: vs_key,
                 fs: fs_key,
                 target: target_format,
+                extra_targets: extra_targets.clone(),
                 depth: depth_format
                     .zip(p.state.depth)
                     .map(|(format, d)| (format, d.write_enabled, d.compare)),
@@ -269,20 +306,26 @@ impl Gpu {
                 conservative: false,
             },
             multisample,
-            // Empty for a depth-only pass.
-            colour_targets: target_format
-                .map(|format| {
-                    Some(wgpu::ColorTargetState {
-                        format,
-                        blend: p.state.target.and_then(|t| t.blend).map(blend),
-                        write_mask: p
-                            .state
-                            .target
-                            .map_or(wgpu::ColorWrites::ALL, |t| write_mask(t.write_mask)),
-                    })
+            // Empty for a depth-only pass; output 0 keeps its location when only later ones attach.
+            colour_targets: std::iter::once(target_format.map(|format| {
+                wgpu::ColorTargetState {
+                    format,
+                    blend: p.state.target.and_then(|t| t.blend).map(blend),
+                    write_mask: p
+                        .state
+                        .target
+                        .map_or(wgpu::ColorWrites::ALL, |t| write_mask(t.write_mask)),
+                }
+            }))
+            .chain(extra_targets.iter().map(|target| {
+                target.map(|(format, state_blend, mask)| wgpu::ColorTargetState {
+                    format,
+                    blend: state_blend.map(blend),
+                    write_mask: write_mask(mask),
                 })
-                .into_iter()
-                .collect(),
+            }))
+            .take(colour_locations(target_format.is_some(), &extra_targets))
+            .collect(),
             buffers: Vec::new(),
         }
         .with_buffers(
@@ -453,6 +496,16 @@ impl Gpu {
             Some((_, texture, _)) => Some(texture.clone()),
             None => colour_target,
         };
+        let mut extra_colours = Vec::with_capacity(p.extra_colors.len());
+        for surface in &p.extra_colors {
+            extra_colours.push(match surface {
+                Some(surface) => {
+                    self.hold(surface, ctx).map_err(|e| format!("{e:?}"))?;
+                    Some(self.attachment(p, surface.addr, true)?)
+                }
+                None => None,
+            });
+        }
         let depth_target = match p.depth {
             Some(depth) => {
                 self.hold(&depth, ctx).map_err(|e| format!("{e:?}"))?;
@@ -494,6 +547,7 @@ impl Gpu {
             && scratch.is_none()
             && self.pass.as_ref().is_some_and(|open| {
                 open.colour == colour_target
+                    && open.extra_colours == extra_colours
                     && open.depth == depth_target
                     && !held_globals.iter().any(|(buffer, writes)| {
                         open.globals
@@ -531,23 +585,29 @@ impl Gpu {
                 }
             }
             let colour_view = colour_target.as_ref().map(|t| self.view(t, None));
-            let depth_view = depth_target.as_ref().map(|t| self.view(t, None));
-            let colour: Vec<Option<wgpu::RenderPassColorAttachment>> = colour_view
-                .as_ref()
-                .map(|view| {
-                    Some(wgpu::RenderPassColorAttachment {
-                        view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            // Loaded, never cleared: a clear is its own method.
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })
-                })
-                .into_iter()
+            let extra_views: Vec<Option<wgpu::TextureView>> = extra_colours
+                .iter()
+                .map(|t| t.as_ref().map(|t| self.view(t, None)))
                 .collect();
+            let depth_view = depth_target.as_ref().map(|t| self.view(t, None));
+            // Output 0 first, at its location even when only later ones attach.
+            let colour: Vec<Option<wgpu::RenderPassColorAttachment>> =
+                std::iter::once(colour_view.as_ref())
+                    .chain(extra_views.iter().map(Option::as_ref))
+                    .take(colour_locations(colour_view.is_some(), &extra_views))
+                    .map(|view| {
+                        view.map(|view| wgpu::RenderPassColorAttachment {
+                            view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                // Loaded, never cleared: a clear is its own method.
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })
+                    })
+                    .collect();
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("draws"),
                 color_attachments: &colour,
@@ -571,6 +631,7 @@ impl Gpu {
             self.pass = Some(crate::OpenPass {
                 pass,
                 colour: colour_target,
+                extra_colours,
                 depth: depth_target,
                 globals: held_globals,
                 set: crate::PassState::default(),
@@ -591,11 +652,11 @@ impl Gpu {
                 scissor.x1.saturating_sub(scissor.x0) * sx,
                 scissor.y1.saturating_sub(scissor.y0) * sy,
             ];
-            let blend_constant = p
-                .state
-                .target
-                .and_then(|t| t.blend)
-                .map(|_| p.state.blend_constant);
+            let blends = std::iter::once(&p.state.target)
+                .chain(&p.state.extra_targets)
+                .flatten()
+                .any(|t| t.blend.is_some());
+            let blend_constant = blends.then_some(p.state.blend_constant);
             let index_buffer = index.as_ref().map(|(buffer, format, _)| (buffer, *format));
             // One pipeline, or one per sample with the geometry moved onto it.
             let passes: Vec<(&wgpu::RenderPipeline, [f32; 6])> = pipelines
@@ -872,6 +933,15 @@ impl Gpu {
         if let Some(open) = self.pass.as_mut() {
             call.record(&mut open.pass);
         }
+    }
+}
+
+/// How many colour locations a pass declares: none for a depth-only one, else output 0's and each
+/// later output's up to the last attached.
+fn colour_locations<T>(output_0: bool, extras: &[Option<T>]) -> usize {
+    match extras.iter().rposition(Option::is_some) {
+        Some(last) => last + 2,
+        None => usize::from(output_0),
     }
 }
 

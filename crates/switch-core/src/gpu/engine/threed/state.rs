@@ -439,6 +439,15 @@ impl Engine3D {
         }
     }
 
+    /// How many colour outputs a draw writes, output `i` landing in the slot
+    /// [`Engine3D::render_target_slot`] maps `i` onto. Output 0 is written even when the count
+    /// is zero, as drivers that never program `RenderTargetControl` expect.
+    pub fn color_outputs(&self) -> u32 {
+        self.regs
+            .field(RENDER_TARGET_CONTROL, 0, 3)
+            .clamp(1, COLOR_TARGETS)
+    }
+
     /// Which channels of colour target `index` a draw may write.
     pub fn color_mask(&self, index: u32) -> [bool; 4] {
         let slot = if self.regs.get(COLOR_MASK_COMMON) != 0 {

@@ -4907,3 +4907,70 @@ fn a_masked_colour_target_stored_to_as_an_image_draws_on_the_device() {
     assert_eq!(gpu.device_error(), None, "the device rejected the pass");
     assert_eq!(got, want);
 }
+
+/// A two-colour fragment program behind `omap`, drawing `outputs` outputs into the harness
+/// target and a second one: both renderers leave the same texels in each, the device without
+/// falling back.
+fn colour_outputs_agree(omap: u32, outputs: u32) {
+    colour_outputs_agree_with(omap, outputs, |_| {});
+}
+
+/// [`colour_outputs_agree`] with `set_up` applied to each harness before the draw.
+fn colour_outputs_agree_with(omap: u32, outputs: u32, set_up: impl Fn(&mut Harness)) {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let build = |gpu: Option<&mut super::Gpu>| {
+        let mut h = Harness::with_fragment_shader(testing::with_output_map(
+            omap,
+            testing::two_colour_fragment_body(),
+        ));
+        h.second_target(0x1234_5678, outputs);
+        set_up(&mut h);
+        h.triangle([0.0; 4]);
+        match gpu {
+            Some(gpu) => {
+                h.draw_with(gpu).expect("the draw");
+                h.flush_with(gpu);
+            }
+            None => h.draw_with(&mut Software).expect("the draw"),
+        }
+        (h.target(), h.second_target_texels())
+    };
+    let want = build(None);
+    let before = gpu.fallbacks;
+    let got = build(Some(&mut gpu));
+    assert_eq!(
+        gpu.fallbacks, before,
+        "the draw did not run on the device: {:?}",
+        gpu.last_fallback
+    );
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    assert_eq!(got, want, "output map {omap:#x} over {outputs} outputs");
+}
+
+#[test]
+fn two_colour_outputs_land_in_their_targets_on_both_renderers() {
+    colour_outputs_agree(0xFF, 2);
+}
+
+#[test]
+fn an_output_the_map_leaves_out_keeps_its_target_on_both_renderers() {
+    colour_outputs_agree(0x0F, 2);
+}
+
+#[test]
+fn an_output_after_an_unwritten_one_reads_the_same_registers_on_both_renderers() {
+    colour_outputs_agree(0xF0, 2);
+}
+
+/// Output 0 masked off beside a depth surface is left unattached, and output 1 still draws at
+/// its own location: Breath of the Wild writes a later G-buffer plane alone so.
+#[test]
+fn a_later_output_draws_beside_a_masked_output_0_on_both_renderers() {
+    colour_outputs_agree_with(0xFF, 2, |h| {
+        h.depth_target(8);
+        h.engine.regs.set(0x680, 0);
+    });
+}

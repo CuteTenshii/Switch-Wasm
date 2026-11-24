@@ -220,8 +220,9 @@ impl Gpu {
             resources.push(Resource::Window(wgsl::CONSTANTS_BINDING, buffer, size));
         }
 
-        let drawn: Vec<u64> = [p.color, p.depth]
-            .iter()
+        let drawn: Vec<u64> = std::iter::once(&p.color)
+            .chain(&p.extra_colors)
+            .chain(std::iter::once(&p.depth))
             .flatten()
             .chain(p.images.iter().flat_map(|(layers, _)| layers))
             .map(|t| t.addr)
@@ -862,7 +863,7 @@ impl Gpu {
         upload: &switch_core::gpu::upload::TextureUpload,
         binding: &wgsl::TextureBinding,
         read_otherwise: &[u32],
-        drawn: [Option<u64>; 2],
+        drawn: &[u64],
     ) -> Option<wgsl::Crop> {
         use switch_core::gpu::shader::isa::TexDim;
         use switch_core::gpu::texture::Wrap;
@@ -879,7 +880,7 @@ impl Gpu {
             )
             || !edge(upload.sampler.wrap_u)
             || !edge(upload.sampler.wrap_v)
-            || drawn.contains(&Some(upload.key.addr))
+            || drawn.contains(&upload.key.addr)
         {
             return None;
         }

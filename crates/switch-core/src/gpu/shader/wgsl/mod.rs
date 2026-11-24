@@ -219,6 +219,8 @@ pub struct Translation {
     pub special: Vec<u8>,
     /// [`TextureSlot::key`]s of textures read by anything but a plain sample, ascending.
     pub read_otherwise: Vec<u32>,
+    /// The program header, whose output map says which registers a fragment's colours are in.
+    pub header: Option<crate::gpu::shader::ProgramHeader>,
 }
 
 /// Translate into a WGSL function `run`, returning whether it hit `kil`.
@@ -281,6 +283,7 @@ pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsu
         globals: emitter.globals.clone(),
         special: emitter.special.iter().copied().collect(),
         read_otherwise: emitter.read_otherwise.iter().copied().collect(),
+        header: program.header(),
     })
 }
 

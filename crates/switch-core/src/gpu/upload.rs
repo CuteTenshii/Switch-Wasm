@@ -629,6 +629,16 @@ impl Targets {
         })
     }
 
+    /// The surfaces colour outputs 1 onward land in, resolved as [`Targets::color`] is; `None`
+    /// where an output's slot has nothing bound.
+    pub fn extra_colors(engine: &Engine3D) -> Result<Vec<Option<Target>>> {
+        (1..engine.color_outputs())
+            .map(|output| {
+                Target::of_render_target(engine.draw_target(engine.render_target_slot(output))?)
+            })
+            .collect()
+    }
+
     /// Bytes of both surfaces: the per-frame round-trip cost.
     pub fn len(&self) -> u64 {
         self.color.map_or(0, |t| t.len()) + self.depth.map_or(0, |t| t.len())

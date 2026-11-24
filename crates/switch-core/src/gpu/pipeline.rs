@@ -4,7 +4,7 @@
 //! back to the software rasterizer.
 
 use crate::gpu::engine::threed::{
-    BlendTarget, DepthLayout, DepthState, Engine3D, VertexArray, ViewportTransform,
+    BlendTarget, DepthLayout, DepthState, Engine3D, RenderTarget, VertexArray, ViewportTransform,
 };
 // Re-exported for backends reading `Pipeline::scissor`.
 pub use crate::gpu::engine::threed::ScissorRect;
@@ -435,6 +435,8 @@ pub struct Pipeline {
     pub cull: Cull,
     /// Colour target 0, or `None` for a depth-only pass.
     pub target: Option<ColorTarget>,
+    /// Colour outputs 1 onward, as `RenderTargetControl` counts them; `None` where unbound.
+    pub extra_targets: Vec<Option<ColorTarget>>,
     pub depth: Option<Depth>,
     pub vertex_buffers: Vec<VertexBuffer>,
     /// Attribute slots with no buffer bound; they read `(0, 0, 0, 1)`.
@@ -484,23 +486,49 @@ impl Pipeline {
         let dt = engine
             .depth_target()
             .map_err(|e| state("depth target", e))?;
-        let mut blend_constant = engine.blend_constant();
-        let target = match rt {
-            Some(rt) => Some(ColorTarget {
-                format: color_format(rt.format)?,
-                // An integer target is never blended.
-                blend: match color_format(rt.format)? {
-                    format if format.is_uint() => None,
-                    _ => {
-                        let (state, constant) = blend(engine.blend_target(0), blend_constant)?;
-                        blend_constant = constant;
-                        state
+        let given_constant = engine.blend_constant();
+        // Every output blends against the one constant, which a factor may rewrite.
+        let mut blend_constant = None;
+        let mut color_target = |output: u32,
+                                slot: u32,
+                                rt: Option<RenderTarget>|
+         -> Result<Option<ColorTarget>, Unsupported> {
+            let Some(rt) = rt else {
+                return Ok(None);
+            };
+            let format = color_format(rt.format)?;
+            // An integer target is never blended.
+            let blend = match format.is_uint() {
+                true => None,
+                false => {
+                    let (state, constant) = blend(engine.blend_target(output), given_constant)?;
+                    if state.is_some() {
+                        if blend_constant.is_some_and(|earlier| earlier != constant) {
+                            return Err(Unsupported::State(
+                                "outputs blending against differently rewritten constants".into(),
+                            ));
+                        }
+                        blend_constant = Some(constant);
                     }
-                },
+                    state
+                }
+            };
+            Ok(Some(ColorTarget {
+                format,
+                blend,
                 write_mask: engine.color_mask(slot),
-            }),
-            None => None,
+            }))
         };
+        let target = color_target(0, slot, rt)?;
+        let mut extra_targets = Vec::new();
+        for output in 1..engine.color_outputs() {
+            let slot = engine.render_target_slot(output);
+            let rt = engine
+                .render_target(slot)
+                .map_err(|e| state("colour target", e))?;
+            extra_targets.push(color_target(output, slot, rt)?);
+        }
+        let blend_constant = blend_constant.unwrap_or(given_constant);
         let depth = match dt {
             Some(dt) => Some(self::depth(dt.format, engine.depth_state())?),
             None => None,
@@ -550,6 +578,7 @@ impl Pipeline {
                 (_, false, true) => Cull::Back,
             },
             target,
+            extra_targets,
             depth,
             vertex_buffers,
             fixed_attributes,

@@ -35,7 +35,8 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
     // Raise the storage buffer limit to the adapter's: a shader may read more than the guaranteed
     // eight banks. Sampled textures too, past 16, and storage textures past 4; samplers stay at
     // 16, which is all a browser gives, so textures share them past that (`Gpu::share_samplers`)
-    // natively as well.
+    // natively as well. Colour attachment bytes too, past 32: Breath of the Wild's G-buffer takes
+    // 48 a sample.
     let (default, offered) = (wgpu::Limits::default(), adapter.limits());
     let required_limits = wgpu::Limits {
         max_storage_buffers_per_shader_stage: default
@@ -47,6 +48,9 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
         max_storage_textures_per_shader_stage: default
             .max_storage_textures_per_shader_stage
             .max(offered.max_storage_textures_per_shader_stage),
+        max_color_attachment_bytes_per_sample: default
+            .max_color_attachment_bytes_per_sample
+            .max(offered.max_color_attachment_bytes_per_sample),
         ..default
     };
     wgpu::DeviceDescriptor {
@@ -240,6 +244,8 @@ struct PipelineKey {
     fs: u64,
     /// `None` for a depth-only pass.
     target: Option<wgpu::TextureFormat>,
+    /// Colour outputs 1 onward, `None` where unattached.
+    extra_targets: Vec<Option<ExtraTargetKey>>,
     /// Device depth format, whether depth is written, and the compare function.
     depth: Option<(wgpu::TextureFormat, bool, state::Compare)>,
     samples: u32,
@@ -257,6 +263,9 @@ struct PipelineKey {
     /// Each bound vertex buffer, in the order they are bound.
     buffers: Vec<VertexBufferKey>,
 }
+
+/// A colour output past 0: device format, blend and write mask.
+type ExtraTargetKey = (wgpu::TextureFormat, Option<state::Blend>, [bool; 4]);
 
 /// Format, offset into the element, and shader location.
 type AttributeKey = (wgpu::VertexFormat, u64, u32);
@@ -504,6 +513,8 @@ struct CachedShader {
 struct OpenPass {
     pass: wgpu::RenderPass<'static>,
     colour: Option<wgpu::Texture>,
+    /// The surfaces of colour outputs 1 onward, `None` where unattached.
+    extra_colours: Vec<Option<wgpu::Texture>>,
     depth: Option<wgpu::Texture>,
     /// Buffers held on the device that its draws bind, and whether writable.
     globals: Vec<(wgpu::Buffer, bool)>,
@@ -1135,6 +1146,7 @@ struct Checked {
     state: Pipeline,
     render: Render,
     color: Option<Target>,
+    extra_colors: Vec<Option<Target>>,
     color_scratch: Option<(u32, u32)>,
     depth: Option<Target>,
     vs: std::sync::Arc<Translation>,
@@ -1152,6 +1164,9 @@ struct Prepared {
     render: Render,
     /// `None` for a depth-only pass.
     color: Option<Target>,
+    /// The surfaces colour outputs 1 onward are attached to, `None` where the output is not:
+    /// unbound, masked off, or left unwritten by the fragment program.
+    extra_colors: Vec<Option<Target>>,
     /// The scratch texture extent when the colour target is larger than the depth surface.
     color_scratch: Option<(u32, u32)>,
     /// The depth surface, or `None` for a draw that neither tests nor writes depth.

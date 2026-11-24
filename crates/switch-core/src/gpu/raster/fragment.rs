@@ -154,28 +154,44 @@ fn seed_fragment(
     }
 }
 
-/// The colour an invocation that has run to `exit` leaves behind, or `None`
-/// if `kil` discarded it. The program header maps registers to components;
-/// headerless programs use `r0..r3`.
-fn fragment_color(inv: &Invocation, program: &Compiled) -> Option<[f32; 4]> {
+/// The most colour outputs a fragment program writes.
+pub const MAX_OUTPUTS: usize = 8;
+
+/// Each colour output's value, `None` where the program leaves the output alone.
+pub type Colors = [Option<[f32; 4]>; MAX_OUTPUTS];
+
+/// The colours an invocation that has run to `exit` leaves behind for its first `outputs`
+/// outputs, or `None` if `kil` discarded it. The program header maps registers to components;
+/// headerless programs write output 0 from `r0..r3`.
+fn fragment_colors(inv: &Invocation, program: &Compiled, outputs: u32) -> Option<Colors> {
     if inv.discarded {
         return None;
     }
+    let mut colors: Colors = [None; MAX_OUTPUTS];
     let Some(header) = program.header().filter(|h| h.writes_any_color()) else {
-        return Some([
+        colors[0] = Some([
             inv.reg_f32(0),
             inv.reg_f32(1),
             inv.reg_f32(2),
             inv.reg_f32(3),
         ]);
+        return Some(colors);
     };
-    Some(std::array::from_fn(|component| {
-        match header.fragment_output_reg(0, component as u32) {
-            Some(reg) => inv.reg_f32(reg),
-            // Unwritten: colour zero, alpha opaque.
-            None => (component == 3) as u32 as f32,
+    for (output, color) in colors.iter_mut().enumerate().take(outputs as usize) {
+        let output = output as u32;
+        // Output 0 is always written; a later one the map leaves out keeps what its target holds.
+        if output > 0 && !header.writes_target(output) {
+            continue;
         }
-    }))
+        *color = Some(std::array::from_fn(|component| {
+            match header.fragment_output_reg(output, component as u32) {
+                Some(reg) => inv.reg_f32(reg),
+                // Unwritten: colour zero, alpha opaque.
+                None => (component == 3) as u32 as f32,
+            }
+        }));
+    }
+    Some(colors)
 }
 
 /// Where a fragment's window coordinates are read from.
@@ -192,7 +208,8 @@ pub(super) fn shade_fragment(
     weights: [f32; 3],
     (x, y): (u32, u32),
     env: &Env,
-) -> Result<Option<[f32; 4]>> {
+    outputs: u32,
+) -> Result<Option<Colors>> {
     seed_fragment(
         inv,
         program,
@@ -202,7 +219,7 @@ pub(super) fn shade_fragment(
         (x, y, env.special.window_height),
     );
     inv.execute(program, env)?;
-    Ok(fragment_color(inv, program))
+    Ok(fragment_colors(inv, program, outputs))
 }
 
 /// The four pixels hardware shades together, in lane order: `(x, y)`,
@@ -226,7 +243,8 @@ pub(super) fn shade_quad(
     weights: [[f32; 3]; QUAD],
     (x, y): (u32, u32),
     env: &mut Env,
-) -> Result<[Option<[f32; 4]>; QUAD]> {
+    outputs: u32,
+) -> Result<[Option<Colors>; QUAD]> {
     for (lane, invocation) in lanes.iter_mut().enumerate() {
         let (px, py) = quad_pixel(x, y, lane);
         let at = (px, py, env.special.window_height);
@@ -259,8 +277,19 @@ pub(super) fn shade_quad(
         resolve_warp(lanes);
     }
     Ok(std::array::from_fn(|lane| {
-        fragment_color(&lanes[lane], program)
+        fragment_colors(&lanes[lane], program, outputs)
     }))
+}
+
+/// One colour output a draw writes, with the target it lands in and how it lands.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct OutputTarget {
+    /// The fragment program's output, an index into [`Colors`].
+    pub(super) output: usize,
+    pub(super) rt: RenderTarget,
+    pub(super) blend: BlendTarget,
+    /// Channels written; at least one is.
+    pub(super) mask: [bool; 4],
 }
 
 /// The per-pixel half of a draw, shared by the pixel and quad walks: sample
@@ -270,12 +299,9 @@ pub(super) struct Fragments {
     pub(super) sample_mask: u32,
     pub(super) depth: Option<DepthTarget>,
     pub(super) depth_state: DepthState,
-    pub(super) rt: Option<RenderTarget>,
-    pub(super) blend_target: BlendTarget,
+    /// Empty for a depth-only pass.
+    pub(super) targets: Vec<OutputTarget>,
     pub(super) blend_constant: [f32; 4],
-    pub(super) color_mask: [bool; 4],
-    pub(super) writes_all_channels: bool,
-    pub(super) writes_any_channel: bool,
     pub(super) alpha_to_coverage: bool,
 }
 
@@ -321,16 +347,19 @@ impl Fragments {
         (x, y): (u32, u32),
         covered: u32,
         sample_z: &[f32; MAX_SAMPLES],
-        color: [f32; 4],
+        colors: &Colors,
         ctx: &mut ExecCtx,
         tally: &mut DrawTally,
     ) -> Result<()> {
-        tally.shaded(color);
+        if let Some(color) = colors.iter().flatten().next() {
+            tally.shaded(*color);
+        }
 
-        // Alpha-to-coverage narrows the mask after shading.
+        // Alpha-to-coverage narrows the mask after shading, from output 0's alpha.
         let mut covered = covered;
         if self.alpha_to_coverage {
-            covered &= alpha_coverage(color[3], self.grid.count());
+            let alpha = colors[0].map_or(1.0, |color| color[3]);
+            covered &= alpha_coverage(alpha, self.grid.count());
             if covered == 0 {
                 tally.alpha_killed += 1;
                 return Ok(());
@@ -357,23 +386,26 @@ impl Fragments {
                 }
             }
 
-            // A depth-only pass: no colour target, or every channel masked.
-            if let Some(rt) = self.rt.filter(|_| self.writes_any_channel) {
+            for target in &self.targets {
+                let Some(color) = colors[target.output] else {
+                    continue;
+                };
+                let rt = target.rt;
                 let bpp = rt.format.bytes_per_pixel;
                 let va = rt.addr + rt.texel_offset(tx, ty) as u64;
                 // Blending and masking both need the existing value.
-                let dst = if self.blend_target.enabled || !self.writes_all_channels {
+                let dst = if target.blend.enabled || target.mask != [true; 4] {
                     Some(rt.format.decode(ctx.read_pixel(va, bpp)?)?)
                 } else {
                     None
                 };
                 let mut out = color;
                 if let Some(dst) = dst {
-                    if self.blend_target.enabled {
+                    if target.blend.enabled {
                         let src = source_color(color, rt.format);
-                        out = blend(self.blend_target, self.blend_constant, src, dst);
+                        out = blend(target.blend, self.blend_constant, src, dst);
                     }
-                    for (channel, keep) in self.color_mask.iter().enumerate() {
+                    for (channel, keep) in target.mask.iter().enumerate() {
                         if !keep {
                             out[channel] = dst[channel];
                         }

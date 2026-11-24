@@ -6,6 +6,8 @@ use super::super::vertex::NUM_VARYINGS;
 use super::*;
 use crate::gpu::engine::threed::{CullState, Engine3D};
 use crate::gpu::exec::ExecCtx;
+use crate::gpu::renderer::Software;
+use crate::gpu::testing::{two_colour_fragment_body, with_output_map, TARGET_HEIGHT, TARGET_WIDTH};
 
 // Full-pipeline integration tests.
 
@@ -722,4 +724,61 @@ fn a_points_draw_lands_what_its_vertex_shader_stores() {
         trace: false,
     };
     assert!(!super::super::only_shades_vertices(&h.engine, &ctx).unwrap());
+}
+
+/// The first texel of the target `RenderTargetControl` maps output 0 to, and of slot 1's.
+fn first_texels(h: &mut Harness) -> (u32, u32) {
+    (h.target()[0], h.second_target_texels()[0])
+}
+
+const RED: u32 = 0xff00_00ff;
+const BLUE: u32 = 0xffff_0000;
+const UNTOUCHED: u32 = 0x1234_5678;
+
+/// Breath of the Wild writes its G-buffer through six outputs at once; each lands in the
+/// target its slot holds.
+#[test]
+fn a_draw_writes_each_colour_output_into_its_own_target() {
+    let mut h = Harness::with_fragment_shader(with_output_map(0xFF, two_colour_fragment_body()));
+    h.second_target(UNTOUCHED, 2);
+    h.triangle([0.0; 4]);
+    h.draw_with(&mut Software).unwrap();
+    assert_eq!(first_texels(&mut h), (RED, BLUE));
+    // Outside the triangle neither target is touched.
+    assert_eq!(
+        h.second_target_texels()[(TARGET_WIDTH * TARGET_HEIGHT - 1) as usize],
+        UNTOUCHED
+    );
+}
+
+/// A target bound past output 0 that the output map leaves out keeps what it holds: Breath
+/// of the Wild binds one surface to two slots and writes only one of them.
+#[test]
+fn an_output_the_map_leaves_out_keeps_its_target() {
+    let mut h = Harness::with_fragment_shader(with_output_map(0x0F, two_colour_fragment_body()));
+    h.second_target(UNTOUCHED, 2);
+    h.triangle([0.0; 4]);
+    h.draw_with(&mut Software).unwrap();
+    assert_eq!(first_texels(&mut h), (RED, UNTOUCHED));
+}
+
+/// Registers are numbered past written targets only, so output 1 reads `r0` onward when the
+/// map leaves output 0 out, and output 0 still lands as opaque black.
+#[test]
+fn an_output_after_an_unwritten_one_reads_the_first_registers() {
+    let mut h = Harness::with_fragment_shader(with_output_map(0xF0, two_colour_fragment_body()));
+    h.second_target(UNTOUCHED, 2);
+    h.triangle([0.0; 4]);
+    h.draw_with(&mut Software).unwrap();
+    assert_eq!(first_texels(&mut h), (0xff00_0000, RED));
+}
+
+/// Without `RenderTargetControl` counting it, slot 1 is not written.
+#[test]
+fn a_draw_of_one_output_leaves_slot_one_alone() {
+    let mut h = Harness::with_fragment_shader(with_output_map(0xFF, two_colour_fragment_body()));
+    h.second_target(UNTOUCHED, 1);
+    h.triangle([0.0; 4]);
+    h.draw_with(&mut Software).unwrap();
+    assert_eq!(first_texels(&mut h), (RED, UNTOUCHED));
 }

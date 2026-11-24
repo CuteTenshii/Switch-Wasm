@@ -360,6 +360,34 @@ pub fn gather_cube_fragment_shader(component: u32) -> Vec<u8> {
     bytes
 }
 
+/// `body` behind a Shader Program Header whose output map is `omap_target`, a nibble of
+/// components per render target, as Mesa and nvn lay fragment programs out.
+pub fn with_output_map(omap_target: u32, body: Vec<u8>) -> Vec<u8> {
+    let mut program = vec![0u8; 0x50];
+    program[18 * 4..19 * 4].copy_from_slice(&omap_target.to_le_bytes());
+    program.extend(body);
+    program
+}
+
+/// A fragment program body setting `r0..r7` to two opaque colours, red then blue; behind
+/// [`with_output_map`] each output's components take them in order.
+pub fn two_colour_fragment_body() -> Vec<u8> {
+    let one = 1.0f32.to_bits();
+    alu_fragment_shader(
+        &[
+            (0, one),
+            (1, 0),
+            (2, 0),
+            (3, one),
+            (4, 0),
+            (5, 0),
+            (6, one),
+            (7, one),
+        ],
+        &[],
+    )
+}
+
 /// `mov32i $reg, imm`.
 fn mov32i(reg: u8, imm: u32) -> (u32, u32) {
     (
@@ -626,6 +654,8 @@ pub struct Harness {
 }
 
 pub const TARGET_WIDTH: u32 = 16;
+/// Where [`Harness::second_target`] puts its surface, past every other harness surface.
+const SECOND_TARGET: u64 = 0x3800;
 pub const TARGET_HEIGHT: u32 = 8;
 
 impl Harness {
@@ -935,6 +965,36 @@ impl Harness {
             }
         }
         out
+    }
+
+    /// Bind a second 16x8 pitch-linear RGBA8 target at slot 1, every texel `fill`, and have
+    /// draws write `outputs` colour outputs, each to the slot of its own number.
+    pub fn second_target(&mut self, fill: u32, outputs: u32) {
+        let addr = self.base + SECOND_TARGET;
+        let base = 0x200 + 0x10;
+        self.engine.regs.set(base, (addr >> 32) as u32);
+        self.engine.regs.set(base + 1, addr as u32);
+        self.engine.regs.set(base + 2, TARGET_WIDTH * 4);
+        self.engine.regs.set(base + 3, TARGET_HEIGHT);
+        self.engine.regs.set(base + 4, 0xD5); // RGBA8Unorm
+        self.engine.regs.set(base + 5, 1 << 12); // IsLinear
+        self.engine.regs.set(base + 6, 1);
+        let identity: u32 = (0..8).map(|slot| slot << (4 + 3 * slot)).sum();
+        self.engine.regs.set(0x487, outputs | identity);
+        let mut ctx = self.ctx();
+        for texel in 0..TARGET_WIDTH * TARGET_HEIGHT {
+            ctx.write_u32(addr + u64::from(texel) * 4, fill)
+                .expect("the target fits its mapping");
+        }
+    }
+
+    /// Read [`Harness::second_target`]'s surface texel by texel, row-major.
+    pub fn second_target_texels(&mut self) -> Vec<u32> {
+        let addr = self.base + SECOND_TARGET;
+        let ctx = self.ctx();
+        (0..TARGET_WIDTH * TARGET_HEIGHT)
+            .map(|texel| ctx.read_u32(addr + u64::from(texel) * 4).unwrap())
+            .collect()
     }
 
     /// Bind an 8x8 RGBA8 image for [`bindless_fragment_shader`] as image 1 and sampler 1,

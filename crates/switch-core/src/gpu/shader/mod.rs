@@ -147,6 +147,11 @@ impl ProgramHeader {
     pub fn writes_any_color(&self) -> bool {
         self.omap_target != 0
     }
+
+    /// Whether the output map names any component of render target `rt`.
+    pub fn writes_target(&self, rt: u32) -> bool {
+        rt < 8 && (self.omap_target >> (rt * 4)) & 0xF != 0
+    }
 }
 
 /// Where one `texs` instruction's results land.
