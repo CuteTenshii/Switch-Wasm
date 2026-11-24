@@ -107,10 +107,18 @@ pub(super) fn blend(
     src: [f32; 4],
     dst: [f32; 4],
 ) -> [f32; 4] {
-    let src_rgb = blend_factor(target.func_rgb_src, src, dst, constant);
-    let dst_rgb = blend_factor(target.func_rgb_dst, src, dst, constant);
-    let src_a = blend_factor(target.func_alpha_src, src, dst, constant)[3];
-    let dst_a = blend_factor(target.func_alpha_dst, src, dst, constant)[3];
+    // Min and max take the source and destination as they are, whatever the factors say.
+    let unweighted = |equation: u32| matches!(equation, 0x4 | 0x5 | 0x8007 | 0x8008);
+    let factor = |code: u32, unweighted: bool| match unweighted {
+        true => [1.0; 4],
+        false => blend_factor(code, src, dst, constant),
+    };
+    let rgb_unweighted = unweighted(target.equation_rgb);
+    let alpha_unweighted = unweighted(target.equation_alpha);
+    let src_rgb = factor(target.func_rgb_src, rgb_unweighted);
+    let dst_rgb = factor(target.func_rgb_dst, rgb_unweighted);
+    let src_a = factor(target.func_alpha_src, alpha_unweighted)[3];
+    let dst_a = factor(target.func_alpha_dst, alpha_unweighted)[3];
     let mut out = [0.0f32; 4];
     for i in 0..3 {
         out[i] = blend_equation(

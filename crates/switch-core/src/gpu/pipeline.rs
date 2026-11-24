@@ -769,17 +769,33 @@ fn blend(
             code => code,
         })
     };
+    // Min and max ignore the factors, and WebGPU refuses any but one beside them.
+    let component = |src: u32, dst: u32, equation: u32| -> Result<BlendComponent, Unsupported> {
+        let operation = blend_equation(equation)?;
+        Ok(match operation {
+            BlendOperation::Min | BlendOperation::Max => BlendComponent {
+                src_factor: BlendFactor::One,
+                dst_factor: BlendFactor::One,
+                operation,
+            },
+            _ => BlendComponent {
+                src_factor: factor(src)?,
+                dst_factor: factor(dst)?,
+                operation,
+            },
+        })
+    };
     let blend = Blend {
-        color: BlendComponent {
-            src_factor: factor(target.func_rgb_src)?,
-            dst_factor: factor(target.func_rgb_dst)?,
-            operation: blend_equation(target.equation_rgb)?,
-        },
-        alpha: BlendComponent {
-            src_factor: factor(target.func_alpha_src)?,
-            dst_factor: factor(target.func_alpha_dst)?,
-            operation: blend_equation(target.equation_alpha)?,
-        },
+        color: component(
+            target.func_rgb_src,
+            target.func_rgb_dst,
+            target.equation_rgb,
+        )?,
+        alpha: component(
+            target.func_alpha_src,
+            target.func_alpha_dst,
+            target.equation_alpha,
+        )?,
     };
     let constant = match alpha_only {
         Some(_) => [constant[3]; 4],
@@ -1006,6 +1022,33 @@ mod tests {
 
     fn both(c: BlendComponent) -> Blend {
         Blend { color: c, alpha: c }
+    }
+
+    /// Min and max ignore the factors, and WebGPU refuses a pipeline that names any but one
+    /// beside them: Breath of the Wild leaves source alpha beside a min.
+    #[test]
+    fn a_min_or_max_blend_takes_one_for_both_factors() {
+        let target = crate::gpu::engine::threed::BlendTarget {
+            enabled: true,
+            equation_rgb: 0x8007,
+            func_rgb_src: 0x4302,
+            func_rgb_dst: 0x4303,
+            equation_alpha: 5,
+            func_alpha_src: 5,
+            func_alpha_dst: 1,
+        };
+        let (Some(blend), _) = super::blend(target, [0.0; 4]).unwrap() else {
+            panic!("blending is on");
+        };
+        let one = component(BlendFactor::One, BlendFactor::One, BlendOperation::Min);
+        assert_eq!(blend.color, one);
+        assert_eq!(
+            blend.alpha,
+            BlendComponent {
+                operation: BlendOperation::Max,
+                ..one
+            }
+        );
     }
 
     /// Breath of the Wild's `R16G16B16A16_UNORM` probes blend a constant alpha against its

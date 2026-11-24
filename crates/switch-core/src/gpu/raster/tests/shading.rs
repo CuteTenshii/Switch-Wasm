@@ -588,3 +588,21 @@ fn depth_test_keeps_the_nearer_of_two_overlapping_triangles() {
     draw(&engine, &mut ctx).unwrap();
     assert_eq!(ctx.read_u32(rt.addr).unwrap() as u128, expected);
 }
+
+/// Min and max compare the source and destination as they are: GL, D3D and the hardware all
+/// ignore the factors, which Breath of the Wild leaves at source alpha beside a min.
+#[test]
+fn min_and_max_ignore_the_blend_factors() {
+    let min = BlendTarget {
+        enabled: true,
+        equation_rgb: 0x8007,
+        func_rgb_src: 0x4302,
+        func_rgb_dst: 0x4303,
+        equation_alpha: 5, // Max, D3D numbering
+        func_alpha_src: 5, // SrcAlpha
+        func_alpha_dst: 1, // Zero
+    };
+    let src = [0.2, 0.8, 0.5, 0.5];
+    let dst = [0.6, 0.4, 0.5, 0.25];
+    assert_eq!(blend(min, [0.0; 4], src, dst), [0.2, 0.4, 0.5, 0.5]);
+}
