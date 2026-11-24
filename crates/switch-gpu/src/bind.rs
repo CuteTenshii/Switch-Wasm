@@ -1089,7 +1089,15 @@ impl Gpu {
             self.scratch.push(Scratch::Texture(texture));
             return Err(why);
         }
-        if self.space.held_copies.len() >= crate::MAX_HELD_COPIES {
+        let kept: u64 = self
+            .space
+            .held_copies
+            .values()
+            .map(|copy| crate::readback::texture_bytes(&copy.texture))
+            .sum();
+        let over_budget =
+            kept + crate::readback::texture_bytes(&texture) > crate::MAX_HELD_COPY_BYTES;
+        if self.space.held_copies.len() >= crate::MAX_HELD_COPIES || over_budget {
             let stale: Vec<HeldCopy> = self
                 .space
                 .held_copies

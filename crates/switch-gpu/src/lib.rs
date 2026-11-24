@@ -715,6 +715,10 @@ struct HeldCopy {
 /// Past this many, every kept copy is dropped: a title's set of sampled held surfaces is small.
 const MAX_HELD_COPIES: usize = 64;
 
+/// Past this many bytes of them, too: one copy of a layered shadow array runs to tens of MiB,
+/// so a count alone does not bound the memory they keep.
+const MAX_HELD_COPY_BYTES: u64 = 512 << 20;
+
 #[derive(Debug)]
 pub struct Gpu {
     /// Never read, but must be held: a browser loses the device once the instance is dropped.

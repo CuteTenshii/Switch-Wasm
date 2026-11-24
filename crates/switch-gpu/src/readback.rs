@@ -85,24 +85,27 @@ impl Scratch {
     pub(crate) fn bytes(&self) -> u64 {
         match self {
             Scratch::Buffer(buffer) => buffer.size(),
-            Scratch::Texture(texture) => {
-                let format = texture.format();
-                let (block_width, block_height) = format.block_dimensions();
-                // Combined depth-stencil formats have no single block size; 8 bytes bounds them.
-                let block = u64::from(format.block_copy_size(None).unwrap_or(8));
-                let levels: u64 = (0..texture.mip_level_count())
-                    .map(|level| {
-                        let size = texture.size().mip_level_size(level, texture.dimension());
-                        u64::from(size.width.div_ceil(block_width))
-                            * u64::from(size.height.div_ceil(block_height))
-                            * u64::from(size.depth_or_array_layers)
-                            * block
-                    })
-                    .sum();
-                levels * u64::from(texture.sample_count())
-            }
+            Scratch::Texture(texture) => texture_bytes(texture),
         }
     }
+}
+
+/// Device memory a texture holds, every level, layer and sample counted.
+pub(crate) fn texture_bytes(texture: &wgpu::Texture) -> u64 {
+    let format = texture.format();
+    let (block_width, block_height) = format.block_dimensions();
+    // Combined depth-stencil formats have no single block size; 8 bytes bounds them.
+    let block = u64::from(format.block_copy_size(None).unwrap_or(8));
+    let levels: u64 = (0..texture.mip_level_count())
+        .map(|level| {
+            let size = texture.size().mip_level_size(level, texture.dimension());
+            u64::from(size.width.div_ceil(block_width))
+                * u64::from(size.height.div_ceil(block_height))
+                * u64::from(size.depth_or_array_layers)
+                * block
+        })
+        .sum();
+    levels * u64::from(texture.sample_count())
 }
 
 /// Guest memory shaders write through atomics, held on the device until the next flush.
