@@ -342,7 +342,9 @@ try {
   const tapping = presses.map(({ key, next, every }) => repeat(next, every, () => tap(key)));
   const shooting = screenshot && screenshotEvery
     ? repeat(screenshotEvery, screenshotEvery, (at) =>
-        page.locator('#screen').screenshot({ path: screenshot.replace(/(\.\w+)?$/, `-${at}s$1`) }))
+        page.locator('#screen').screenshot({ path: screenshot.replace(/(\.\w+)?$/, `-${at}s$1`) })
+          // A page at 1 fps can outlast the screenshot timeout; a missed shot must not end the run.
+          .catch((error) => say(`${elapsed()}s: no screenshot: ${String(error.message).split('\n')[0]}`)))
     : null;
   const runStep = async ({ verb, rest }) => {
     const [first, ...others] = rest.split(/\s+/);
