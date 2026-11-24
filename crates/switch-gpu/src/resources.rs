@@ -518,7 +518,7 @@ impl Gpu {
             // Recorded draws still use it, unless they are submitted first: a pass of hundreds of
             // draws can each leave a large stale copy behind.
             let pending: u64 = self.scratch.iter().map(Scratch::bytes).sum();
-            if pending < crate::MAX_SCRATCH_BYTES {
+            if pending < crate::MAX_SCRATCH_BYTES && self.scratch.len() < crate::MAX_SCRATCH_ITEMS {
                 return;
             }
             self.submit_batch();
