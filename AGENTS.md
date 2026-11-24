@@ -110,6 +110,11 @@ actual browser run, not just host tests.
   so run `make assets` first. The browser is Playwright's
   (`bunx playwright install chromium`, once per machine). Flags are in
   `docs/tooling.md`.
+- The GPU fallbacks to fix in a title are the ones a browser run reports: the
+  Rendering section that `tools/browser_boot.mjs` saves lists every fallback
+  reason with its count. Get that list before changing anything. Native
+  `screenshot` runs are native wgpu, not the browser's WebGPU; use them to
+  narrow down a fallback the browser reported, not to find which ones exist.
 - Before reproducing a fault or fallback in a title, find out how the title
   gets there: a menu, a prompt or a scene that waits for input may have to be
   passed (`--press`, `--draw-from-frame`, shots to look at the screen) before
