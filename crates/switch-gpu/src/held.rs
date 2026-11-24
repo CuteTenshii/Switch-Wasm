@@ -62,7 +62,7 @@ impl Gpu {
     /// Destroy an address space's device textures; nothing is owed to guest memory that is gone.
     pub(super) fn drop_space(&mut self, space: Space) {
         self.submit_batch();
-        for held in space.held.into_values().chain(space.evicted) {
+        for held in space.held.into_values() {
             held.texture.destroy();
             if let Some(other) = &held.other {
                 other.texture.destroy();
@@ -102,10 +102,10 @@ impl Gpu {
         match self.space.held.get(&target.addr) {
             // The same surface as last time.
             Some(held) if held.target == *target => return Ok(()),
-            // A different surface at the same address: the guest rebound it; write the old one back later.
+            // A different surface at the same address: the guest rebound it.
             Some(_) => {
                 if let Some(held) = self.space.held.remove(&target.addr) {
-                    self.space.evicted.push(held);
+                    self.ask_for(held);
                 }
             }
             None => {}
@@ -376,8 +376,11 @@ impl Gpu {
         }
     }
 
-    /// Ask for a surface back without waiting; [`Gpu::flush`] collects it.
-    fn ask_for(&mut self, held: Held) {
+    /// Ask for a surface back without waiting, and stop holding it; [`Gpu::flush`] collects it.
+    /// A surface the guest rebinds goes back at once rather than at the next `submit_frame`,
+    /// which a frame shown on the device skips: Breath of the Wild rebinds its G-buffer memory
+    /// every frame, and the textures waiting ran the GPU out of memory.
+    pub(super) fn ask_for(&mut self, held: Held) {
         self.submit_batch();
         let held = self.merge_crop(held);
         // A companion's contents must be in the surface before it is copied.
@@ -905,9 +908,6 @@ impl Gpu {
     fn ask_for_scanout(&mut self, scanout: Option<u64>) {
         timed!(self, flush_ask, {
             self.space.asked += 1;
-            for held in std::mem::take(&mut self.space.evicted) {
-                self.ask_for(held);
-            }
             if let Some(addr) = scanout {
                 self.send_back_kept(addr);
             }
@@ -918,15 +918,12 @@ impl Gpu {
         });
     }
 
-    /// Ask for every held and evicted surface as one generation.
+    /// Ask for every held surface as one generation.
     fn ask_for_all(&mut self) {
         timed!(self, flush_ask, {
             self.space.sync_all = false;
             self.space.aliased.clear();
             self.space.asked += 1;
-            for held in std::mem::take(&mut self.space.evicted) {
-                self.ask_for(held);
-            }
             let addresses: Vec<u64> = self.space.held.keys().copied().collect();
             for addr in addresses {
                 self.flush_one(addr);
@@ -936,7 +933,7 @@ impl Gpu {
     }
 
     /// Check on the readbacks, then land the oldest ones that have arrived.
-    fn land_ready(&mut self, ctx: &mut ExecCtx) -> Result<()> {
+    pub(super) fn land_ready(&mut self, ctx: &mut ExecCtx) -> Result<()> {
         use std::sync::atomic::Ordering;
         let polled = if self.defer_readbacks {
             self.device.poll(wgpu::PollType::Poll)
@@ -1026,7 +1023,7 @@ impl Gpu {
                         .iter()
                         .any(|addr| self.space.held.contains_key(addr))
             };
-        if owed || !self.space.evicted.is_empty() {
+        if owed {
             let mut asks: Vec<u64> = self.space.pending.iter().map(|p| p.generation).collect();
             asks.dedup();
             if asks.len() >= MAX_FRAMES_IN_FLIGHT {
@@ -1065,7 +1062,6 @@ impl Gpu {
         self.release_scratch();
         // Nothing held, owed or in flight: nothing to do (and no poll).
         if self.space.held.is_empty()
-            && self.space.evicted.is_empty()
             && self.space.globals.is_empty()
             && self.space.pending.is_empty()
         {
@@ -1096,16 +1092,6 @@ impl Gpu {
         };
         timed!(self, flush_ask, {
             self.space.asked += 1;
-            let (now, later): (Vec<Held>, Vec<Held>) = std::mem::take(&mut self.space.evicted)
-                .into_iter()
-                .partition(|held| {
-                    let span = held_span(held);
-                    touches(&span, read) || touches(&span, written)
-                });
-            self.space.evicted = later;
-            for held in now {
-                self.ask_for(held);
-            }
             let mut owed: Vec<(u64, bool)> = self
                 .space
                 .held

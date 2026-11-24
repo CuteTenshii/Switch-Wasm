@@ -646,8 +646,6 @@ type BuiltModule = (Layout, u64, wgpu::ShaderModule);
 struct Space {
     /// Surfaces this is holding, by guest address.
     held: std::collections::HashMap<u64, Held>,
-    /// Surfaces the guest rebound, still owing a write-back.
-    evicted: Vec<Held>,
     /// Readbacks asked for and not yet collected, oldest first.
     pending: Vec<Pending>,
     /// Memory atomics wrote on the device, by guest address, owed to guest memory at the next flush.
@@ -1459,6 +1457,9 @@ impl Renderer for Gpu {
         if self.screen.is_none() || self.give_up() || self.software_frame {
             return Ok(false);
         }
+        // A frame shown here skips `submit_frame`, which otherwise collects finished readbacks:
+        // without this, every surface sent back while frames were shown so stayed on the device.
+        self.land_ready(ctx)?;
         // A write since the last draw has to count before the held surface is shown.
         self.evict_written(ctx);
         Ok(self.scan_out_held(ctx, shot))
@@ -1497,7 +1498,6 @@ impl Renderer for Gpu {
             .field("modules", self.modules.len())
             // `held` grows with flush cost.
             .field("held", self.space.held.len())
-            .field("evicted", self.space.evicted.len())
             .field("cropSwitches", self.crop_switches)
             .field("pending", self.space.pending.len());
         out.object("read", |read| {

@@ -319,7 +319,7 @@ impl Gpu {
             Some(held) if held.target == *target => return Ok(()),
             Some(_) => {
                 if let Some(held) = self.space.held.remove(&target.addr) {
-                    self.space.evicted.push(held);
+                    self.ask_for(held);
                 }
             }
             None => {}

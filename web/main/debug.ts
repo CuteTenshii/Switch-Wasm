@@ -172,7 +172,7 @@ async function updateRenderDebug(): Promise<void> {
   $('render-rejected').textContent = fmtCount(g.deviceErrorCount ?? 0);
   $('render-pipelines').textContent = fmtCount(g.pipelines ?? 0);
   $('render-modules').textContent = fmtCount(g.modules ?? 0);
-  $('render-held').textContent = `${g.held ?? 0} (${g.evicted ?? 0} evicted, ${g.pending ?? 0} pending)`;
+  $('render-held').textContent = `${g.held ?? 0} (${g.pending ?? 0} pending)`;
   $('render-syncs').textContent = `${fmtCount(g.syncAll ?? 0)} asked (${fmtCount(g.syncAliases ?? 0)} aliased, `
     + `${fmtCount(g.syncReads ?? 0)} read, ${fmtCount(g.syncWrites ?? 0)} guest-written), `
     + `${fmtCount(g.syncNoScanout ?? 0)} without a scan-out, ${fmtCount(g.syncOverBytes ?? 0)} over the cap`;

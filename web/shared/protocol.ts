@@ -39,7 +39,6 @@ export interface GpuReport {
   modules?: number;
   // Surfaces held on the device; every flush writes them all back.
   held?: number;
-  evicted?: number;
   pending?: number;
   // Bytes lifted from guest memory by `Uploads::of`, by category.
   read?: { textures: number; vertex: number; constants: number; index: number };

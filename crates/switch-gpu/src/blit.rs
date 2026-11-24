@@ -102,14 +102,9 @@ impl Gpu {
     /// so guest memory is not yet what the device would be given.
     fn in_flight_overlaps(&self, range: &Range<u64>) -> bool {
         self.space
-            .evicted
+            .pending
             .iter()
-            .any(|held| overlap(&span(&held.target), range))
-            || self
-                .space
-                .pending
-                .iter()
-                .any(|pending| pending.target().is_some_and(|t| overlap(&span(t), range)))
+            .any(|pending| pending.target().is_some_and(|t| overlap(&span(t), range)))
     }
 
     /// Whether nothing held, rebound or on its way back shares memory with `ranges`.
@@ -117,7 +112,7 @@ impl Gpu {
         self.touches_no_surface(ranges) && self.no_global_in(ranges)
     }
 
-    /// Whether `ranges` miss every surface held on the device, evicted or on its way back.
+    /// Whether `ranges` miss every surface held on the device or on its way back.
     pub(super) fn touches_no_surface(&self, ranges: &[Range<u64>]) -> bool {
         let clear = |target: &Target| {
             let held = span(target);
@@ -125,12 +120,11 @@ impl Gpu {
         };
         self.space.held.values().all(|held| {
             clear(&held.target) && held.other.as_ref().is_none_or(|other| clear(&other.target))
-        }) && self.space.evicted.iter().all(|held| clear(&held.target))
-            && self
-                .space
-                .pending
-                .iter()
-                .all(|pending| pending.target().is_none_or(clear))
+        }) && self
+            .space
+            .pending
+            .iter()
+            .all(|pending| pending.target().is_none_or(clear))
     }
 
     /// Whether `ranges` miss every buffer shaders wrote on the device, held or on its way back.

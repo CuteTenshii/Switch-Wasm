@@ -504,14 +504,6 @@ impl Gpu {
                         Some(h) => format!(" (inside the held surface at {:#x})", h.target.addr),
                         None if self
                             .space
-                            .evicted
-                            .iter()
-                            .any(|h| h.target.addr == t.key.addr) =>
-                        {
-                            " (evicted, not yet written back)".to_string()
-                        }
-                        None if self
-                            .space
                             .pending
                             .iter()
                             .any(|p| p.target().is_some_and(|s| s.addr == t.key.addr)) =>
