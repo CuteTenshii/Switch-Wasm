@@ -1034,7 +1034,7 @@ impl Gpu {
                 .filter(|(layer, _)| layers.contains(layer))
                 .cloned()
                 .collect();
-            // Draws recorded before this are submitted first, so they still sample the old layers.
+            // Draws recorded before this come before it in the batch, so they still sample the old layers.
             if let Err(why) = self.fill_held_layers(&texture, upload, &stale, false) {
                 if let Some(copy) = self.space.held_copies.remove(&key) {
                     self.scratch.push(Scratch::Texture(copy.texture));
@@ -1132,11 +1132,7 @@ impl Gpu {
             }
         }
         let mut unorm_depths = unorm_depths.into_iter();
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("held layers"),
-            });
+        let mut encoder = self.take_batch();
         let extent = wgpu::Extent3d {
             width: upload.width,
             height: upload.height,
@@ -1214,7 +1210,7 @@ impl Gpu {
                 }
             }
         }
-        self.submit_with_batch(encoder);
+        self.restore_batch(encoder);
         Ok(())
     }
 
@@ -1292,13 +1288,9 @@ impl Gpu {
             wgpu::TextureUsages::COPY_DST,
         );
         let converted = texture("held copy", format, wgpu::TextureUsages::RENDER_ATTACHMENT);
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("held words"),
-            });
+        let mut encoder = self.take_batch();
         self.copy_through_buffer(&mut encoder, surface, words.as_image_copy(), size);
-        self.submit_with_batch(encoder);
+        self.restore_batch(encoder);
         self.convert_packed_depth(&words, &converted, &[]);
         self.scratch.push(Scratch::Texture(words));
         Ok(converted)
@@ -1340,11 +1332,7 @@ impl Gpu {
         into: &wgpu::Texture,
         depths: &[(u32, wgpu::Texture)],
     ) {
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("packed depth"),
-            });
+        let mut encoder = self.take_batch();
         for layer in 0..words.depth_or_array_layers() {
             let held = depths.iter().find(|(at, _)| *at == layer).map(|(_, d)| d);
             let pipeline = self.packed_depth_pipeline(held.is_some());
@@ -1400,7 +1388,7 @@ impl Gpu {
             pass.set_bind_group(0, &group, &[]);
             pass.draw(0..3, 0..1);
         }
-        self.submit_with_batch(encoder);
+        self.restore_batch(encoder);
     }
 
     /// The pipeline of [`Gpu::convert_packed_depth`], built once per source of depth.

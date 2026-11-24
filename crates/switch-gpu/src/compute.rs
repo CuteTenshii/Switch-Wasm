@@ -402,13 +402,7 @@ impl Gpu {
             held.writes += 1;
             held.overwritten.clear();
         }
-        self.end_pass();
-        let mut encoder = self.batch.take().unwrap_or_else(|| {
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("draws"),
-                })
-        });
+        let mut encoder = self.take_batch();
         for bound in image_textures.iter().flatten() {
             bound.copy_in(&mut encoder);
         }
@@ -425,7 +419,7 @@ impl Gpu {
         for bound in image_textures.iter().flatten() {
             bound.copy_out(&mut encoder);
         }
-        self.batch = Some(encoder);
+        self.restore_batch(encoder);
         self.batched_draws += 1;
         if self.batched_draws >= crate::MAX_BATCHED_DRAWS {
             self.submit_batch();

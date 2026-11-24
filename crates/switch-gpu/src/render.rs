@@ -511,13 +511,7 @@ impl Gpu {
                 }
             }
         } else {
-            self.end_pass();
-            let mut encoder = self.batch.take().unwrap_or_else(|| {
-                self.device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("draws"),
-                    })
-            });
+            let mut encoder = self.take_batch();
             for (_, layers) in &p.images {
                 for layer in layers {
                     layer.copy_in(&mut encoder);
@@ -573,7 +567,7 @@ impl Gpu {
             });
             // Kept open beside its encoder, which stays locked until `end_pass`.
             let pass = pass.forget_lifetime();
-            self.batch = Some(encoder);
+            self.restore_batch(encoder);
             self.pass = Some(crate::OpenPass {
                 pass,
                 colour: colour_target,

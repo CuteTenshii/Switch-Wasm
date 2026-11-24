@@ -124,11 +124,7 @@ impl Gpu {
                 })
             });
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("clear"),
-            });
+        let mut encoder = self.take_batch();
         {
             let attachments: Vec<Option<wgpu::RenderPassColorAttachment>> = colour_view
                 .as_ref()
@@ -195,7 +191,7 @@ impl Gpu {
                 pass.draw(0..3, 0..1);
             }
         }
-        self.submit_with_batch(encoder);
+        self.restore_batch(encoder);
         Ok(())
     }
 

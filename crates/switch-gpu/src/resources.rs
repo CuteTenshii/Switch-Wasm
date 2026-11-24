@@ -482,6 +482,22 @@ impl Gpu {
         }
     }
 
+    /// The batch's encoder with no pass open, for the backend's own copies and passes between
+    /// draws, which then run in order with them. Hand it back with [`Gpu::restore_batch`].
+    pub(super) fn take_batch(&mut self) -> wgpu::CommandEncoder {
+        self.end_pass();
+        self.batch.take().unwrap_or_else(|| {
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("draws"),
+                })
+        })
+    }
+
+    pub(super) fn restore_batch(&mut self, encoder: wgpu::CommandEncoder) {
+        self.batch = Some(encoder);
+    }
+
     /// Submit an encoder after the draws recorded before it.
     pub(super) fn submit_with_batch(&mut self, encoder: wgpu::CommandEncoder) {
         self.end_pass();

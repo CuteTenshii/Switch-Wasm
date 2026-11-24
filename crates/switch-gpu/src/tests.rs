@@ -1415,6 +1415,7 @@ fn the_packed_depth_pass_converts_uploaded_words_bit_for_bit() {
     }
     let (source, image) = packed_words(&gpu, &words, width);
     gpu.convert_packed_depth(&source, &image, &[]);
+    gpu.submit_batch();
     let read = read_rg32(&gpu, &image, width);
     for (i, &word) in words.iter().enumerate() {
         let at = i * 8;
@@ -1502,6 +1503,7 @@ fn the_packed_depth_pass_converts_depths_bit_for_bit() {
         .collect();
     let (source, image) = packed_words(&gpu, &words, width);
     gpu.convert_packed_depth(&source, &image, &[(0, surface)]);
+    gpu.submit_batch();
     let read = read_rg32(&gpu, &image, width);
 
     let layout = switch_core::gpu::engine::threed::DepthLayout {
@@ -2998,20 +3000,23 @@ fn a_kept_copy_of_a_held_array_takes_only_the_layer_written_since() {
     let made = gpu.held_copies_made;
 
     // Work recorded before the layer is drawn again, as an earlier draw sampling the copy is.
-    let mut earlier = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    let mut earlier = gpu.take_batch();
     let before = readback(&gpu);
     copy_layer(&gpu, &mut earlier, &copy, 1, &before);
-    gpu.batch = Some(earlier);
-    fill(&gpu, &drawn, 0x33);
+    gpu.restore_batch(earlier);
+    // Drawn again by work recorded after it, as the backend's draws into a held surface are.
+    let redraw = surface(&gpu, 0x33);
+    let mut encoder = gpu.take_batch();
+    encoder.copy_texture_to_texture(redraw.as_image_copy(), drawn.as_image_copy(), extent);
+    gpu.restore_batch(encoder);
     let again = gpu
         .texture_over_held(&upload, view, &held, &[1, 2], false)
         .expect("the update");
     assert!(again == copy, "a new copy was made for one written layer");
     assert_eq!(gpu.held_copies_made, made);
     assert_eq!(gpu.held_copies_updated, 1);
-    assert!(gpu.batch.is_none(), "the earlier work was left unsubmitted");
+    // The update is recorded after the earlier work, so `before` below still sees the old layer.
+    gpu.submit_batch();
 
     let after = [readback(&gpu), readback(&gpu)];
     let mut encoder = gpu

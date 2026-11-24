@@ -2,7 +2,7 @@
 
 use crate::builtin::LOAD_DEPTH_WGSL;
 use crate::convert::{depth_texture_format, held_attachment_format, narrow, widen, Widen};
-use crate::readback::{Held, Pending, Readback, MAP_FAILED, MAP_READY, MAP_WAITING};
+use crate::readback::{Held, Pending, Readback, Scratch, MAP_FAILED, MAP_READY, MAP_WAITING};
 use crate::resources::guest_pages;
 use crate::{Gpu, Space, COPY_ALIGNMENT, MAX_FRAMES_IN_FLIGHT};
 use switch_core::gpu::exec::ExecCtx;
@@ -253,12 +253,10 @@ impl Gpu {
         if let Some(other) = crop.other.take() {
             self.copy_depth(&other.texture, &texture);
             dirty |= other.dirty;
-            self.submit_batch();
-            other.texture.destroy();
+            self.scratch.push(Scratch::Texture(other.texture));
         }
         self.copy_depth(&crop.texture, &texture);
-        self.submit_batch();
-        crop.texture.destroy();
+        self.scratch.push(Scratch::Texture(crop.texture));
         self.crop_switches += 1;
         self.space.held.insert(
             full.addr,
@@ -282,17 +280,17 @@ impl Gpu {
             return held;
         };
         let mut other = *other;
-        self.submit_batch();
+        // Destroyed after the batch, whose draws may use either.
         if held.target.width >= other.target.width && held.target.height >= other.target.height {
             held.dirty |= other.dirty;
             held.overwritten.append(&mut other.overwritten);
-            other.texture.destroy();
+            self.scratch.push(Scratch::Texture(other.texture));
             held
         } else {
             self.copy_depth(&held.texture, &other.texture);
             other.dirty |= held.dirty;
             other.overwritten.append(&mut held.overwritten);
-            held.texture.destroy();
+            self.scratch.push(Scratch::Texture(held.texture));
             other
         }
     }
@@ -314,11 +312,7 @@ impl Gpu {
             }],
         });
         let view = to.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("depth crop"),
-            });
+        let mut encoder = self.take_batch();
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("depth crop"),
@@ -346,7 +340,7 @@ impl Gpu {
             );
             pass.draw(0..3, 0..1);
         }
-        self.submit_with_batch(encoder);
+        self.restore_batch(encoder);
     }
 
     /// Write one held surface back into guest memory and stop holding it.

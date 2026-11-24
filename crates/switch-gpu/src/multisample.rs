@@ -2,7 +2,7 @@
 
 use crate::builtin::{grid_bytes, resample_wgsl, ResampleKey};
 use crate::convert::{depth_texture_format, device_attachment_format};
-use crate::readback::Companion;
+use crate::readback::{Companion, Scratch};
 use crate::{Gpu, Render, Shape};
 use switch_core::gpu::pipeline::Pipeline;
 use switch_core::gpu::surface::SampleGrid;
@@ -145,10 +145,10 @@ impl Gpu {
 
     /// Drop the companion without resolving it, for a caller about to overwrite the surface.
     pub(super) fn discard_companion(&mut self, addr: u64) {
-        self.submit_batch();
         if let Some(held) = self.space.held.get_mut(&addr) {
             if let Some(companion) = held.companion.take() {
-                companion.texture.destroy();
+                // Draws in the open batch may still use it.
+                self.scratch.push(Scratch::Texture(companion.texture));
             }
         }
     }
