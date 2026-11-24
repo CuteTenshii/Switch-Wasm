@@ -50,6 +50,8 @@ pub struct PatchedSection<P: ByteSource, B: ByteSource> {
     base: SectionSource<B>,
     relocations: Vec<Relocation>,
     subsections: Vec<Subsection>,
+    /// End of the patch data the subsection table covers; the tables follow it.
+    patch_data_len: u64,
     len: u64,
 }
 
@@ -63,7 +65,7 @@ impl<P: ByteSource, B: ByteSource> PatchedSection<P, B> {
             let end = self
                 .subsections
                 .get(i + 1)
-                .map_or(self.patch.len(), |s| s.phys);
+                .map_or(self.patch_data_len, |s| s.phys);
             if end <= at {
                 break;
             }
@@ -168,11 +170,14 @@ pub fn patched_romfs_source<P: ByteSource, B: ByteSource>(
 
     let (relocations, virtual_size) = read_relocations(&patch_section, fs.relocation)?;
     let (subsections, subsection_total) = read_subsections(&patch_section, fs.subsection)?;
-    // hactool's check: the subsection table starts where the section's data ends.
-    if subsection_total != fs.subsection.offset {
+    // The data comes first and the tables after it. Older updates count the relocation table
+    // as data, so the subsection table covers everything before itself (hactool's check);
+    // newer ones stop at the relocation table, as Pokémon Legends: Z-A 2.0.2 does.
+    let relocation_end = fs.relocation.offset.saturating_add(fs.relocation.size);
+    if subsection_total > fs.subsection.offset || relocation_end > fs.subsection.offset {
         return Err(Error::Nca(format!(
-            "patch subsection table covers {:#x} bytes but starts at {:#x}; wrong keys or a corrupt update",
-            subsection_total, fs.subsection.offset
+            "patch subsection table covers {:#x} bytes and the relocation table ends at {:#x},              but the subsection table starts at {:#x}; wrong keys or a corrupt update",
+            subsection_total, relocation_end, fs.subsection.offset
         )));
     }
     if fs.romfs_data_offset >= virtual_size {
@@ -186,6 +191,7 @@ pub fn patched_romfs_source<P: ByteSource, B: ByteSource>(
         base: base_section,
         relocations,
         subsections,
+        patch_data_len: subsection_total,
         len: virtual_size,
     };
     let stored = Window::new(
@@ -484,7 +490,13 @@ mod tests {
         bytes
     }
 
+    /// The older layout, whose subsection table counts the relocation table as data.
     fn pair() -> Pair {
+        pair_covering(None)
+    }
+
+    /// `covers` is the patch data the subsection table claims, `None` for everything before it.
+    fn pair_covering(covers: Option<u64>) -> Pair {
         let base_bytes: Vec<u8> = (0..BASE_LEN).map(|i| i as u8).collect();
         let mut patch_bytes: Vec<u8> = (0..PATCH_DATA).map(|i| 0x80 | i as u8).collect();
         // The RomFS header the relocation table maps to the image start.
@@ -498,14 +510,10 @@ mod tests {
         ];
         patch_bytes.extend(table_pages(VIRTUAL_LEN, 0x14, &relocations, VIRTUAL_LEN));
         let subsection_end = PATCH_DATA + BUCKET_SIZE * 2;
+        let covered = covers.unwrap_or(subsection_end);
         let mut subsection = vec![0u8; 0x10];
         subsection[0xC..0x10].copy_from_slice(&CTR_VAL.to_le_bytes());
-        patch_bytes.extend(table_pages(
-            subsection_end,
-            0x10,
-            &[subsection],
-            subsection_end,
-        ));
+        patch_bytes.extend(table_pages(covered, 0x10, &[subsection], covered));
 
         let patch_len = patch_bytes.len() as u64;
         let patch_nca = one_section_nca(
@@ -574,6 +582,39 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    /// Newer updates' subsection tables stop where the relocation table starts (Pokémon
+    /// Legends: Z-A 2.0.2), and the image reads the same as under the older layout.
+    #[test]
+    fn a_subsection_table_that_stops_at_the_relocation_table_composes() {
+        let p = pair_covering(Some(PATCH_DATA));
+        let romfs = patched_romfs_source(
+            &p.patch_nca,
+            crate::source::SliceSource(&p.patch_bytes),
+            &p.base_nca,
+            crate::source::SliceSource(&p.base_bytes),
+            &patch_keys(),
+        )
+        .expect("compose the patched romfs");
+        assert_eq!(romfs.read_vec(0, 8).unwrap(), 0x50u64.to_le_bytes());
+        let moved = romfs.read_vec(0x100 - ROMFS_AT, 0x10).unwrap();
+        assert_eq!(moved, p.patch_plain[0x20..0x30]);
+    }
+
+    #[test]
+    fn a_subsection_table_cannot_cover_itself() {
+        let p = pair_covering(Some(PATCH_DATA + BUCKET_SIZE * 2 + 0x10));
+        assert!(matches!(
+            patched_romfs_source(
+                &p.patch_nca,
+                crate::source::SliceSource(&p.patch_bytes),
+                &p.base_nca,
+                crate::source::SliceSource(&p.base_bytes),
+                &patch_keys(),
+            ),
+            Err(Error::Nca(_))
+        ));
     }
 
     #[test]

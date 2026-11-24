@@ -111,6 +111,7 @@ Section headings are paths under `crates/switch-core/src/`; a heading that start
 
 - `MAX_TABLE` (64 MiB) is far above real BKTR table sizes (a few hundred KiB); it only stops a corrupt header from requesting an allocation the browser cannot make.
 - BKTR tables are flattened at load; the on-disk bucket split is just paging.
+- A patch section holds its data, then the relocation table, then the subsection table. The subsection table covers either everything before itself, the relocation table counted as data (older updates, and hactool's check), or only the data, stopping at the relocation table (Pokémon Legends: Z-A 2.0.2, which hactool's check refused). Both are taken, and patch reads end where the subsection table's coverage does.
 - A sparse base or patch section needs no special handling here: `section_source` reassembles it before the relocation table sees it.
 - The RomFS header check after composition catches a mismatched base/update pair early, instead of a title that boots and then cannot find files.
 
