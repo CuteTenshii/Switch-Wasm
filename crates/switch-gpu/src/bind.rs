@@ -1661,6 +1661,17 @@ impl Gpu {
                 upload.key.layout
             ));
         }
+        // A rejected texture fails the whole submission, so what the device cannot make falls back.
+        if dimension == wgpu::TextureDimension::D3
+            && format.is_bcn()
+            && !self
+                .features()
+                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D)
+        {
+            return Err(format!(
+                "a {format:?} volume, which this device was not given BC volumes for"
+            ));
+        }
         // Packed depth words are written as they are, then converted into the sampled texture.
         let stored = if packed {
             wgpu::TextureFormat::R32Uint

@@ -18,6 +18,8 @@ fn can_blend(format: wgpu::TextureFormat, features: wgpu::Features) -> bool {
 
 pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
     let wanted = wgpu::Features::TEXTURE_COMPRESSION_BC
+        // BC volumes; Breath of the Wild samples a `BC4` one.
+        | wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D
         | wgpu::Features::TEXTURE_COMPRESSION_ASTC
         | wgpu::Features::TEXTURE_COMPRESSION_ETC2
         // `R16Unorm` and friends, widened to a 32-bit float where missing; see `convert::sampled_texture_format`.
