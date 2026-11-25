@@ -1,6 +1,6 @@
 [package]
 name = "switch-relay"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "WebSocket relay that carries the emulator's TCP and UDP traffic, see docs/relay.md"
 license = "AGPL-3.0-or-later"
