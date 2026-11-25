@@ -1,0 +1,62 @@
+name: Bug report
+about: Something in the emulator or the page doesn't work as it should.
+title: "[Bug] "
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Include any error message the page showed.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the page
+        2. Load …
+        3. …
+    validations:
+      required: true
+  - type: input
+    id: title
+    attributes:
+      label: Game or homebrew
+      description: Title name, title ID and version, if the bug happens in one.
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+      placeholder: Chrome 142
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: OS and machine
+      placeholder: Windows 11, Ryzen 5 5600X, RTX 3060
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Save it with the Save button in the Console tab, or Save log in the crash dialog, and attach the file.
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+  - type: checkboxes
+    id: no-copyrighted-files
+    attributes:
+      label: Files
+      options:
+        - label: I haven't attached keys, firmware, game files or saves.
+          required: true
