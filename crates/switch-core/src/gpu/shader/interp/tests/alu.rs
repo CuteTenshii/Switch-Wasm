@@ -270,10 +270,10 @@ fn ssy_and_sync_reconverge() {
 #[test]
 fn a_program_that_never_exits_fails_instead_of_hanging() {
     let program = prog_at(&[(Op::Bra { target: 0x08 }, Pred::ALWAYS)]);
-    let mut inv = Invocation::new();
-    assert!(inv
+    let err = Invocation::new()
         .execute(&program, &Env::new(&no_consts(), &NoTextures))
-        .is_err());
+        .unwrap_err();
+    assert!(err.to_string().contains("did not terminate"), "got {err}");
 }
 
 #[test]

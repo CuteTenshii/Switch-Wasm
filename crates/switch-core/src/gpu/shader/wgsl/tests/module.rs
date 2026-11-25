@@ -1,6 +1,6 @@
 //! Layout and module tests.
 
-use super::super::layout::{atom_code, GENERIC_BASE, GENERIC_STRIDE};
+use super::super::layout::{atom_code, ATOMS, GENERIC_BASE, GENERIC_STRIDE};
 use super::*;
 use crate::gpu::pipeline::AttributeBase;
 use crate::gpu::shader::isa::{AtomOp, AtomSpace, AtomType};
@@ -949,7 +949,19 @@ fn a_register_reused_after_the_sample_does_not_hide_the_handle() {
         src: sampler_word(0x20),
     };
     let ops = split_handle_across_a_branch(unrelated, reuse);
-    assert!(translate(&program(&ops)).is_ok());
+    assert_eq!(
+        translate(&program(&ops)).unwrap().textures,
+        vec![(
+            TextureSlot::BindlessPair {
+                bank: 2,
+                offset: 0x168,
+                other_bank: 2,
+                other_offset: 0x578,
+            },
+            TexDim::T2d,
+            false
+        )]
+    );
 }
 
 #[test]
@@ -963,7 +975,10 @@ fn a_handle_that_differs_by_path_stays_refused() {
         src: sampler_word(0x20),
     };
     let ops = split_handle_across_a_branch(other, unrelated);
-    assert!(translate(&program(&ops)).is_err());
+    assert_eq!(
+        translate(&program(&ops)).unwrap_err(),
+        Unsupported::UntracedHandle { at: 4 }
+    );
 }
 
 #[test]
@@ -1142,7 +1157,10 @@ fn a_global_load_through_a_descriptor_loaded_whole_reads_that_descriptor() {
         (ldg, ALWAYS),
         (Op::Exit, ALWAYS),
     ]);
-    assert!(translate(&mismatched).is_err());
+    assert_eq!(
+        translate(&mismatched).unwrap_err(),
+        Unsupported::Op { at: 2, op: ldg }
+    );
 }
 
 #[test]
@@ -1285,24 +1303,17 @@ fn an_atomic_runs_the_row_for_its_operation_and_type() {
 }
 
 #[test]
-fn only_the_atomics_the_interpreter_applies_have_a_row() {
+fn every_atomic_the_interpreter_applies_runs_a_row_for_its_own_operation() {
     use AtomOp::*;
     // `inc` and `dec` are unsigned whatever the type says, as the interpreter applies them.
     for op in [Add, Min, Max, And, Or, Xor, Exch, Cas, Inc, Dec] {
         for ty in [AtomType::U32, AtomType::S32] {
-            assert!(atom_code(op, ty).is_some(), "{op:?} {ty:?}");
+            let code = atom_code(op, ty).unwrap_or_else(|| panic!("{op:?} {ty:?} has no row"));
+            assert_eq!(
+                ATOMS[code].0, op,
+                "{op:?} {ty:?} runs another operation's row"
+            );
         }
-    }
-    assert!(atom_code(Add, AtomType::F32).is_some());
-    for (op, ty) in [
-        (SafeAdd, AtomType::U32),
-        (SafeAdd, AtomType::F32),
-        (Min, AtomType::F32),
-        (Max, AtomType::F32),
-        (Xor, AtomType::F32),
-        (Exch, AtomType::F32),
-    ] {
-        assert_eq!(atom_code(op, ty), None, "{op:?} {ty:?}");
     }
     for op in [Add, Min, Cas, Xor] {
         for ty in [AtomType::U64, AtomType::S64, AtomType::U128] {
@@ -1973,9 +1984,14 @@ fn an_address_copied_into_place_still_reads_its_descriptor() {
             base: 0,
         }]
     );
-    assert!(copied(IF_P0, false).is_err(), "a copy that may not happen");
-    assert!(
-        copied(ALWAYS, true).is_err(),
+    assert_eq!(
+        copied(IF_P0, false).unwrap_err(),
+        Unsupported::Op { at: 4, op: ldg },
+        "a copy that may not happen"
+    );
+    assert_eq!(
+        copied(ALWAYS, true).unwrap_err(),
+        Unsupported::Op { at: 5, op: ldg },
         "a source rewritten before the copy"
     );
 }

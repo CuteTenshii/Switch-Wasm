@@ -290,8 +290,14 @@ fn memory_constants_reads_a_real_bound_buffer_out_of_gpu_memory() {
     };
 
     assert_eq!(f32::from_bits(source.read_const(2, 0x10).unwrap()), 42.5);
-    assert!(source.read_const(3, 0x10).is_err()); // unbound bank
-    assert!(source.read_const(2, 0x1000).is_err()); // past the buffer's size
+    let unbound = source.read_const(3, 0x10).unwrap_err();
+    assert!(unbound.to_string().contains("unbound"), "got {unbound}");
+    // The page past the buffer is unmapped too, so only the message says which check refused.
+    let past = source.read_const(2, 0x1000).unwrap_err();
+    assert!(
+        past.to_string().contains("past the bound buffer"),
+        "got {past}"
+    );
 }
 
 #[test]

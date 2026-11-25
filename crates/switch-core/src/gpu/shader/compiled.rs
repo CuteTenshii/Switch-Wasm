@@ -937,6 +937,6 @@ mod tests {
         let consts = HashMap::new();
         let env = Env::new(&consts, &NoTextures);
         let err = Invocation::new().execute(&compiled, &env).unwrap_err();
-        assert!(format!("{err:?}").contains("never decoded"), "got {err:?}");
+        assert!(err.to_string().contains("never decoded"), "got {err}");
     }
 }

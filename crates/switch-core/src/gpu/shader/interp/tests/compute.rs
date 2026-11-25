@@ -50,8 +50,8 @@ fn the_packed_thread_register_is_refused_rather_than_guessed_at() {
         .execute(&prog(&[Op::S2r { dst: 0, sr: 0x20 }, Op::Exit]), &env)
         .unwrap_err();
     assert!(
-        format!("{err:?}").contains("packed special register"),
-        "got {err:?}"
+        err.to_string().contains("packed special register"),
+        "got {err}"
     );
 }
 
@@ -230,7 +230,7 @@ fn a_barrier_in_a_draw_is_an_error_rather_than_a_silent_no_op() {
             &env,
         )
         .unwrap_err();
-    assert!(format!("{err:?}").contains("no CTA"), "got {err:?}");
+    assert!(err.to_string().contains("no CTA"), "got {err}");
 }
 
 /// `dFdx`'s fetch: each lane reads its horizontal neighbour.
@@ -434,7 +434,7 @@ fn a_shuffle_outside_a_warp_is_an_error_rather_than_a_lane_reading_itself() {
         Op::Exit,
     ]);
     let err = Invocation::new().execute(&program, &env).unwrap_err();
-    assert!(format!("{err:?}").contains("another lane"), "got {err:?}");
+    assert!(err.to_string().contains("another lane"), "got {err}");
 }
 
 /// Each lane's `fswzadd` sign depends on its quad position.
