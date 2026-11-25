@@ -94,6 +94,27 @@ fn guest_level(line: &str) -> PageLevel {
     }
 }
 
+/// The tag `lm` puts on the first line of each guest log message.
+const LM_TAG: &str = "[lm/";
+
+/// Write a line to the browser's DevTools console, at the method matching its level.
+#[cfg(target_arch = "wasm32")]
+fn to_devtools(level: PageLevel, line: &str) {
+    use web_sys::console;
+    let line = line.into();
+    match level {
+        PageLevel::Error => console::error_1(&line),
+        PageLevel::Warn => console::warn_1(&line),
+        PageLevel::Info => console::info_1(&line),
+        PageLevel::Log => console::log_1(&line),
+        PageLevel::Debug => console::debug_1(&line),
+    }
+}
+
+/// Native builds (the tests) have no DevTools.
+#[cfg(not(target_arch = "wasm32"))]
+fn to_devtools(_level: PageLevel, _line: &str) {}
+
 /// Move the session's guest output and diagnostics into the queue, in that order.
 pub(crate) fn collect(cpu: &mut Cpu) {
     if !cpu.out.is_empty() {
@@ -101,9 +122,11 @@ pub(crate) fn collect(cpu: &mut Cpu) {
         let text = String::from_utf8_lossy(&out);
         let text = text.strip_suffix('\n').unwrap_or(&text);
         for line in text.split('\n') {
-            queue()
-                .lines
-                .push_back((guest_level(line), line.to_owned()));
+            let level = guest_level(line);
+            if line.starts_with(LM_TAG) {
+                to_devtools(level, line);
+            }
+            queue().lines.push_back((level, line.to_owned()));
         }
     }
     cpu.absorb_traces();
