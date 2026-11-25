@@ -579,16 +579,31 @@ impl Cpu {
             0x15 => {
                 // CreateTransferMemory(addr, size, perm): the creator's pages become a shared
                 // block, so a process the memory is passed to sees what the creator writes.
+                // Kernel description 106: the range is not the caller's memory.
+                const RESULT_INVALID_CURRENT_MEMORY: u64 = 1 | (106 << 9);
                 let addr = self.read_zr(1);
-                let size = self.read_zr(2) as usize;
+                let size = self.read_zr(2);
+                // The block takes the place of pages the guest already has, so checking that
+                // they exist bounds the host allocation by the guest's memory cap.
+                let backed = size <= self.mem.mapped_bytes()
+                    && addr
+                        .checked_add(size)
+                        .is_some_and(|end| self.mem.mapped_bytes_in(addr, end) == size);
+                if !backed {
+                    self.write_zr(0, RESULT_INVALID_CURRENT_MEMORY);
+                    return Ok(());
+                }
+                let size = size as usize;
                 let handle = self.alloc_handle();
                 self.grant_handle(handle);
                 let page = crate::mem::PAGE_SIZE;
                 if size != 0 && addr.is_multiple_of(page as u64) && size.is_multiple_of(page) {
                     let block = crate::mem::SharedPages::new(size);
-                    let mut contents = vec![0u8; size];
-                    self.mem.read_into(addr, &mut contents)?;
-                    block.write(0, &contents)?;
+                    let mut contents = [0u8; crate::mem::PAGE_SIZE];
+                    for offset in (0..size).step_by(page) {
+                        self.mem.read_into(addr + offset as u64, &mut contents)?;
+                        block.write(offset as u32, &contents)?;
+                    }
                     self.mem.map_shared(addr, &block)?;
                     self.transfer_memories.insert(handle, block);
                 }
@@ -1484,6 +1499,22 @@ mod tests {
 
         cpu.close_handle(handle);
         assert!(cpu.transfer_memories.is_empty());
+    }
+
+    #[test]
+    fn a_transfer_memory_over_pages_the_guest_lacks_is_refused_before_allocating() {
+        const ADDR: u64 = 0x0900_0000;
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(ADDR, 0x2000).unwrap();
+        let before = cpu.mem.mapped_bytes();
+        for size in [0x3000, 0x100_0000_0000, u64::MAX & !0xFFF] {
+            cpu.write_zr(1, ADDR);
+            cpu.write_zr(2, size);
+            cpu.horizon_syscall(0x15).unwrap();
+            assert_eq!(cpu.read_zr(0), 1 | (106 << 9), "size {size:#x}");
+        }
+        assert!(cpu.transfer_memories.is_empty());
+        assert_eq!(cpu.mem.mapped_bytes(), before);
     }
 
     /// Each thread reports the core it was put on.
