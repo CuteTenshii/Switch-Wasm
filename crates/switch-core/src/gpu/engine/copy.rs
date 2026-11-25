@@ -1,9 +1,11 @@
 //! MAXWELL_DMA_COPY_A (class 0xB0B5): copies rectangles between pitch and
 //! block-linear surfaces, with a component remap that doubles as buffer fill.
 
+use std::ops::Range;
+
 use crate::gpu::engine::{field, Registers};
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::surface::Layout;
+use crate::gpu::surface::{Layout, GOB_HEIGHT, GOB_SIZE, GOB_WIDTH};
 use crate::{Error, Result};
 
 /// The launch method, so a GPU backend can flush its surfaces before guest memory is read.
@@ -86,16 +88,52 @@ impl EngineCopy {
         )
     }
 
-    /// The source and destination a launch with `flags` touches, when it is one plain run
-    /// of bytes; other shapes do not say so without walking them.
-    pub fn plain_ranges(&self, flags: u32) -> Option<[std::ops::Range<u64>; 2]> {
-        let (multi_line, remap) = (field(flags, 9, 9) != 0, field(flags, 10, 10) != 0);
-        if multi_line || remap || field(flags, 0, 1) == DATA_TRANSFER_NONE {
+    /// GPU addresses a launch with `flags` may read and may write, each one span covering
+    /// every byte of it. `None` for a launch that copies nothing, whose semaphore may tell the
+    /// guest rendered memory is ready, and for registers whose offsets overflow 32 bits.
+    pub fn touched_ranges(&self, flags: u32) -> Option<[Range<u64>; 2]> {
+        if field(flags, 0, 1) == DATA_TRANSFER_NONE {
             return None;
         }
-        let len = u64::from(self.regs.get(LINE_LENGTH_IN));
-        let (src, dst) = (self.regs.iova(OFFSET_IN), self.regs.iova(OFFSET_OUT));
-        Some([src..src + len, dst..dst + len])
+        let (multi_line, remap) = (field(flags, 9, 9) != 0, field(flags, 10, 10) != 0);
+        let (src_base, dst_base) = (self.regs.iova(OFFSET_IN), self.regs.iova(OFFSET_OUT));
+        let line_length = self.regs.get(LINE_LENGTH_IN);
+        if !multi_line && !remap {
+            let len = u64::from(line_length);
+            return Some([
+                src_base..src_base.checked_add(len)?,
+                dst_base..dst_base.checked_add(len)?,
+            ]);
+        }
+        let line_count = if multi_line {
+            self.regs.get(LINE_COUNT).max(1)
+        } else {
+            1
+        };
+        let (src_element, dst_element, components) = if remap {
+            self.remap_shape().ok()?
+        } else {
+            (1, 1, RemapComponents::identity())
+        };
+        let span = |source: bool| {
+            let (bit, base, element, [block, width, origin, pitch]) = if source {
+                let regs = [SET_SRC_BLOCK_SIZE, SET_SRC_WIDTH, SET_SRC_ORIGIN, PITCH_IN];
+                (7, src_base, src_element, regs)
+            } else {
+                let regs = [SET_DST_BLOCK_SIZE, SET_DST_WIDTH, SET_DST_ORIGIN, PITCH_OUT];
+                (8, dst_base, dst_element, regs)
+            };
+            let is_pitch = field(flags, bit, bit) != 0;
+            SurfaceWalk::new(&self.regs, is_pitch, block, width, origin, pitch, element)
+                .ok()?
+                .span(base, line_length, line_count)
+        };
+        let dst = span(false)?;
+        if !components.reads_source() {
+            // A fill reads nothing; an empty span would still count as inside a held surface.
+            return Some([dst.clone(), dst]);
+        }
+        Some([span(true)?, dst])
     }
 
     /// The copy `flags` asks for, if any, then its semaphore release.
@@ -210,10 +248,11 @@ impl EngineCopy {
         ];
         let component_size = components.component_size;
         // A fill from the constants has no source, and its address may be unmapped.
-        let reads_source = components.dst[..components.num_dst as usize]
-            .iter()
-            .any(|&selector| selector < REMAP_CONST_0);
-        let num_src = if reads_source { components.num_src } else { 0 };
+        let num_src = if components.reads_source() {
+            components.num_src
+        } else {
+            0
+        };
 
         for line in 0..line_count {
             for element in 0..line_length {
@@ -328,6 +367,12 @@ impl RemapComponents {
             num_dst: 1,
         }
     }
+
+    fn reads_source(&self) -> bool {
+        self.dst[..self.num_dst as usize]
+            .iter()
+            .any(|&selector| selector < REMAP_CONST_0)
+    }
 }
 
 /// `base` moved by a signed `offset`.
@@ -396,6 +441,38 @@ impl SurfaceWalk {
             Layout::Pitch { pitch } => i64::from(y) * i64::from(pitch as i32) + i64::from(x),
             layout => i64::from(layout.offset(x, y, self.width_bytes)),
         }
+    }
+
+    /// GPU addresses from `base` that `line_count` lines of `line_length` elements may touch,
+    /// or `None` where the walk's 32-bit block-linear offsets would wrap.
+    fn span(&self, base: u64, line_length: u32, line_count: u32) -> Option<Range<u64>> {
+        let x_end =
+            u64::from(self.origin_x_bytes) + u64::from(line_length) * u64::from(self.element_bytes);
+        let last_line = u64::from(line_count.max(1) - 1);
+        let (lo, hi) = match self.layout {
+            Layout::Pitch { pitch } => {
+                let last_row = last_line as i64 * i64::from(pitch as i32);
+                (last_row.min(0), last_row.max(0) + x_end as i64)
+            }
+            Layout::BlockLinear {
+                block_height_gobs,
+                block_depth_gobs,
+            } => {
+                let rows_per_block = u64::from(GOB_HEIGHT * block_height_gobs);
+                let block_bytes = u64::from(GOB_SIZE * block_height_gobs * block_depth_gobs);
+                let row_bytes =
+                    u64::from(self.width_bytes.div_ceil(GOB_WIDTH).max(1)) * block_bytes;
+                let first = u64::from(self.origin_y);
+                let lo = first / rows_per_block * row_bytes;
+                let hi = (first + last_line) / rows_per_block * row_bytes
+                    + x_end.div_ceil(u64::from(GOB_WIDTH)) * block_bytes;
+                if hi > u64::from(u32::MAX) {
+                    return None;
+                }
+                (lo as i64, hi as i64)
+            }
+        };
+        Some(base.checked_add_signed(lo)?..base.checked_add_signed(hi)?)
     }
 
     fn based_at(&self, base: u64) -> SurfaceWalk {
@@ -643,6 +720,181 @@ mod tests {
             assert_eq!(h.mem.read_u32(u64::from(at)).unwrap(), 0x1111_2222);
             assert_eq!(h.mem.read_u32(u64::from(at + 4)).unwrap(), 0x3333_4444);
         }
+    }
+
+    const MAPPED: u32 = 0x8000;
+
+    fn fill(h: &Harness, byte: impl Fn(u32) -> u8) {
+        for i in 0..MAPPED {
+            h.mem.write_u8(u64::from(0x3000_0000 + i), byte(i)).unwrap();
+        }
+    }
+
+    fn snapshot(h: &Harness) -> Vec<u8> {
+        (0..MAPPED)
+            .map(|i| h.mem.read_u8(u64::from(0x3000_0000 + i)).unwrap())
+            .collect()
+    }
+
+    /// Run the launch twice: nothing outside the write span may change, and memory outside
+    /// both spans, changed between the runs, may not change what lands in the write span.
+    fn assert_spans_cover(setup: impl Fn(&mut EngineCopy, u64), flags: u32) {
+        let mut h = Harness::new();
+        let mut engine = EngineCopy::new();
+        setup(&mut engine, h.base);
+        let [read, written] = engine.touched_ranges(flags).expect("a bounded copy");
+        let offsets = |r: &Range<u64>| (r.start - h.base) as u32..(r.end - h.base) as u32;
+        let (read, written) = (offsets(&read), offsets(&written));
+        let first = |i: u32| (i.wrapping_mul(7) + 3) as u8;
+        let other = |i: u32| (i.wrapping_mul(13) + 5) as u8;
+
+        fill(&h, first);
+        engine.write(LAUNCH_DMA, flags, &mut h.ctx()).unwrap();
+        let once = snapshot(&h);
+        for i in (0..MAPPED).filter(|i| !written.contains(i)) {
+            assert_eq!(
+                once[i as usize],
+                first(i),
+                "byte {i:#x} written outside {written:x?}"
+            );
+        }
+
+        fill(&h, |i| {
+            if read.contains(&i) || written.contains(&i) {
+                first(i)
+            } else {
+                other(i)
+            }
+        });
+        engine.write(LAUNCH_DMA, flags, &mut h.ctx()).unwrap();
+        let again = snapshot(&h);
+        for i in written.clone() {
+            assert_eq!(
+                again[i as usize], once[i as usize],
+                "byte {i:#x} read outside {read:x?}"
+            );
+        }
+    }
+
+    const PITCH_IN_BIT: u32 = 1 << 7;
+    const PITCH_OUT_BIT: u32 = 1 << 8;
+    const MULTI_LINE: u32 = 1 << 9;
+    const REMAP: u32 = 1 << 10;
+
+    #[test]
+    fn a_multi_line_pitch_copy_stays_inside_its_spans() {
+        assert_spans_cover(
+            |e, base| {
+                set_iova(e, OFFSET_IN, base + 0x100);
+                set_iova(e, OFFSET_OUT, base + 0x4000);
+                e.regs.set(PITCH_IN, 48);
+                e.regs.set(PITCH_OUT, 40);
+                e.regs.set(LINE_LENGTH_IN, 24);
+                e.regs.set(LINE_COUNT, 9);
+            },
+            NON_PIPELINED | PITCH_IN_BIT | PITCH_OUT_BIT | MULTI_LINE,
+        );
+    }
+
+    #[test]
+    fn a_negative_pitch_copy_stays_inside_its_spans() {
+        assert_spans_cover(
+            |e, base| {
+                set_iova(e, OFFSET_IN, base + 0x100);
+                set_iova(e, OFFSET_OUT, base + 0x5000);
+                e.regs.set(PITCH_IN, 32);
+                e.regs.set(PITCH_OUT, (-40i32) as u32);
+                e.regs.set(LINE_LENGTH_IN, 24);
+                e.regs.set(LINE_COUNT, 7);
+            },
+            NON_PIPELINED | PITCH_IN_BIT | PITCH_OUT_BIT | MULTI_LINE,
+        );
+    }
+
+    #[test]
+    fn a_texture_upload_into_block_linear_stays_inside_its_spans() {
+        assert_spans_cover(
+            |e, base| {
+                set_iova(e, OFFSET_IN, base + 0x100);
+                set_iova(e, OFFSET_OUT, base + 0x4000);
+                e.regs.set(PITCH_IN, 40);
+                // Two GOBs per block, 160 bytes wide, starting at (16, 13).
+                e.regs.set(SET_DST_BLOCK_SIZE, 1 << 4);
+                e.regs.set(SET_DST_WIDTH, 160);
+                e.regs.set(SET_DST_ORIGIN, 16 | (13 << 16));
+                e.regs.set(LINE_LENGTH_IN, 40);
+                e.regs.set(LINE_COUNT, 6);
+            },
+            NON_PIPELINED | PITCH_IN_BIT | MULTI_LINE,
+        );
+    }
+
+    #[test]
+    fn a_block_linear_readback_into_pitch_stays_inside_its_spans() {
+        assert_spans_cover(
+            |e, base| {
+                set_iova(e, OFFSET_IN, base + 0x1000);
+                set_iova(e, OFFSET_OUT, base + 0x6000);
+                e.regs.set(SET_SRC_BLOCK_SIZE, 0);
+                e.regs.set(SET_SRC_WIDTH, 128);
+                e.regs.set(SET_SRC_ORIGIN, 70 | (5 << 16));
+                e.regs.set(PITCH_OUT, 64);
+                e.regs.set(LINE_LENGTH_IN, 50);
+                e.regs.set(LINE_COUNT, 12);
+            },
+            NON_PIPELINED | PITCH_OUT_BIT | MULTI_LINE,
+        );
+    }
+
+    #[test]
+    fn a_remapped_copy_stays_inside_its_spans() {
+        assert_spans_cover(
+            |e, base| {
+                set_iova(e, OFFSET_IN, base + 0x200);
+                set_iova(e, OFFSET_OUT, base + 0x4000);
+                e.regs.set(PITCH_IN, 96);
+                e.regs.set(SET_DST_BLOCK_SIZE, 0);
+                e.regs.set(SET_DST_WIDTH, 20);
+                e.regs.set(SET_DST_ORIGIN, 3 | (2 << 16));
+                e.regs.set(LINE_LENGTH_IN, 9);
+                e.regs.set(LINE_COUNT, 4);
+                // Two 2-byte components in, swapped on the way out.
+                e.regs
+                    .set(SET_REMAP_COMPONENTS, 1 | (1 << 16) | (1 << 20) | (1 << 24));
+            },
+            NON_PIPELINED | PITCH_IN_BIT | MULTI_LINE | REMAP,
+        );
+    }
+
+    #[test]
+    fn a_constant_fill_reads_nothing_and_stays_inside_its_span() {
+        assert_spans_cover(
+            |e, base| {
+                set_iova(e, OFFSET_OUT, base + 0x3000);
+                e.regs.set(PITCH_OUT, 64);
+                e.regs.set(LINE_LENGTH_IN, 12);
+                e.regs.set(LINE_COUNT, 5);
+                e.regs.set(SET_REMAP_CONST, 0x1122_3344);
+                e.regs.set(SET_REMAP_COMPONENTS, REMAP_CONST_0 | (3 << 16));
+            },
+            NON_PIPELINED | PITCH_IN_BIT | PITCH_OUT_BIT | MULTI_LINE | REMAP,
+        );
+        let mut engine = EngineCopy::new();
+        set_iova(&mut engine, OFFSET_OUT, 0x1000);
+        engine.regs.set(LINE_LENGTH_IN, 4);
+        engine
+            .regs
+            .set(SET_REMAP_COMPONENTS, REMAP_CONST_0 | (3 << 16));
+        let [read, written] = engine
+            .touched_ranges(NON_PIPELINED | PITCH_OUT_BIT | REMAP)
+            .unwrap();
+        assert_eq!(read, written, "the fill's source address is never read");
+    }
+
+    #[test]
+    fn a_launch_that_transfers_nothing_is_not_bounded() {
+        let engine = EngineCopy::new();
+        assert!(engine.touched_ranges(0x14).is_none());
     }
 
     #[test]

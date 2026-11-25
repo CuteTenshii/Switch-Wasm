@@ -494,10 +494,10 @@ impl Channel {
             CLASS_COPY => {
                 if method == crate::gpu::engine::copy::LAUNCH_DMA {
                     self.copy.regs.set(method, arg);
-                    // Titles upload constants this way, hundreds of small runs a frame.
+                    // Titles upload constants and textures this way, hundreds of copies a frame.
                     let current = self
                         .copy
-                        .plain_ranges(arg)
+                        .touched_ranges(arg)
                         .is_some_and(|ranges| self.three_d.guest_memory_is_current(&ranges, ctx));
                     if !current {
                         let flushed = self.three_d.flush_renderer(ctx)?;
