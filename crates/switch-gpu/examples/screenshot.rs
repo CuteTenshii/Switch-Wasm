@@ -12,6 +12,7 @@ use clap::Parser;
 use common::profile::Profile;
 use common::Flow;
 use switch_core::gpu::renderer::{Renderer, Software};
+use switch_core::mem::PAGE_SIZE;
 
 #[derive(Parser)]
 struct Cli {
@@ -201,6 +202,7 @@ fn main() {
         .map(|(lo, hi)| vec![false; ((hi - lo) / 4) as usize])
         .unwrap_or_default();
     let mut seen_nonzero = false;
+    let mut watch_due = 0u64;
     let mut gate: Option<u64> = None;
 
     // Homebrew that never presents the frame stops; a retail title needs billions of steps.
@@ -234,14 +236,13 @@ fn main() {
             }
             profile.tick(cpu, done);
             if let Some(at) = memory.watch_mem {
-                if !seen_nonzero
-                    && done % DEFAULT_INTERVAL == 0
-                    && (0..0x1000u64)
-                        .step_by(4)
-                        .any(|k| cpu.mem.read_u32(at + k).unwrap_or(0) != 0)
-                {
-                    println!("[watch-mem] {at:#x} first non-zero at step {done}");
-                    seen_nonzero = true;
+                // A block slice can end short, so `done` need not land on a multiple.
+                if !seen_nonzero && done >= watch_due {
+                    watch_due = done + DEFAULT_INTERVAL;
+                    if read_guest(cpu, at, 0x1000).iter().any(|&b| b != 0) {
+                        println!("[watch-mem] {at:#x} first non-zero at step {done}");
+                        seen_nonzero = true;
+                    }
                 }
             }
             if let Some((addr, value)) = memory.poke_u32 {
@@ -388,12 +389,13 @@ fn find_magic(cpu: &switch_core::cpu::Cpu, magic: &str) {
         if cpu.mem.mapped_bytes_in(block, block + BLOCK) == 0 {
             continue;
         }
-        for page in (block..block + BLOCK).step_by(0x1000) {
+        for page in (block..block + BLOCK).step_by(PAGE_SIZE) {
             if !cpu.mem.page_mapped(page) {
                 continue;
             }
-            for at in (page..page + 0x1000).step_by(4) {
-                if cpu.mem.read_u32(at) == Ok(wanted) {
+            let words = read_guest(cpu, page, PAGE_SIZE);
+            for (at, word) in (page..).step_by(4).zip(words.as_chunks::<4>().0) {
+                if *word == wanted.to_le_bytes() {
                     println!("[find] {magic} at {at:#x}");
                     hits += 1;
                     if hits == 12 {
@@ -404,6 +406,20 @@ fn find_magic(cpu: &switch_core::cpu::Cpu, magic: &str) {
         }
     }
     println!("[find] {magic}: {hits} hit(s)");
+}
+
+/// `len` bytes of guest memory from `addr`, a page at a time; an unbacked page reads as zeros.
+fn read_guest(cpu: &switch_core::cpu::Cpu, addr: u64, len: usize) -> Vec<u8> {
+    let mut bytes = vec![0u8; len];
+    let mut done = 0;
+    while done < len {
+        let at = addr + done as u64;
+        let n = (PAGE_SIZE - (at as usize % PAGE_SIZE)).min(len - done);
+        // A failed read copies nothing, leaving that page's zeros.
+        let _ = cpu.mem.read_into(at, &mut bytes[done..done + n]);
+        done += n;
+    }
+    bytes
 }
 
 /// Print the non-zero spans of `lo..hi`.
@@ -468,7 +484,7 @@ fn report_undecoded(programs: std::collections::BTreeMap<u64, switch_core::gpu::
 
 /// One `--dump-surface` entry: `<addr>:<w>x<h>:<format>[:<block height>]`.
 fn dump_surface(cpu: &switch_core::cpu::Cpu, spec: &str, out: &str) {
-    use switch_core::gpu::surface::{block_linear_offset, ColorFormat};
+    use switch_core::gpu::surface::{ColorFormat, Layout, Surface};
     let fields: Vec<&str> = spec.split(':').collect();
     let parsed = (|| {
         let addr = common::parse_hex(fields.first()?)?;
@@ -482,15 +498,28 @@ fn dump_surface(cpu: &switch_core::cpu::Cpu, spec: &str, out: &str) {
         println!("[surface] cannot read {spec:?}: <addr>:<w>x<h>:<format>[:<block height>]");
         return;
     };
-    let bpp = format.bytes_per_pixel;
+    let surface = Surface {
+        addr,
+        width: w,
+        height: h,
+        format,
+        layout: Layout::BlockLinear {
+            block_height_gobs: block_height,
+            block_depth_gobs: 1,
+        },
+    };
+    let bytes = read_guest(cpu, addr, surface.size() as usize);
+    let bpp = format.bytes_per_pixel as usize;
     let mut pixels = Vec::with_capacity((w * h) as usize);
     let mut brightest = 0.0f32;
     for y in 0..h {
         for x in 0..w {
-            let at = addr + u64::from(block_linear_offset(x * bpp, y, w * bpp, block_height));
-            let raw = (0..bpp).fold(0u128, |acc, i| {
-                acc | u128::from(cpu.mem.read_u8(at + u64::from(i)).unwrap_or(0)) << (8 * i)
-            });
+            let at = surface.offset(x, y) as usize;
+            let texel = bytes.get(at..at + bpp).unwrap_or_default();
+            let raw = texel
+                .iter()
+                .rev()
+                .fold(0u128, |acc, &b| acc << 8 | u128::from(b));
             let rgba = format.decode(raw).unwrap_or([0.0; 4]);
             brightest = rgba[..3].iter().fold(brightest, |m, &c| m.max(c));
             let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u32;
