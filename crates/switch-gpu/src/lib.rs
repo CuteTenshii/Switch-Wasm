@@ -728,6 +728,9 @@ struct HeldCopy {
 /// Past this many, every kept copy is dropped: a title's set of sampled held surfaces is small.
 const MAX_HELD_COPIES: usize = 64;
 
+/// Past this many shapes of [`Gpu::colour_scratch`], all are dropped; a title draws few.
+const MAX_COLOUR_SCRATCHES: usize = 8;
+
 /// Past this many bytes of them, too: one copy of a layered shadow array runs to tens of MiB,
 /// so a count alone does not bound the memory they keep.
 const MAX_HELD_COPY_BYTES: u64 = 512 << 20;
@@ -900,6 +903,8 @@ pub struct Gpu {
     /// Textures made from held surfaces, and draws that reused one still current.
     pub held_copies_made: u64,
     pub held_copies_reused: u64,
+    /// See [`Gpu::colour_scratch`], by format, width and height.
+    colour_scratches: std::collections::HashMap<(wgpu::TextureFormat, u32, u32), wgpu::Texture>,
     /// Kept copies brought up to date by copying in only the layers that changed.
     pub held_copies_updated: u64,
     /// Kept copies a draw that renders to their surfaces sampled as they were, since the guest

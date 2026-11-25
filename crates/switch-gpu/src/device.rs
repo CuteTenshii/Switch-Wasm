@@ -132,6 +132,7 @@ impl Gpu {
             held_copies_reused: 0,
             held_copies_updated: 0,
             held_copies_kept: 0,
+            colour_scratches: std::collections::HashMap::new(),
             texture_barriers: 0,
             frames_presented: 0,
             cropped_binds: 0,

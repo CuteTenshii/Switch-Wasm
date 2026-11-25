@@ -468,31 +468,15 @@ impl Gpu {
                     height,
                     depth_or_array_layers: 1,
                 };
-                let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("colour scratch"),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: held.format(),
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::COPY_SRC
-                        | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-                let mut encoder =
-                    self.device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("colour scratch in"),
-                        });
+                let texture = self.colour_scratch(held.format(), size);
+                // In the batch, so each draw's copies run in order around it without a submit.
+                let mut encoder = self.take_batch();
                 encoder.copy_texture_to_texture(
                     held.as_image_copy(),
                     texture.as_image_copy(),
                     size,
                 );
-                self.submit_with_batch(encoder);
-                // Now, since an attachment failing below drops it.
-                self.scratch.push(Scratch::Texture(texture.clone()));
+                self.restore_batch(encoder);
                 Some((held, texture, size))
             }
             _ => None,
@@ -895,6 +879,43 @@ impl Gpu {
             self.submit_batch();
         }
         Ok(())
+    }
+
+    /// The texture draws into a colour target larger than their depth surface render to, one per
+    /// format and size: Breath of the Wild draws tens of thousands of them.
+    fn colour_scratch(
+        &mut self,
+        format: wgpu::TextureFormat,
+        size: wgpu::Extent3d,
+    ) -> wgpu::Texture {
+        let key = (format, size.width, size.height);
+        if let Some(texture) = self.colour_scratches.get(&key) {
+            return texture.clone();
+        }
+        if self.colour_scratches.len() >= crate::MAX_COLOUR_SCRATCHES {
+            let dropped: Vec<wgpu::Texture> = self
+                .colour_scratches
+                .drain()
+                .map(|(_, texture)| texture)
+                .collect();
+            // A draw recorded before this one may still render to them.
+            self.scratch
+                .extend(dropped.into_iter().map(Scratch::Texture));
+        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("colour scratch"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.colour_scratches.insert(key, texture.clone());
+        texture
     }
 
     /// The view a draw renders one of its surfaces through, with any companion in place.

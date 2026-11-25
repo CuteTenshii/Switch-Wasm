@@ -3604,6 +3604,66 @@ fn a_depth_surface_smaller_than_the_colour_target_confines_the_draw() {
     assert_eq!(h.texel(9, 1), outside, "untouched past the depth surface");
 }
 
+/// Two draws into a colour target larger than their depth surface share one scratch texture
+/// on the device, and the second keeps what the first drew.
+#[test]
+fn draws_into_a_colour_target_larger_than_their_depth_surface_keep_each_other() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let build = |gpu: Option<&mut super::Gpu>| {
+        let mut h = Harness::new();
+        // What neither draw covers has to come through from the surface.
+        let texels = u64::from(testing::TARGET_WIDTH * testing::TARGET_HEIGHT);
+        for texel in 0..texels {
+            h.vmm
+                .write_u32(&h.mem, h.base + texel * 4, 0x4433_2211)
+                .unwrap();
+        }
+        h.depth_target_sized(0x0207, 8, 4);
+        // Two corners of the 8x4 depth surface, leaving texels between them undrawn.
+        let corner = |h: &mut Harness, x: f32, color: [f32; 4]| {
+            h.write_vertex(0, [x, 1.0, 0.0, 1.0], color);
+            h.write_vertex(1, [x + 0.25, 1.0, 0.0, 1.0], color);
+            h.write_vertex(2, [x, 0.5, 0.0, 1.0], color);
+        };
+        corner(&mut h, -1.0, [1.0, 0.0, 1.0, 1.0]);
+        let second = |h: &mut Harness| corner(h, -0.25, [0.0, 1.0, 0.0, 1.0]);
+        match gpu {
+            Some(gpu) => {
+                h.draw_with(&mut *gpu).expect("the first draw");
+                second(&mut h);
+                h.draw_with(&mut *gpu).expect("the second draw");
+                h.flush_with(gpu);
+            }
+            None => {
+                h.draw_with(&mut Software).expect("the first draw");
+                second(&mut h);
+                h.draw_with(&mut Software).expect("the second draw");
+            }
+        }
+        h.target()
+    };
+    let want = build(None);
+    let inside: Vec<u32> = (0..4)
+        .flat_map(|y| (0..8).map(move |x| (y * testing::TARGET_WIDTH + x) as usize))
+        .map(|at| want[at])
+        .collect();
+    let kept = inside.iter().filter(|&&t| t == 0x4433_2211).count();
+    assert!(
+        kept > 0 && kept + 2 <= inside.len(),
+        "the draws should leave some texels of the depth surface's extent: {inside:x?}"
+    );
+    let got = build(Some(&mut gpu));
+    assert_eq!(gpu.fallbacks, 0, "{:?}", gpu.last_fallback);
+    assert_eq!(
+        gpu.colour_scratches.len(),
+        1,
+        "each draw made its own scratch"
+    );
+    assert_eq!(got, want, "the colour surface differs");
+}
+
 /// A clear and a draw on a depth surface larger than the colour target share one cropped
 /// hold on the device, and what lies outside the colour target's extent stays as it was.
 #[test]
