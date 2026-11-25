@@ -1,8 +1,10 @@
 //! Raw LZ4 block decompression (no frame header), as used by NSO segments.
 
-/// Errors on truncated input, a zero offset, or a match before the output start.
+/// Errors on truncated input, a zero offset, or a match before the output start. Output past
+/// `decompressed_size` is dropped.
 pub fn decompress_block(input: &[u8], decompressed_size: usize) -> Result<Vec<u8>, String> {
-    let mut out = Vec::with_capacity(decompressed_size);
+    // A header can claim any size; one input byte yields at most 255 output bytes.
+    let mut out = Vec::with_capacity(decompressed_size.min(input.len().saturating_mul(255)));
     let mut ip = 0usize;
 
     while out.len() < decompressed_size {
@@ -43,6 +45,10 @@ pub fn decompress_block(input: &[u8], decompressed_size: usize) -> Result<Vec<u8
         }
         match_len += 4; // minmatch
 
+        // Output past the declared size is cut anyway; copying it first is what lets a few
+        // length bytes fill memory.
+        let match_len = match_len.min(decompressed_size - out.len());
+
         for src in (out.len() - offset..).take(match_len) {
             let b = out[src];
             out.push(b);
@@ -58,7 +64,7 @@ fn read_extra_length(input: &[u8], ip: &mut usize) -> Result<usize, String> {
     loop {
         let b = *input.get(*ip).ok_or("truncated LZ4 block: length byte")?;
         *ip += 1;
-        extra += b as usize;
+        extra = extra.saturating_add(b as usize);
         if b != 0xff {
             break;
         }
@@ -120,5 +126,31 @@ mod tests {
     #[test]
     fn rejects_truncated_input() {
         assert!(decompress_block(&[0x50, b'h', b'i'], 5).is_err());
+    }
+
+    #[test]
+    fn a_match_longer_than_the_declared_size_stops_at_it() {
+        // 1 literal, then a match of 15 + 255 * 64 + 4 bytes into a 2-byte output.
+        let mut input = vec![0x1f, b'a'];
+        input.extend_from_slice(&1u16.to_le_bytes());
+        input.extend(std::iter::repeat_n(0xff, 64));
+        input.push(0);
+        let out = decompress_block(&input, 2).unwrap();
+        assert_eq!(out, b"aa");
+        assert!(out.capacity() < 64, "reserved {}", out.capacity());
+    }
+
+    #[test]
+    fn a_match_that_ends_exactly_at_the_declared_size_is_fine() {
+        // 1 literal "a", then a minimum match of 4 at offset 1: exactly 5 bytes.
+        let mut input = vec![0x10, b'a'];
+        input.extend_from_slice(&1u16.to_le_bytes());
+        assert_eq!(decompress_block(&input, 5).unwrap(), b"aaaaa");
+    }
+
+    #[test]
+    fn a_huge_declared_size_does_not_reserve_it_up_front() {
+        let out = decompress_block(&[0x50, b'h', b'e', b'l', b'l', b'o'], usize::MAX).unwrap_err();
+        assert!(out.contains("truncated"), "{out}");
     }
 }
