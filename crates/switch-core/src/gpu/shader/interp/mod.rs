@@ -24,8 +24,8 @@ use std::collections::HashMap;
 
 use super::isa::{
     self, AtomOp, AtomSpace, AtomType, BarMode, BoolOp, FCmp, FMod, FRound, HMerge, HPrecision,
-    HSwizzle, Half16, ICmp, Iadd3Shift, LogicOp, MemSize, MufuOp, Op, Operand, Pred, ShflMode,
-    SurfaceData, SurfaceDim, TexDim, VoteMode, XmadC, RZ,
+    HSwizzle, Half16, ICmp, Iadd3Shift, LogicOp, MemSize, MufuOp, Op, Operand, Pred, ShfMax,
+    ShflMode, SurfaceData, SurfaceDim, TexDim, VoteMode, XmadC, RZ,
 };
 use crate::gpu::surface::{f16_to_f32, f32_to_f16};
 

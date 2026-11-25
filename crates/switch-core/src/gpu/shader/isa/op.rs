@@ -380,6 +380,7 @@ pub enum Op {
         /// `.brev`: the source's bits are reversed before the shift.
         brev: bool,
     },
+    /// Shifts the pair `hi:lo`; a left shift answers its high word, a right shift its low one.
     Shf {
         dst: u8,
         lo: u8,
@@ -387,7 +388,7 @@ pub enum Op {
         hi: u8,
         left: bool,
         wrap: bool,
-        hi_out: bool,
+        max: ShfMax,
     },
     Bfe {
         dst: u8,

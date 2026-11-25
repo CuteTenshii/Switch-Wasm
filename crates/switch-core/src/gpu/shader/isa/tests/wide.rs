@@ -1092,6 +1092,46 @@ fn lop3_decodes_its_constant_bank_form() {
     );
 }
 
+/// `shf.l` shares `bfi`'s twelve opcode bits; Echoes of Wisdom's light volumes use it.
+#[test]
+fn shf_decodes_apart_from_bfi() {
+    // The game's "shf.l.w.u32 r2, RZ, r5, r2".
+    assert_eq!(
+        op(0x5bfc_0100_0057_ff02),
+        Op::Shf {
+            dst: 2,
+            lo: RZ,
+            shift: Operand::Reg(5),
+            hi: 2,
+            left: true,
+            wrap: true,
+            max: ShfMax::U32,
+        }
+    );
+    // shf.r.s64 r4, r1, 0x24, r6
+    let right = asm(
+        0x38f8,
+        &[(0, 8, 4), (8, 8, 1), (20, 19, 0x24), (37, 2, 3), (39, 8, 6)],
+    );
+    assert_eq!(
+        op(right),
+        Op::Shf {
+            dst: 4,
+            lo: 1,
+            shift: Operand::Imm(0x24),
+            hi: 6,
+            left: false,
+            wrap: false,
+            max: ShfMax::S64,
+        }
+    );
+    // bfi keeps its own opcode.
+    assert!(matches!(
+        op(asm(0x5bf0, &[(0, 8, 2), (8, 8, 1), (20, 8, 5), (39, 8, 3)])),
+        Op::Bfi { .. }
+    ));
+}
+
 /// Echoes of Wisdom's lit shader masks two light masks against an immediate so.
 #[test]
 fn lop3_decodes_the_third_operand_of_its_immediate_form() {

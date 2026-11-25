@@ -1206,6 +1206,94 @@ fn a_quad_vote_gives_the_same_verdicts_and_ballot_on_both_renderers() {
     );
 }
 
+/// A funnel shift keeps the same word, clamps and fills the same way on both renderers.
+#[test]
+fn a_funnel_shift_gives_the_same_words_on_both_renderers() {
+    use switch_core::gpu::shader::isa;
+    use switch_core::gpu::shader::Op;
+    use switch_core::gpu::testing::block;
+    const PT: u64 = 7 << 16;
+    const RZ: u64 = 0xff;
+    let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
+    let mov32i_if = |guard: u64, dst: u64, imm: u32| {
+        0x0100_0000_0000_0000 | (u64::from(imm) << 20) | guard << 16 | dst
+    };
+    let isetp_eq = |p0: u64, a: u64, b: u64| {
+        0x5b60u64 << 48 | 2 << 49 | 7 << 39 | b << 20 | PT | a << 8 | p0 << 3 | 7
+    };
+    // shf.l.w.u32 dst, lo, r<shift>, hi
+    let shf_l_wrap = |dst: u64, lo: u64, shift: u64, hi: u64| {
+        0x5bf8u64 << 48 | 1 << 50 | hi << 39 | shift << 20 | PT | lo << 8 | dst
+    };
+    // shf.<dir>.<max> dst, lo, imm, hi
+    let shf_imm = |opcode: u64, max: u64, dst: u64, lo: u64, imm: u64, hi: u64| {
+        opcode << 48 | hi << 39 | max << 37 | imm << 20 | PT | lo << 8 | dst
+    };
+    assert!(matches!(
+        isa::decode(shf_imm(0x38f8, 3, 7, RZ, 36, 6)).op,
+        Op::Shf { left: false, .. }
+    ));
+    const ONE: u32 = 0x3f80_0000;
+    let words = [
+        mov32i(1, 0xabc),
+        mov32i(2, 1),
+        mov32i(3, 5),
+        mov32i(6, 0x8000_0000),
+        shf_l_wrap(4, RZ, 3, 2),
+        shf_imm(0x36f8, 0, 5, 1, 40, RZ),
+        shf_imm(0x38f8, 3, 7, RZ, 36, 6),
+        shf_imm(0x38f8, 2, 8, RZ, 36, 6),
+        mov32i(9, 0x20),
+        mov32i(10, 0xf800_0000),
+        mov32i(11, 0x0800_0000),
+        isetp_eq(0, 4, 9),
+        isetp_eq(1, 5, 1),
+        isetp_eq(2, 7, 10),
+        isetp_eq(3, 8, 11),
+        mov32i(0, 0),
+        mov32i(1, 0),
+        mov32i(2, 0),
+        mov32i(3, 0),
+        mov32i_if(0, 0, ONE),
+        mov32i_if(1, 1, ONE),
+        mov32i_if(2, 2, ONE),
+        mov32i_if(3, 3, ONE),
+        0xe300_0000_0007_000f, // exit
+    ];
+    let split = |w: u64| (w as u32, (w >> 32) as u32);
+    let nop = (0x00070f00, 0x50b00000);
+    let shader = move || {
+        words
+            .chunks(3)
+            .flat_map(|slots| {
+                let slot = |i: usize| slots.get(i).map_or(nop, |&w| split(w));
+                block((0xffe1ffef, 0x001f8000), slot(0), slot(1), slot(2))
+            })
+            .collect::<Vec<u8>>()
+    };
+    let set_up = |h: &mut Harness| {
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+    };
+    for web_limits in [false, true] {
+        agrees_shading(
+            || Harness::with_fragment_shader(shader()),
+            move |gpu| gpu.set_web_limits(web_limits),
+            set_up,
+        );
+    }
+    let mut h = Harness::with_fragment_shader(shader());
+    set_up(&mut h);
+    h.draw_with(&mut Software).expect("the draw");
+    let covered: Vec<u32> = h.target().into_iter().filter(|&p| p != 0).collect();
+    assert!(!covered.is_empty(), "the triangle covers pixels");
+    assert!(
+        covered.iter().all(|&p| p == 0xffff_ffff),
+        "every shift gave its word: {covered:x?}"
+    );
+}
+
 /// `bfe.brev` reverses the source before extracting, the same on both renderers.
 /// Echoes of Wisdom's shaders use it, and the decoder refused it.
 #[test]

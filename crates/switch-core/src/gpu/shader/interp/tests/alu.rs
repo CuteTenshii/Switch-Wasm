@@ -40,6 +40,45 @@ fn a_hand_written_alu_program_produces_the_expected_registers() {
 }
 
 /// Z-A's tick difference: a 64-bit pair to a double, then to a single, each to nearest even.
+/// Echoes of Wisdom's light volumes build their light's bit with `shf.l.w`.
+#[test]
+fn a_funnel_shift_answers_the_word_its_direction_keeps() {
+    let shf = |dst: u8, shift: Operand, left: bool, wrap: bool, max: ShfMax| Op::Shf {
+        dst,
+        lo: 1,
+        shift,
+        hi: 2,
+        left,
+        wrap,
+        max,
+    };
+    let program = prog(&[
+        shf(4, Operand::Reg(3), true, true, ShfMax::U32),
+        shf(5, Operand::Imm(40), true, false, ShfMax::U32),
+        shf(6, Operand::Imm(36), false, false, ShfMax::S64),
+        shf(7, Operand::Imm(36), false, false, ShfMax::U64),
+        Op::Exit,
+    ]);
+    let run = |lo: u32, hi: u32| {
+        let mut inv = Invocation::new();
+        inv.set_reg(1, lo);
+        inv.set_reg(2, hi);
+        inv.set_reg(3, 5);
+        inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+            .unwrap();
+        [inv.reg(4), inv.reg(5), inv.reg(6), inv.reg(7)]
+    };
+    let [bit, clamped, _, _] = run(0xabc, 1);
+    assert_eq!(bit, 0x20, "1 << 5 in the high word");
+    assert_eq!(
+        clamped, 0xabc,
+        "a count past 32 stops at 32, moving lo into hi"
+    );
+    let [_, _, arithmetic, logical] = run(0, 0x8000_0000);
+    assert_eq!(arithmetic, 0xf800_0000);
+    assert_eq!(logical, 0x0800_0000);
+}
+
 #[test]
 fn an_integer_pair_narrows_to_a_single_through_a_double() {
     let program = prog(&[

@@ -97,20 +97,19 @@ fn sar32(a: u32, n: u32) -> u32 {
     (
         "shf",
         "\
-fn shf(lo: u32, hi: u32, count: u32, left: bool, hi_out: bool) -> u32 {
-  // A 64-bit shift of a register pair, in a language with no 64-bit integer.
-  let n = count & 63u;
-  var rlo = lo;
-  var rhi = hi;
+fn shf(lo: u32, hi: u32, n: u32, left: bool, arithmetic: bool) -> u32 {
+  // The word of a 64-bit pair shift the instruction keeps: high for left, low for right.
   if (left) {
-    if (n >= 32u) { rhi = shl32(lo, n - 32u); rlo = 0u; }
-    else if (n > 0u) { rhi = (hi << n) | (lo >> (32u - n)); rlo = lo << n; }
-  } else {
-    if (n >= 32u) { rlo = shr32(hi, n - 32u); rhi = 0u; }
-    else if (n > 0u) { rlo = (lo >> n) | (hi << (32u - n)); rhi = hi >> n; }
+    if (n >= 32u) { return shl32(lo, n - 32u); }
+    if (n == 0u) { return hi; }
+    return (hi << n) | (lo >> (32u - n));
   }
-  if (hi_out) { return rhi; }
-  return rlo;
+  if (n >= 32u) {
+    if (arithmetic) { return sar32(hi, n - 32u); }
+    return shr32(hi, n - 32u);
+  }
+  if (n == 0u) { return lo; }
+  return (lo >> n) | (hi << (32u - n));
 }",
     ),
     (

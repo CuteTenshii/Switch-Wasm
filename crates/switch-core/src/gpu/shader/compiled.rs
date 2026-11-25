@@ -690,7 +690,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             hi,
             left,
             wrap,
-            hi_out,
+            max,
         } => Op::Shf {
             dst,
             lo,
@@ -698,7 +698,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             hi,
             left,
             wrap,
-            hi_out,
+            max,
         },
         Op::Bfe {
             dst,

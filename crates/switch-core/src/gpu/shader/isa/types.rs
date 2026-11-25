@@ -325,6 +325,24 @@ pub enum Iadd3Shift {
     Left,
 }
 
+/// A funnel shift's `MaxShift`: how far its count may go, and whether `shf.r` fills with sign.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShfMax {
+    U32,
+    U64,
+    S64,
+}
+
+impl ShfMax {
+    /// The count a shift is clamped to, or masked one below when it wraps.
+    pub fn limit(self) -> u32 {
+        match self {
+            ShfMax::U32 => 32,
+            ShfMax::U64 | ShfMax::S64 => 63,
+        }
+    }
+}
+
 /// `texs`'s sample dimensionality (envydis's `d000_1`/`d200_1` tables).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TexDim {

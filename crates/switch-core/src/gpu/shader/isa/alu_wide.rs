@@ -12,6 +12,36 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
         return op;
     }
 
+    // shf.l and shf.r share bfi's twelve opcode bits, told apart by bit 51 (Eden's `maxwell.inc`).
+    let left = form & 0xfff8 == 0x5bf8 || form & 0xfef8 == 0x36f8;
+    if left || form & 0xfff8 == 0x5cf8 || form & 0xfef8 == 0x38f8 {
+        let max = match field(insn, 37, 2) {
+            0 => ShfMax::U32,
+            2 => ShfMax::U64,
+            3 => ShfMax::S64,
+            _ => return un,
+        };
+        // Eden leaves `.cc` and the extended modes unimplemented.
+        if field(insn, 47, 1) != 0 || field(insn, 48, 2) != 0 {
+            return un;
+        }
+        // The immediate stops below `MaxShift` at 37; reading on would add that field to the count.
+        let shift = if form >> 12 == 0x5 {
+            Operand::Reg(reg(insn, 20, 8))
+        } else {
+            Operand::Imm(field(insn, 20, 17) as u32)
+        };
+        return Op::Shf {
+            dst: reg(insn, 0, 8),
+            lo: reg(insn, 8, 8),
+            shift,
+            hi: reg(insn, 39, 8),
+            left,
+            wrap: field(insn, 50, 1) != 0,
+            max,
+        };
+    }
+
     // ---- 0xfff0-masked: fsetp/isetp/iset/icmp/prmt/lop3/bfi ----
     // Each immediate form is listed twice, as `0x36…`/`0x38…` and one above.
     match form >> 4 {

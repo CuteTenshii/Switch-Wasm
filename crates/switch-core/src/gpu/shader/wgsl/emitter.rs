@@ -415,6 +415,7 @@ impl<'a> Emitter<'a> {
         if helper == "shf" {
             self.helpers.insert("shl32");
             self.helpers.insert("shr32");
+            self.helpers.insert("sar32");
         }
     }
 

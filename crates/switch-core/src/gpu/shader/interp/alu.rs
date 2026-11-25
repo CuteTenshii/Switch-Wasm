@@ -730,24 +730,20 @@ impl Invocation {
                 hi,
                 left,
                 wrap,
-                hi_out,
+                max,
             } => {
                 let n = self.operand(shift, env)?;
-                let n = if wrap { n & 63 } else { n };
-                let pair = ((self.reg(hi) as u64) << 32) | self.reg(lo) as u64;
-                let shifted = if left {
-                    pair.wrapping_shl(n)
+                let limit = max.limit();
+                let n = if wrap { n & (limit - 1) } else { n.min(limit) };
+                let pair = (u64::from(self.reg(hi)) << 32) | u64::from(self.reg(lo));
+                let word = if left {
+                    ((pair << n) >> 32) as u32
+                } else if max == ShfMax::S64 {
+                    ((pair as i64) >> n) as u32
                 } else {
-                    pair.wrapping_shr(n)
+                    (pair >> n) as u32
                 };
-                self.set_reg(
-                    dst,
-                    if hi_out {
-                        (shifted >> 32) as u32
-                    } else {
-                        shifted as u32
-                    },
-                );
+                self.set_reg(dst, word);
             }
             Op::Bfe {
                 dst,

@@ -2,7 +2,7 @@
 
 use super::emitter::Emitter;
 use super::Unsupported;
-use crate::gpu::shader::isa::{Half16, Iadd3Shift, LogicOp, LopTest, Op, XmadC};
+use crate::gpu::shader::isa::{Half16, Iadd3Shift, LogicOp, LopTest, Op, ShfMax, XmadC};
 
 impl Emitter<'_> {
     pub(super) fn emit_integer(&mut self, op: Op) -> Result<(), Unsupported> {
@@ -450,20 +450,22 @@ impl Emitter<'_> {
                 hi,
                 left,
                 wrap,
-                hi_out,
+                max,
             } => {
                 self.need("shf");
                 let low = self.r(lo);
                 let high = self.r(hi);
                 let count = self.operand(shift);
+                let limit = max.limit();
                 let count = if wrap {
-                    format!("(({count}) & 63u)")
+                    format!("(({count}) & {}u)", limit - 1)
                 } else {
-                    count
+                    format!("min({count}, {limit}u)")
                 };
+                let arithmetic = max == ShfMax::S64;
                 self.set_r(
                     dst,
-                    &format!("shf({low}, {high}, {count}, {left}, {hi_out})"),
+                    &format!("shf({low}, {high}, {count}, {left}, {arithmetic})"),
                 );
             }
             Op::Bfe {
