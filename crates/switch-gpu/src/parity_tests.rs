@@ -1383,6 +1383,97 @@ fn a_fragment_reads_its_facing_the_same_on_both_renderers() {
     assert_eq!(reds, [0, 0xff], "the two windings face opposite ways");
 }
 
+/// `p2r` and `cset` read predicates and flags the same way on both renderers.
+#[test]
+fn p2r_and_cset_give_the_same_words_on_both_renderers() {
+    use switch_core::gpu::shader::isa;
+    use switch_core::gpu::shader::Op;
+    use switch_core::gpu::testing::block;
+    const PT: u64 = 7 << 16;
+    const RZ: u64 = 0xff;
+    let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
+    let mov32i_if = |guard: u64, dst: u64, imm: u32| {
+        0x0100_0000_0000_0000 | (u64::from(imm) << 20) | guard << 16 | dst
+    };
+    let isetp_eq = |p0: u64, a: u64, b: u64| {
+        0x5b60u64 << 48 | 2 << 49 | 7 << 39 | b << 20 | PT | a << 8 | p0 << 3 | 7
+    };
+    // r2p[.cc] pr, r<src>, imm
+    let r2p =
+        |src: u64, mask: u64, cc: u64| 0x38f0u64 << 48 | cc << 40 | mask << 20 | PT | src << 8;
+    // p2r[.cc] r<dst>, r<src>, imm, byte
+    let p2r = |dst: u64, src: u64, mask: u64, cc: u64, byte: u64| {
+        0x38e8u64 << 48 | byte << 41 | cc << 40 | mask << 20 | PT | src << 8 | dst
+    };
+    // cset[.bf].<test>.and r<dst>, cc, pt
+    let cset =
+        |dst: u64, test: u64, bf: u64| 0x5098u64 << 48 | bf << 44 | 7 << 39 | PT | test << 8 | dst;
+    assert!(matches!(
+        isa::decode(p2r(4, 1, 0x7f, 0, 1)).op,
+        Op::P2r { .. }
+    ));
+    assert!(matches!(isa::decode(cset(5, 10, 1)).op, Op::Cset { .. }));
+    const ONE: u32 = 0x3f80_0000;
+    let words = [
+        mov32i(1, u32::MAX),
+        mov32i(2, 0b101),
+        mov32i(3, 1),
+        r2p(2, 0x7f, 0),
+        p2r(4, 1, 0x7f, 0, 1),
+        r2p(3, 0xf, 1),
+        cset(5, 10, 1),
+        cset(6, 5, 0),
+        p2r(7, RZ, 0xf, 1, 0),
+        mov32i(8, 0xffff_85ff),
+        mov32i(9, ONE),
+        isetp_eq(0, 4, 8),
+        isetp_eq(1, 5, 9),
+        isetp_eq(2, 6, RZ),
+        isetp_eq(3, 7, 3),
+        mov32i(0, 0),
+        mov32i(1, 0),
+        mov32i(2, 0),
+        mov32i(3, 0),
+        mov32i_if(0, 0, ONE),
+        mov32i_if(1, 1, ONE),
+        mov32i_if(2, 2, ONE),
+        mov32i_if(3, 3, ONE),
+        0xe300_0000_0007_000f, // exit
+    ];
+    let split = |w: u64| (w as u32, (w >> 32) as u32);
+    let nop = (0x00070f00, 0x50b00000);
+    let shader = move || {
+        words
+            .chunks(3)
+            .flat_map(|slots| {
+                let slot = |i: usize| slots.get(i).map_or(nop, |&w| split(w));
+                block((0xffe1ffef, 0x001f8000), slot(0), slot(1), slot(2))
+            })
+            .collect::<Vec<u8>>()
+    };
+    let set_up = |h: &mut Harness| {
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+    };
+    for web_limits in [false, true] {
+        agrees_shading(
+            || Harness::with_fragment_shader(shader()),
+            move |gpu| gpu.set_web_limits(web_limits),
+            set_up,
+        );
+    }
+    let mut h = Harness::with_fragment_shader(shader());
+    set_up(&mut h);
+    h.draw_with(&mut Software).expect("the draw");
+    let covered: Vec<u32> = h.target().into_iter().filter(|&p| p != 0).collect();
+    assert!(!covered.is_empty(), "the triangle covers pixels");
+    assert!(
+        covered.iter().all(|&p| p == 0xffff_ffff),
+        "every word came out as expected: {covered:x?}"
+    );
+}
+
 /// A funnel shift keeps the same word, clamps and fills the same way on both renderers.
 #[test]
 fn a_funnel_shift_gives_the_same_words_on_both_renderers() {

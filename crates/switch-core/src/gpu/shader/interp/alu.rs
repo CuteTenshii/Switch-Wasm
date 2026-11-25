@@ -647,6 +647,35 @@ impl Invocation {
                     }
                 }
             }
+            Op::P2r {
+                dst,
+                src,
+                mask,
+                byte,
+                flags,
+            } => {
+                let mask = self.operand(mask, env)?;
+                let offset = u32::from(byte) * 8;
+                let mut bits = 0u32;
+                for index in 0..if flags { 4 } else { 7u8 } {
+                    if mask & (1 << index) == 0 {
+                        continue;
+                    }
+                    let set = match (flags, index) {
+                        (false, _) => self.holds(Pred {
+                            reg: index,
+                            negate: false,
+                        }),
+                        (true, 0) => self.zero,
+                        (true, 1) => self.sign,
+                        (true, 2) => self.carry,
+                        (true, _) => self.overflow,
+                    };
+                    bits |= u32::from(set) << (u32::from(index) + offset);
+                }
+                let kept = self.reg(src) & !(mask << offset);
+                self.set_reg(dst, kept | bits);
+            }
             Op::Lop {
                 dst,
                 a,
@@ -984,6 +1013,26 @@ impl Invocation {
             } => {
                 let first = combine(op1, self.holds(a), self.holds(b));
                 let v = set_result(combine(op2, first, self.holds(c)), float);
+                self.set_reg(dst, v);
+                if cc {
+                    self.set_flags(v);
+                }
+            }
+            Op::Cset {
+                dst,
+                test,
+                src,
+                op,
+                bf,
+                cc,
+            } => {
+                let flags = [self.zero, self.sign, self.carry, self.overflow];
+                let passed = isa::flow_test(test, flags, &BoolLogic).ok_or_else(|| {
+                    fault(format!(
+                        "shader: cset condition-code test {test} is not modelled"
+                    ))
+                })?;
+                let v = set_result(combine(op, passed, self.holds(src)), bf);
                 self.set_reg(dst, v);
                 if cc {
                     self.set_flags(v);

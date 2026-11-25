@@ -2,7 +2,7 @@
 
 use super::emitter::Emitter;
 use super::Unsupported;
-use crate::gpu::shader::isa::{Half16, Iadd3Shift, LogicOp, LopTest, Op, ShfMax, XmadC};
+use crate::gpu::shader::isa::{Half16, Iadd3Shift, LogicOp, LopTest, Op, Pred, ShfMax, XmadC};
 
 impl Emitter<'_> {
     pub(super) fn emit_integer(&mut self, op: Op) -> Result<(), Unsupported> {
@@ -340,6 +340,39 @@ impl Emitter<'_> {
                 let src = self.operand(src);
                 let base = self.operand(base);
                 self.set_r(dst, &format!("bfi({insert}, {src}, {base})"));
+            }
+            Op::P2r {
+                dst,
+                src,
+                mask,
+                byte,
+                flags,
+            } => {
+                let kept = self.r(src);
+                let mask = self.operand(mask);
+                let mask = self.bind(&mask);
+                let offset = u32::from(byte) * 8;
+                if flags {
+                    self.uses_carry = true;
+                    self.uses_flags = true;
+                }
+                let mut value = format!("({kept} & ~({mask} << {offset}u))");
+                for index in 0..if flags { 4 } else { 7u8 } {
+                    let set = if flags {
+                        ["ccZ", "ccS", "carry", "ccO"][usize::from(index)].to_string()
+                    } else {
+                        self.holds(Pred {
+                            reg: index,
+                            negate: false,
+                        })
+                    };
+                    let bit = 1u32 << (u32::from(index) + offset);
+                    value.push_str(&format!(
+                        " | select(0u, {bit}u, (({mask} & {}u) != 0u) && ({set}))",
+                        1u32 << index
+                    ));
+                }
+                self.set_r(dst, &value);
             }
             Op::R2p {
                 src,

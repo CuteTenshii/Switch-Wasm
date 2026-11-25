@@ -206,6 +206,29 @@ impl Emitter<'_> {
                     self.set_flags(&value);
                 }
             }
+            Op::Cset {
+                dst,
+                test,
+                src,
+                op: bop,
+                bf,
+                cc,
+            } => {
+                self.uses_carry = true;
+                self.uses_flags = true;
+                let flags = ["ccZ", "ccS", "carry", "ccO"].map(str::to_string);
+                let Some(passed) = super::isa::flow_test(test, flags, &TextLogic) else {
+                    return Err(Unsupported::Op { at, op });
+                };
+                let source = self.holds(src);
+                let value = self.combine(bop, &passed, &source);
+                let value = self.set_result(&value, bf);
+                let value = self.bind(&value);
+                self.set_r(dst, &value);
+                if cc {
+                    self.set_flags(&value);
+                }
+            }
             Op::Csetp {
                 p0,
                 p1,

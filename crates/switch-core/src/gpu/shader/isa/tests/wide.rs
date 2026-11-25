@@ -1148,6 +1148,44 @@ fn idp_and_dset_are_not_taken_for_bfi_and_fset() {
     assert!(matches!(op(fset), Op::Fset { .. }), "{:?}", op(fset));
 }
 
+/// `p2r` (immediate mask, as Eden decodes it) and `cset`, the inverses of `r2p` and `csetp`.
+#[test]
+fn p2r_and_cset_decode_their_fields() {
+    // p2r r4, r1, 0x7f, byte 1
+    let p2r = asm(0x38e8, &[(0, 8, 4), (8, 8, 1), (20, 19, 0x7f), (41, 2, 1)]);
+    assert_eq!(
+        op(p2r),
+        Op::P2r {
+            dst: 4,
+            src: 1,
+            mask: Operand::Imm(0x7f),
+            byte: 1,
+            flags: false,
+        }
+    );
+    assert!(matches!(op(p2r | 1 << 40), Op::P2r { flags: true, .. }));
+    assert!(matches!(
+        op(asm(0x5ce8, &[(0, 8, 4)])),
+        Op::Unimplemented { .. }
+    ));
+    // cset.bf.equ.and r3, cc, pt
+    let cset = asm(0x5098, &[(0, 8, 3), (8, 5, 10), (39, 3, 7), (44, 1, 1)]);
+    assert_eq!(
+        op(cset),
+        Op::Cset {
+            dst: 3,
+            test: 10,
+            src: Pred {
+                reg: 7,
+                negate: false
+            },
+            op: BoolOp::And,
+            bf: true,
+            cc: false,
+        }
+    );
+}
+
 /// Echoes of Wisdom's lit shader masks two light masks against an immediate so.
 #[test]
 fn lop3_decodes_the_third_operand_of_its_immediate_form() {

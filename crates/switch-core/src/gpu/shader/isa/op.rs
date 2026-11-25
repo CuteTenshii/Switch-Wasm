@@ -325,6 +325,15 @@ pub enum Op {
         /// `.cc`: the four low bits go to the Z, S, C and O flags instead of the predicates.
         flags: bool,
     },
+    /// `p2r dst, src, mask`: [`Op::R2p`]'s inverse. The predicates (or with `flags` the Z, S, C
+    /// and O flags) `mask` names become bits of byte `byte`, over `src`'s other bits.
+    P2r {
+        dst: u8,
+        src: u8,
+        mask: Operand,
+        byte: u8,
+        flags: bool,
+    },
     Imul {
         dst: u8,
         a: u8,
@@ -529,6 +538,17 @@ pub enum Op {
         test: u8,
         src: Pred,
         op: BoolOp,
+    },
+    /// `cset.<test>.<op> dst, cc, src`: all ones, or 1.0 with `bf`, where [`Op::Csetp`]'s `p0`
+    /// would be true.
+    Cset {
+        dst: u8,
+        test: u8,
+        src: Pred,
+        op: BoolOp,
+        bf: bool,
+        /// `.cc`: Z and S from the result, C and O cleared.
+        cc: bool,
     },
 
     // ---- memory ----

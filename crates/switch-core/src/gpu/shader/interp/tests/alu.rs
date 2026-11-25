@@ -40,6 +40,74 @@ fn a_hand_written_alu_program_produces_the_expected_registers() {
 }
 
 /// Z-A's tick difference: a 64-bit pair to a double, then to a single, each to nearest even.
+/// `p2r` packs what `r2p` unpacks, and `cset` writes what `csetp` would test.
+#[test]
+fn p2r_packs_predicates_and_flags_and_cset_writes_a_flag_test() {
+    let pt = Pred {
+        reg: 7,
+        negate: false,
+    };
+    let program = prog(&[
+        Op::R2p {
+            src: 2,
+            mask: Operand::Imm(0x7f),
+            byte: 0,
+            flags: false,
+        },
+        Op::P2r {
+            dst: 4,
+            src: 1,
+            mask: Operand::Imm(0x7f),
+            byte: 1,
+            flags: false,
+        },
+        Op::R2p {
+            src: 3,
+            mask: Operand::Imm(0xf),
+            byte: 0,
+            flags: true,
+        },
+        Op::Cset {
+            dst: 5,
+            test: 10,
+            src: pt,
+            op: BoolOp::And,
+            bf: true,
+            cc: false,
+        },
+        Op::Cset {
+            dst: 6,
+            test: 5,
+            src: pt,
+            op: BoolOp::And,
+            bf: false,
+            cc: false,
+        },
+        Op::P2r {
+            dst: 7,
+            src: RZ,
+            mask: Operand::Imm(0xf),
+            byte: 0,
+            flags: true,
+        },
+        Op::Exit,
+    ]);
+    let mut inv = Invocation::new();
+    inv.set_reg(1, u32::MAX);
+    inv.set_reg(2, 0b101);
+    inv.set_reg(3, 1);
+    inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+        .unwrap();
+    assert_eq!(
+        inv.reg(4),
+        0xffff_85ff,
+        "p0 and p2 in byte 1, the rest of src kept"
+    );
+    assert_eq!(f32::from_bits(inv.reg(5)), 1.0, "Z set passes EQU");
+    assert_eq!(inv.reg(6), 0, "Z set fails NE");
+    assert_eq!(inv.reg(7), 1, "only Z is set");
+}
+
 /// Echoes of Wisdom's light volumes build their light's bit with `shf.l.w`.
 #[test]
 fn a_funnel_shift_answers_the_word_its_direction_keeps() {

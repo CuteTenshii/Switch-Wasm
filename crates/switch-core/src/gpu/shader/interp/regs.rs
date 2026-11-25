@@ -142,6 +142,11 @@ pub(super) fn reads(op: &Op) -> Vec<u8> {
             v.extend(operand_reg(b));
             v
         }
+        Op::P2r { src, mask, .. } => {
+            let mut v = vec![src];
+            v.extend(operand_reg(mask));
+            v
+        }
         Op::Shf { lo, shift, hi, .. } => {
             let mut v = vec![lo, hi];
             v.extend(operand_reg(shift));

@@ -103,6 +103,17 @@ pub(super) fn decode_alu(insn: u64) -> Op {
                 ftz: field(insn, 44, 1) != 0,
             }
         }
+        // p2r: Eden decodes only the immediate mask, and so does this.
+        0xe8 if form >> 8 == 0x38 => {
+            let Some(mask) = rhs_int else { return un };
+            Op::P2r {
+                dst: reg(insn, 0, 8),
+                src: reg(insn, 8, 8),
+                mask,
+                byte: field(insn, 41, 2) as u8,
+                flags: field(insn, 40, 1) != 0,
+            }
+        }
         // r2p.
         0xf0 => {
             let Some(mask) = rhs_int else { return un };

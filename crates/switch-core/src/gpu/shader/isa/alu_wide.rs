@@ -319,6 +319,21 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
         };
     }
 
+    // cset, 0x5098/0xfff8: Eden's `CSET`, `csetp` writing a register.
+    if insn & 0xfff8_0000_0000_0000 == 0x5098_0000_0000_0000 {
+        let Some(op) = bool_op(field(insn, 45, 2)) else {
+            return un;
+        };
+        return Op::Cset {
+            dst: reg(insn, 0, 8),
+            test: field(insn, 8, 5) as u8,
+            src: src_pred(insn, 39, 42),
+            op,
+            bf: field(insn, 44, 1) != 0,
+            cc: field(insn, 47, 1) != 0,
+        };
+    }
+
     // nop, 0x50b0/0xfff8.
     if insn & 0xfff8_0000_0000_0000 == 0x50b0_0000_0000_0000 {
         return Op::Nop;

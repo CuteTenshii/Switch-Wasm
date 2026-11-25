@@ -94,6 +94,7 @@ impl Emitter<'_> {
             | Op::Icmp { .. }
             | Op::Bfi { .. }
             | Op::R2p { .. }
+            | Op::P2r { .. }
             | Op::Lop { .. }
             | Op::Lop3 { .. }
             | Op::Shl { .. }
@@ -115,7 +116,8 @@ impl Emitter<'_> {
             | Op::S2r { .. }
             | Op::Psetp { .. }
             | Op::Pset { .. }
-            | Op::Csetp { .. } => self.emit_conversion(at, op)?,
+            | Op::Csetp { .. }
+            | Op::Cset { .. } => self.emit_conversion(at, op)?,
 
             // ---- memory ----
             Op::Ldc {

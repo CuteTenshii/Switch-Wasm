@@ -719,6 +719,8 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
         | Op::Mov32i { dst, .. }
         | Op::Tmml { dst }
         | Op::S2r { dst, .. }
+        | Op::P2r { dst, .. }
+        | Op::Cset { dst, .. }
         | Op::Iadd { dst, .. }
         | Op::Iadd3 { dst, .. }
         | Op::Imnmx { dst, .. }
