@@ -883,10 +883,6 @@ mod tests {
             self.flushes.set(self.flushes.get() + 1);
             Ok(renderer::Flush::Done)
         }
-
-        fn report(&self, out: &mut crate::json::Object) {
-            out.field("backend", "stub");
-        }
     }
 
     /// The backend belongs to the `Gpu`, not a channel: titles open several and close them.
@@ -894,21 +890,17 @@ mod tests {
     fn the_backend_outlives_more_channels_and_a_close() {
         let mut gpu = Gpu::new();
         let first = gpu.create_channel(1).unwrap();
-        gpu.set_renderer(Box::new(Stub {
-            flushes: std::rc::Rc::new(std::cell::Cell::new(0)),
-        }));
+        gpu.set_renderer(Box::new(ScreenStub));
         for _ in 0..3 {
             gpu.create_channel(1).unwrap();
         }
-        assert_eq!(
-            gpu.renderer_report(),
-            "{\"backend\":\"stub\"}",
+        assert!(
+            gpu.renderer.has_screen(),
             "three more channels do not displace the backend"
         );
         gpu.channels.remove(&first);
-        assert_eq!(
-            gpu.renderer_report(),
-            "{\"backend\":\"stub\"}",
+        assert!(
+            gpu.renderer.has_screen(),
             "closing the channel it was installed on does not take it away"
         );
     }
@@ -1053,9 +1045,10 @@ mod tests {
             1,
             "the submission on the second channel reached the backend"
         );
+        gpu.submit(second, &mem, &[entry], 1).unwrap();
         assert_eq!(
-            gpu.renderer_report(),
-            "{\"backend\":\"stub\"}",
+            flushes.get(),
+            2,
             "the backend came back off the channel it was lent to"
         );
     }

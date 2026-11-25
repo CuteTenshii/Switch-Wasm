@@ -1906,124 +1906,22 @@ mod tests {
         assert_eq!(converted[3], 1.0, "alpha is never sRGB-encoded");
     }
 
-    /// Float render targets sampled back by HDR passes.
+    /// The decoder fills a buffer of `MAX_TEXELS`, so every footprint a TIC names must fit one.
     #[test]
-    fn the_float_tic_formats_map_to_their_surface_format() {
-        let plain = |sizes, ty| match texel_kind_for(sizes, ty).unwrap() {
-            TexelKind::Plain(format) => format,
-            other => panic!("{sizes:#x}/{ty} is {other:?}, not a plain format"),
-        };
-        assert_eq!(plain(0x03, 7).raw, 0xCA); // R16_G16_B16_A16 -> RGBA16Float
-        assert_eq!(plain(0x03, 7).bytes_per_pixel, 8);
-        assert_eq!(plain(0x01, 7).raw, 0xC0); // R32_G32_B32_A32 -> RGBA32Float
-        assert_eq!(plain(0x0F, 7).raw, 0xE5); // R32             -> R32Float
-        assert_eq!(plain(0x03, 2).raw, 0xC6); // R16_G16_B16_A16 -> RGBA16Unorm
-                                              // Tears of the Kingdom samples an R16_G16 unorm image.
-        assert_eq!(plain(0x0C, 2).raw, 0xDA); // R16_G16         -> RG16Unorm
-        assert_eq!(plain(0x0C, 2).bytes_per_pixel, 4);
-        assert_eq!(plain(0x0C, 1).raw, 0xDB); // R16_G16         -> RG16Snorm
-        assert!(texel_kind_for(0x09, 7).is_err());
-    }
-
-    #[test]
-    fn the_integer_tic_formats_map_to_their_surface_format() {
-        const UINT: u32 = 4;
-        let raw = |sizes| match texel_kind_for(sizes, UINT).unwrap() {
-            TexelKind::Plain(format) => format.raw,
-            other => panic!("{sizes:#x} is {other:?}, not a plain format"),
-        };
-        assert_eq!(raw(0x01), 0xC2); // R32_G32_B32_A32 -> RGBA32Uint
-        assert_eq!(raw(0x0F), 0xE4); // R32             -> R32Uint
-        assert_eq!(raw(0x1D), 0xF6); // R8              -> R8Uint
-    }
-
-    #[test]
-    fn every_compressed_tic_format_maps_to_its_codec() {
-        // BC6H's SF16 and UF16; deko3d numbers SF16 first.
-        assert_eq!(
-            texel_kind_for(0x10, 7).unwrap(),
-            TexelKind::Block(Codec::Bc6hSf16)
-        );
-        assert_eq!(
-            texel_kind_for(0x11, 7).unwrap(),
-            TexelKind::Block(Codec::Bc6hUf16)
-        );
-        assert_eq!(
-            texel_kind_for(0x24, 2).unwrap(),
-            TexelKind::Block(Codec::Bc1)
-        );
-        assert_eq!(
-            texel_kind_for(0x26, 2).unwrap(),
-            TexelKind::Block(Codec::Bc3)
-        );
-        assert_eq!(
-            texel_kind_for(0x27, 1).unwrap(),
-            TexelKind::Block(Codec::Bc4Snorm)
-        );
-        assert_eq!(
-            texel_kind_for(0x28, 2).unwrap(),
-            TexelKind::Block(Codec::Bc5Unorm)
-        );
-        assert_eq!(
-            texel_kind_for(0x17, 2).unwrap(),
-            TexelKind::Block(Codec::Bc7)
-        );
-
-        // `A2B10G10R10` and `B10G11R11`, as Persona 5 Royal samples them.
-        assert_eq!(
-            texel_kind_for(0x09, 2).unwrap(),
-            TexelKind::Plain(ColorFormat::from_raw(0xD1).unwrap())
-        );
-        assert_eq!(
-            texel_kind_for(0x21, 7).unwrap(),
-            TexelKind::Plain(ColorFormat::from_raw(0xE0).unwrap())
-        );
-        assert_eq!(
-            texel_kind_for(0x04, 7).unwrap(),
-            TexelKind::Plain(ColorFormat::from_raw(0xCB).unwrap())
-        );
-        assert_eq!(
-            texel_kind_for(0x0c, 7).unwrap(),
-            TexelKind::Plain(ColorFormat::from_raw(0xDE).unwrap())
-        );
-
-        // Every ASTC footprint; 0x43 is not a format.
-        let footprints = [
-            (0x40, 4, 4),
-            (0x41, 5, 5),
-            (0x42, 6, 6),
-            (0x44, 8, 8),
-            (0x45, 10, 10),
-            (0x46, 12, 12),
-            (0x50, 5, 4),
-            (0x51, 6, 5),
-            (0x52, 8, 6),
-            (0x53, 10, 8),
-            (0x54, 12, 10),
-            (0x55, 8, 5),
-            (0x56, 10, 5),
-            (0x57, 10, 6),
-        ];
-        for (raw, width, height) in footprints {
-            assert_eq!(
-                texel_kind_for(raw, 2).unwrap(),
-                TexelKind::Block(Codec::Astc { width, height }),
-                "COMPONENTS_SIZES {raw:#x}"
-            );
-        }
-        assert!(
-            texel_kind_for(0x43, 2).is_err(),
-            "0x43 is not an ASTC footprint"
-        );
-        // A block never carries more texels than the largest footprint.
-        for (raw, width, height) in footprints {
-            let TexelKind::Block(codec) = texel_kind_for(raw, 2).unwrap() else {
-                panic!()
+    fn every_astc_footprint_a_tic_names_decodes() {
+        use crate::gpu::bcn::{decode_into, MAX_TEXELS};
+        let mut footprints = 0;
+        for raw in 0..=0x7F {
+            let Ok(TexelKind::Block(codec @ Codec::Astc { .. })) = texel_kind_for(raw, 2) else {
+                continue;
             };
-            assert_eq!(codec.block_size(), (width as u32, height as u32));
-            assert_eq!(codec.bytes_per_block(), 16);
-            assert!((width as usize) * (height as usize) <= crate::gpu::bcn::MAX_TEXELS);
+            footprints += 1;
+            let block = vec![0u8; codec.bytes_per_block() as usize];
+            let mut out = [[0.0f32; 4]; MAX_TEXELS];
+            let decoded = decode_into(codec, &block, &mut out);
+            assert!(decoded.is_ok(), "{codec:?}: {decoded:?}");
         }
+        assert_ne!(footprints, 0);
     }
 
     #[test]

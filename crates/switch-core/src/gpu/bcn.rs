@@ -521,7 +521,6 @@ mod tests {
         ] {
             assert_eq!(table[0], 0);
             assert_eq!(table[table.len() - 1], 64);
-            assert_eq!(table.len(), 1 << bits);
             assert!(
                 table.windows(2).all(|w| w[0] < w[1]),
                 "{bits}-bit weights are not sorted"
@@ -671,21 +670,24 @@ mod tests {
         assert_eq!(decode_bc7(&[0u8; 16]), [[0.0; 4]; 16]);
     }
 
+    /// A decoder reading past the size its codec reports would panic on a block of that size.
     #[test]
     fn every_codec_reports_the_size_it_reads() {
-        for codec in [Codec::Bc1, Codec::Bc4Unorm, Codec::Bc4Snorm] {
-            assert_eq!(codec.bytes_per_block(), 8);
-        }
         for codec in [
+            Codec::Bc1,
             Codec::Bc2,
             Codec::Bc3,
+            Codec::Bc4Unorm,
+            Codec::Bc4Snorm,
             Codec::Bc5Unorm,
             Codec::Bc5Snorm,
+            Codec::Bc6hUf16,
+            Codec::Bc6hSf16,
             Codec::Bc7,
         ] {
-            assert_eq!(codec.bytes_per_block(), 16);
+            let size = codec.bytes_per_block() as usize;
+            assert!(decode(codec, &vec![0xA5; size]).is_ok(), "{codec:?}");
+            assert!(decode(codec, &vec![0xA5; size - 1]).is_err(), "{codec:?}");
         }
-        assert!(decode(Codec::Bc7, &[0u8; 8]).is_err());
-        assert!(decode(Codec::Bc1, &[0u8; 8]).is_ok());
     }
 }

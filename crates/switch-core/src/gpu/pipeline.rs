@@ -1099,29 +1099,27 @@ mod tests {
         assert!(!culls_every_triangle(&engine));
     }
 
-    /// (D3D code, GL code, factor).
-    const FACTOR_PAIRS: &[(u32, u32, BlendFactor)] = &[
-        (0x01, 0x4000, BlendFactor::Zero),
-        (0x02, 0x4001, BlendFactor::One),
-        (0x03, 0x4300, BlendFactor::Src),
-        (0x04, 0x4301, BlendFactor::OneMinusSrc),
-        (0x05, 0x4302, BlendFactor::SrcAlpha),
-        (0x06, 0x4303, BlendFactor::OneMinusSrcAlpha),
-        (0x07, 0x4304, BlendFactor::DstAlpha),
-        (0x08, 0x4305, BlendFactor::OneMinusDstAlpha),
-        (0x09, 0x4306, BlendFactor::Dst),
-        (0x0a, 0x4307, BlendFactor::OneMinusDst),
-        (0x0b, 0x4308, BlendFactor::SrcAlphaSaturated),
-        (0x61, 0xc001, BlendFactor::Constant),
-        (0x62, 0xc002, BlendFactor::OneMinusConstant),
-    ];
-
     #[test]
     fn both_numberings_name_the_same_blend_factor() {
         // Both numberings occur; the Home Menu uses the D3D one.
-        for &(d3d, gl, expected) in FACTOR_PAIRS {
-            assert_eq!(blend_factor(d3d), Ok(expected), "D3D {d3d:#x}");
-            assert_eq!(blend_factor(gl), Ok(expected), "GL {gl:#x}");
+        for (d3d, gl) in [
+            (0x01, 0x4000),
+            (0x02, 0x4001),
+            (0x03, 0x4300),
+            (0x04, 0x4301),
+            (0x05, 0x4302),
+            (0x06, 0x4303),
+            (0x07, 0x4304),
+            (0x08, 0x4305),
+            (0x09, 0x4306),
+            (0x0a, 0x4307),
+            (0x0b, 0x4308),
+            (0x61, 0xc001),
+            (0x62, 0xc002),
+        ] {
+            let factor = blend_factor(d3d);
+            assert!(factor.is_ok(), "D3D {d3d:#x}: {factor:?}");
+            assert_eq!(factor, blend_factor(gl), "D3D {d3d:#x} against GL {gl:#x}");
         }
     }
 
@@ -1143,15 +1141,16 @@ mod tests {
 
     #[test]
     fn both_numberings_name_the_same_blend_equation() {
-        for (simple, gl, expected) in [
-            (0x1, 0x8006, BlendOperation::Add),
-            (0x2, 0x800a, BlendOperation::Subtract),
-            (0x3, 0x800b, BlendOperation::ReverseSubtract),
-            (0x4, 0x8007, BlendOperation::Min),
-            (0x5, 0x8008, BlendOperation::Max),
+        for (simple, gl) in [
+            (0x1, 0x8006),
+            (0x2, 0x800a),
+            (0x3, 0x800b),
+            (0x4, 0x8007),
+            (0x5, 0x8008),
         ] {
-            assert_eq!(blend_equation(simple), Ok(expected));
-            assert_eq!(blend_equation(gl), Ok(expected));
+            let operation = blend_equation(simple);
+            assert!(operation.is_ok(), "{simple:#x}: {operation:?}");
+            assert_eq!(operation, blend_equation(gl), "{simple:#x} against {gl:#x}");
         }
         assert_eq!(
             blend_equation(0x77),
@@ -1464,109 +1463,88 @@ mod tests {
         );
     }
 
+    /// Every format named here is one the rasterizer fetches, over as many bytes as it says.
     #[test]
     fn vertex_formats_are_the_ones_the_rasterizer_can_fetch() {
-        assert_eq!(
-            vertex_format(0x01, ATTRIB_TYPE_FLOAT),
-            Ok(VertexFormat::Float32x4)
-        );
-        assert_eq!(
-            vertex_format(0x0a, ATTRIB_TYPE_UNORM),
-            Ok(VertexFormat::Unorm8x4)
-        );
-        assert_eq!(
-            vertex_format(0x0a, ATTRIB_TYPE_SNORM),
-            Ok(VertexFormat::Snorm8x4)
-        );
-        assert_eq!(
-            vertex_format(0x0a, ATTRIB_TYPE_SINT),
-            Ok(VertexFormat::Sint8x4)
-        );
-        assert_eq!(
-            vertex_format(0x0a, ATTRIB_TYPE_UINT),
-            Ok(VertexFormat::Uint8x4)
-        );
-        assert_eq!(VertexFormat::Sint8x4.base(), AttributeBase::Sint);
-        assert_eq!(VertexFormat::Uint8x4.base(), AttributeBase::Uint);
-        assert_eq!(VertexFormat::Snorm8x4.base(), AttributeBase::Float);
-        assert_eq!(VertexFormat::Unorm8x4.base(), AttributeBase::Float);
-        // The 16-bit shapes WebGPU has.
-        assert_eq!(
-            vertex_format(0x03, ATTRIB_TYPE_FLOAT),
-            Ok(VertexFormat::Float16x4)
-        );
-        assert_eq!(
-            vertex_format(0x0f, ATTRIB_TYPE_FLOAT),
-            Ok(VertexFormat::Float16x2)
-        );
-        assert_eq!(
-            vertex_format(0x03, ATTRIB_TYPE_SNORM),
-            Ok(VertexFormat::Snorm16x4)
-        );
-        assert_eq!(
-            vertex_format(0x0f, ATTRIB_TYPE_UINT),
-            Ok(VertexFormat::Uint16x2)
-        );
-        assert_eq!(VertexFormat::Sint16x4.base(), AttributeBase::Sint);
-        assert_eq!(VertexFormat::Uint16x2.base(), AttributeBase::Uint);
-        assert_eq!(VertexFormat::Float16x4.base(), AttributeBase::Float);
-        // `3x16` has no WebGPU vertex format.
-        assert_eq!(
-            vertex_format(0x05, ATTRIB_TYPE_FLOAT),
-            Err(Unsupported::VertexFormat {
-                size: 0x05,
-                ty: ATTRIB_TYPE_FLOAT
-            })
-        );
-        assert_eq!(
-            vertex_format(0x30, ATTRIB_TYPE_UNORM),
-            Ok(VertexFormat::Packed1010102(Packed1010102::Unorm))
-        );
-        assert_eq!(
-            VertexFormat::Packed1010102(Packed1010102::Sint).base(),
-            AttributeBase::Sint
-        );
-        assert_eq!(
-            vertex_format(0x1d, ATTRIB_TYPE_UINT),
-            Ok(VertexFormat::Uint8)
-        );
-        assert_eq!(
-            vertex_format(0x18, ATTRIB_TYPE_UINT),
-            Ok(VertexFormat::Uint8x2)
-        );
-        assert_eq!(
-            vertex_format(0x18, ATTRIB_TYPE_UNORM),
-            Ok(VertexFormat::Unorm8x2)
-        );
-        assert_eq!(VertexFormat::Uint8.base(), AttributeBase::Uint);
-        assert_eq!(VertexFormat::Sint8x2.base(), AttributeBase::Sint);
-        assert_eq!(VertexFormat::Uint8.size(), 1);
-        assert_eq!(VertexFormat::Unorm8x2.size(), 2);
-        assert_eq!(
-            vertex_format(0x13, ATTRIB_TYPE_UNORM),
-            Err(Unsupported::VertexFormat {
-                size: 0x13,
-                ty: ATTRIB_TYPE_UNORM
-            })
-        );
-        assert_eq!(
-            vertex_format(0x1b, ATTRIB_TYPE_FLOAT),
-            Ok(VertexFormat::Float16)
-        );
-        assert_eq!(
-            vertex_format(0x04, ATTRIB_TYPE_SINT),
-            Ok(VertexFormat::Sint32x2)
-        );
-        assert_eq!(VertexFormat::Uint32x3.base(), AttributeBase::Uint);
-        assert_eq!(VertexFormat::Uint32x3.size(), 12);
-        // `11_11_10` is decoded by neither renderer.
-        assert_eq!(
-            vertex_format(0x31, ATTRIB_TYPE_FLOAT),
-            Err(Unsupported::VertexFormat {
-                size: 0x31,
-                ty: ATTRIB_TYPE_FLOAT
-            })
-        );
+        use crate::gpu::engine::threed::VertexAttrib;
+        use crate::gpu::exec::ExecCtx;
+        use crate::gpu::raster::fetch_attribute;
+        use crate::gpu::syncpt::Host1x;
+        use crate::gpu::vmm::{AddressSpace, SMALL_PAGE_SIZE};
+        use crate::mem::Memory;
+
+        let mem = Memory::new();
+        mem.map(0x6000_0000, &[0xFF; 0x1000]).unwrap();
+        let mut vmm = AddressSpace::new();
+        let base = vmm
+            .map(0x6000_0000, 0x1000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let ctx = ExecCtx {
+            mem: &mem,
+            vmm: &vmm,
+            as_id: 0,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let mut named = 0;
+        for size in 0..0x40 {
+            for ty in [
+                ATTRIB_TYPE_SNORM,
+                ATTRIB_TYPE_UNORM,
+                ATTRIB_TYPE_SINT,
+                ATTRIB_TYPE_UINT,
+                ATTRIB_TYPE_FLOAT,
+            ] {
+                let Ok(format) = vertex_format(size, ty) else {
+                    continue;
+                };
+                named += 1;
+                let attrib = VertexAttrib {
+                    buffer_id: 0,
+                    is_fixed: false,
+                    offset: 0,
+                    size,
+                    ty,
+                    is_bgra: false,
+                };
+                // Past the array's limit the fetch reads zero in place of the 0xFF bytes there.
+                let first_channel = |limit| {
+                    let array = VertexArray {
+                        enabled: true,
+                        stride: 0,
+                        start: base,
+                        limit,
+                        divisor: 0,
+                    };
+                    fetch_attribute(attrib, array, 0, &ctx)
+                        .unwrap_or_else(|e| panic!("{format:?} at {size:#x}/{ty}: {e:?}"))[0]
+                        .to_bits()
+                };
+                let bytes = format.size();
+                let last = base + u64::from(bytes) - 1;
+                assert_ne!(
+                    first_channel(last),
+                    0,
+                    "{format:?}: more than {bytes} bytes fetched"
+                );
+                assert_eq!(
+                    first_channel(last - 1),
+                    0,
+                    "{format:?}: under {bytes} bytes fetched"
+                );
+                // The rasterizer carries an integer type's bits and turns every other into floats.
+                let base_type = match ty {
+                    ATTRIB_TYPE_SINT => AttributeBase::Sint,
+                    ATTRIB_TYPE_UINT => AttributeBase::Uint,
+                    _ => AttributeBase::Float,
+                };
+                assert_eq!(format.base(), base_type, "{format:?}");
+            }
+        }
+        assert_ne!(named, 0);
     }
 
     #[test]

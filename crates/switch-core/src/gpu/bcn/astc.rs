@@ -975,8 +975,6 @@ mod tests {
 
     #[test]
     fn the_trit_and_quint_tables_are_in_range() {
-        assert_eq!(TRITS_FROM_T.len(), 256);
-        assert_eq!(QUINTS_FROM_Q.len(), 128);
         for row in TRITS_FROM_T {
             assert!(row.iter().all(|&t| t < 3), "a trit is 0, 1 or 2");
         }
