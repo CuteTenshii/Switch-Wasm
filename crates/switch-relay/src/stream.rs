@@ -455,6 +455,8 @@ fn raw_socket(address: SocketAddr, kind: Type) -> std::io::Result<Socket> {
     if address.is_ipv6() {
         socket.set_only_v6(true)?;
     }
+    // Windows' SO_REUSEADDR would let a listener take a port another program listens on.
+    #[cfg(unix)]
     if kind == Type::STREAM {
         socket.set_reuse_address(true)?;
     }
