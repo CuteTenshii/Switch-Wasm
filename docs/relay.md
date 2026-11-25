@@ -6,7 +6,7 @@ Nothing here is needed to play: with no relay URL set, the network stays empty.
 
 ## Using it
 
-Download `switch-relay` for Linux, Windows or macOS from the Network tab's switch-relay section (the `relay-v*` releases), or build it with `cargo build --release -p switch-relay`. Run it with no arguments, open the Network tab, and turn it on. The tab shows the relay's state and the guest's connections, UDP sockets and listeners: peer or port, state and bytes each way. The address defaults to `ws://127.0.0.1:18787` and is remembered.
+Download `switch-relay` for Linux, Windows or macOS from the Network tab's switch-relay section (the `relay-v*` releases), or build it with `cargo build --release -p switch-relay`. Run it with no arguments, open the Network tab, and turn it on. The tab shows the relay's state and the guest's connections, UDP sockets and listeners: peer or port, state and bytes each way. The address defaults to `ws://127.0.0.1:18787` and is remembered. Once the relay is connected, the tab's Relay settings section shows its settings and can change them (see [Settings](#settings)).
 
 ## Transport
 
@@ -21,7 +21,9 @@ Download `switch-relay` for Linux, Windows or macOS from the Network tab's switc
 u8 op | u32 stream | payload
 ```
 
-`HELLO` and `ALIVE` have no stream; their stream field is 0.
+`HELLO`, `ALIVE` and the settings frames have no stream; their stream field is 0.
+
+A text is `u8 len` and that many UTF-8 bytes; a list of texts is `u8 count` and that many texts.
 
 A peer is `u8 kind` and then: 0, an IPv4 address (4 bytes); 1, a name (`u8 len`, UTF-8 bytes); 2, an IPv6 address (16 bytes).
 
@@ -37,12 +39,14 @@ A peer is `u8 kind` and then: 0, an IPv4 address (4 bytes); 1, a name (`u8 len`,
 | `0x06` | `UDP_OPEN` | `u16 port` (the guest's, 0 for any), `u32 window`. A UDP socket |
 | `0x07` | `SEND_TO` | `u16 port`, peer, then one datagram of at most 65,507 bytes |
 | `0x08` | `LISTEN` | `u16 port`, `u32 window` for each connection it accepts |
+| `0x09` | `GET_SETTINGS` | none. See [Settings](#settings) |
+| `0x0A` | `SET_SETTINGS` | `u16 port`, `u8 flags` (bit 0 allow private, bit 1 allow inbound), the origins as a list of texts |
 
 ### Relay to client
 
 | Op | Name | Payload |
 | --- | --- | --- |
-| `0x80` | `HELLO` | `u8 version` (3), `u16 max_streams` |
+| `0x80` | `HELLO` | `u8 version` (4), `u16 max_streams` |
 | `0x81` | `CONNECTED` | none. The connection, socket or listener is open |
 | `0x82` | `FAILED` | `u8 reason`: 0 refused, 1 unreachable, 2 timed out, 3 name not found, 4 denied by policy, 5 port in use |
 | `0x83` | `DATA` | the bytes, at most 16 KiB |
@@ -52,8 +56,11 @@ A peer is `u8 kind` and then: 0, an IPv4 address (4 bytes); 1, a name (`u8 len`,
 | `0x87` | `SENT` | `u32 bytes`. The relay wrote this many more of the stream's bytes to the peer |
 | `0x88` | `RECEIVED_FROM` | `u16 port`, peer, then one datagram |
 | `0x89` | `INCOMING` | `u32 listener`, `u16 port`, peer. A connection to `listener`, as the new stream in the frame's stream field |
+| `0x8A` | `SETTINGS` | `u16 listening`, `u16 port`, `u8 flags`, the origins and the fixed origins as lists of texts. See [Settings](#settings) |
+| `0x8B` | `ASKING` | none. A settings change waits for an answer on the relay's computer |
+| `0x8C` | `SETTINGS_REFUSED` | `u8 reason`: 0 denied, 1 busy, 2 locked, 3 invalid, 4 unsaved |
 
-`HELLO` is the relay's first message. A client that does not understand the version closes the WebSocket. The page understands version 3 only; an older relay is refused and the Network tab says no relay answered.
+`HELLO` is the relay's first message. A client that does not understand the version closes the WebSocket. The page understands versions 3 and 4; another is refused and the Network tab says no relay answered. Version 4 added the settings frames; a version 3 relay closes the WebSocket on them, so the page sends them only to version 4.
 
 ## Streams
 
@@ -99,7 +106,31 @@ The relay is a proxy to anywhere its host can reach, and any web page can open a
 - Inbound traffic is off by default. A UDP socket only hears from hosts it has sent to, on any of their ports, as a NAT that filters by address does, and gets whatever host port is free. `LISTEN` is refused (reason 4).
 - `--allow-inbound` lets guests host: a UDP socket gets the guest's own port when it is free (any port otherwise) and hears from anyone, and `LISTEN` opens that port on every interface, IPv4 and IPv6, failing with reason 5 when it is taken. Reaching it from the Internet is up to the user's router.
 - `--port`, `--allow-origin` and `--allow-private` cover the remaining cases.
+- The settings file (see [Settings](#settings)) holds the same four choices; a flag sets its choice for one run, over the file.
 - Limits: 256 streams per WebSocket (an open over it is reason 4; an accepted connection over it is dropped), a `window` capped at 1 MiB, 16 KiB of `DATA` per frame, 65,507 bytes per datagram, and per WebSocket message a full datagram with its header.
+
+## Settings
+
+The relay keeps its settings in `switch-relay/switch-relay.toml` in the user's config directory (`$XDG_CONFIG_HOME` or `~/.config` on Linux, `~/Library/Application Support` on macOS, `%APPDATA%` on Windows), and prints the path when it starts. A missing file is the defaults; a file it cannot read, with an unknown key, a port of 0 or something that is not an origin, stops it from starting.
+
+```toml
+port = 18787
+allow_private = false
+allow_inbound = false
+origins = ["https://example.org"]
+```
+
+An origin is `http` or `https`, a host and a port, as a browser sends it in `Origin`: `https://example.org`, `http://localhost:8000`. The relay writes it in that form, lowercase and without the scheme's own port. A flag (`--port`, `--allow-private`, `--allow-inbound`, `--allow-origin`) sets its setting for the run whatever the file says, and a page cannot change it back.
+
+A page reads and changes the settings over its link, outside any stream.
+
+- `GET_SETTINGS` is answered with `SETTINGS`: `listening`, the port the relay listens on now; `port`, the one it listens on from its next start; then `flags`, bit 0 allow private, bit 1 allow inbound, bit 2 saved (clear where there is no config directory, so changes last until the relay exits), and bits 3, 4 and 5 for the port, allow private and allow inbound set by a flag; then the origins the settings trust, and the origins trusted whatever they say (the built-in ones and `--allow-origin`).
+- `SET_SETTINGS` carries the whole settings as they should be. The relay answers with the new `SETTINGS`, or `SETTINGS_REFUSED`: denied (the user said no, or there was no way to ask), busy (another change waits for its answer), locked (it would undo a flag), invalid (a port of 0, more than 64 origins, or one that is not an origin), unsaved (the file could not be written).
+- A change that opens the relay up, that is turning on allow private or allow inbound, or trusting an origin it did not, is asked about first, and the relay sends `ASKING` before it asks. It asks in a window on its own desktop (`zenity`, else `kdialog`, on Linux and the BSDs; a dialog through `osascript` on macOS; a message box on Windows), which no page can answer. With no desktop or no such tool it asks on its terminal, and with no terminal either the answer is no. A change that only closes the relay down is made at once. Streams go on while a change waits.
+- The file is written before the change takes effect, and a change that cannot be written is not made. Each page, connection, listener and datagram after it is judged by the new settings; a page already connected stays, and a UDP socket keeps the inbound setting it opened with.
+- A new port takes effect when the relay restarts.
+
+The page's worker sends `GET_SETTINGS` as soon as `HELLO` arrives and hands the settings frames to the Network tab as they come, so they work with no title running. With a version 3 relay the tab says it is too old.
 
 ## Not covered
 

@@ -1,10 +1,12 @@
 //! Who may use the relay and where it may connect.
 
 use std::collections::HashMap;
-use std::io::BufRead;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::RwLock;
 
 use tokio::sync::Mutex;
+
+use crate::terminal;
 
 /// Origins that may use the relay without being asked: the deployed emulator and its dev server.
 pub const TRUSTED_ORIGINS: [&str; 2] = ["http://localhost:8000", "https://tenshii.moe"];
@@ -18,12 +20,19 @@ pub enum Unknown {
 }
 
 pub struct Policy {
-    trusted: Vec<String>,
+    /// The built-in origins and those given on the command line, which no page can remove.
+    fixed: Vec<String>,
+    open: RwLock<Open>,
     unknown: Unknown,
-    allow_private: bool,
-    allow_inbound: bool,
     /// Answers given to unknown origins. Held across the question, so one is asked at a time.
     decided: Mutex<HashMap<String, bool>>,
+}
+
+/// What a page may change while the relay runs.
+struct Open {
+    origins: Vec<String>,
+    allow_private: bool,
+    allow_inbound: bool,
 }
 
 impl Policy {
@@ -33,19 +42,36 @@ impl Policy {
         allow_private: bool,
         allow_inbound: bool,
     ) -> Policy {
-        let trusted = TRUSTED_ORIGINS
+        let fixed = TRUSTED_ORIGINS
             .iter()
             .map(|origin| (*origin).to_owned())
             .chain(extra_origins)
             .map(|origin| origin.to_ascii_lowercase())
             .collect();
         Policy {
-            trusted,
+            fixed,
+            open: RwLock::new(Open {
+                origins: Vec::new(),
+                allow_private,
+                allow_inbound,
+            }),
             unknown,
-            allow_private,
-            allow_inbound,
             decided: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The origins trusted for the whole run, whatever the settings say.
+    pub fn fixed_origins(&self) -> &[String] {
+        &self.fixed
+    }
+
+    /// Replace what the settings decide. Streams already open keep what they started with.
+    pub fn set(&self, origins: Vec<String>, allow_private: bool, allow_inbound: bool) {
+        *self.open.write().unwrap() = Open {
+            origins,
+            allow_private,
+            allow_inbound,
+        };
     }
 
     /// Whether a page with this `Origin` header may connect. A client with none is not a browser.
@@ -53,7 +79,7 @@ impl Policy {
         let Some(origin) = origin.map(str::to_ascii_lowercase) else {
             return false;
         };
-        if self.trusted.contains(&origin) {
+        if self.fixed.contains(&origin) || self.open.read().unwrap().origins.contains(&origin) {
             return true;
         }
         let mut decided = self.decided.lock().await;
@@ -61,7 +87,7 @@ impl Policy {
             return answer;
         }
         let answer = match self.unknown {
-            Unknown::Ask => ask(&origin).await,
+            Unknown::Ask => terminal::ask(&format!("Allow {origin} to use this relay?")).await,
             Unknown::Deny => false,
         };
         decided.insert(origin, answer);
@@ -70,30 +96,22 @@ impl Policy {
 
     /// Whether guests may listen for connections and hear from hosts they never sent to.
     pub fn inbound(&self) -> bool {
-        self.allow_inbound
+        self.open.read().unwrap().allow_inbound
+    }
+
+    /// Whether guests may reach loopback, local networks and reserved addresses.
+    pub fn private(&self) -> bool {
+        self.open.read().unwrap().allow_private
     }
 
     /// Whether the relay may reach a resolved address.
     pub fn address_allowed(&self, address: impl Into<IpAddr>) -> bool {
-        self.allow_private
+        self.private()
             || match address.into() {
                 IpAddr::V4(address) => is_public(address),
                 IpAddr::V6(address) => is_public_v6(address),
             }
     }
-}
-
-async fn ask(origin: &str) -> bool {
-    eprint!("Allow {origin} to use this relay? [y/N] ");
-    let answer = tokio::task::spawn_blocking(|| {
-        let mut line = String::new();
-        std::io::stdin().lock().read_line(&mut line).ok()?;
-        Some(line)
-    })
-    .await
-    .ok()
-    .flatten();
-    answer.is_some_and(|line| matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
 /// An address the Internet routes: not this host, not a local network, not reserved.
@@ -264,6 +282,23 @@ mod tests {
             let address: Ipv6Addr = refused.parse().unwrap();
             assert!(!policy.address_allowed(address), "{refused}");
         }
+    }
+
+    #[tokio::test]
+    async fn settings_add_origins_and_open_the_policy_up_while_it_runs() {
+        let policy = closed();
+        assert!(!policy.origin_allowed(Some("https://added.example")).await);
+        policy.set(vec!["https://added.example".into()], true, true);
+        assert!(policy.origin_allowed(Some("https://added.example")).await);
+        assert!(policy.address_allowed(Ipv4Addr::LOCALHOST));
+        assert!(policy.inbound());
+        policy.set(Vec::new(), false, false);
+        assert!(!policy.address_allowed(Ipv4Addr::LOCALHOST));
+        assert!(!policy.inbound());
+        assert!(
+            policy.origin_allowed(Some("https://example.org")).await,
+            "an origin from the command line stays"
+        );
     }
 
     #[test]

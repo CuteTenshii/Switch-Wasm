@@ -5,9 +5,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use switch_relay::policy::{Policy, Unknown};
+use switch_relay::config::{Approval, Config, Overrides, Settings};
+use switch_relay::policy::Unknown;
 use switch_relay::Timeouts;
-use switch_relay_proto::{ClientFrame, Failure, Peer, ServerFrame, VERSION};
+use switch_relay_proto::{
+    ClientFrame, Failure, Peer, ServerFrame, Settings as RelaySettings, SettingsChange,
+    SettingsRefusal, VERSION,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -34,10 +38,30 @@ async fn inbound_relay() -> String {
 }
 
 async fn relay_full(allow_private: bool, allow_inbound: bool, timeouts: Timeouts) -> String {
+    let overrides = Overrides {
+        allow_private,
+        allow_inbound,
+        ..Overrides::default()
+    };
+    relay_config(overrides, Approval::Deny, timeouts).await
+}
+
+/// A relay with nothing saved, whose settings a page may change; `approval` answers for the
+/// user.
+async fn relay_config(overrides: Overrides, approval: Approval, timeouts: Timeouts) -> String {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let url = format!("ws://{}", listener.local_addr().unwrap());
-    let policy = Policy::new(Vec::new(), Unknown::Deny, allow_private, allow_inbound);
-    tokio::spawn(switch_relay::serve(listener, Arc::new(policy), timeouts));
+    let address = listener.local_addr().unwrap();
+    let url = format!("ws://{address}");
+    let settings = Settings::default();
+    let config = Config::new(
+        settings,
+        overrides,
+        Unknown::Deny,
+        approval,
+        None,
+        address.port(),
+    );
+    tokio::spawn(switch_relay::serve(listener, Arc::new(config), timeouts));
     url
 }
 
@@ -918,4 +942,133 @@ async fn a_reply_from_a_host_reached_by_name_comes_from_that_name() {
     };
     assert_eq!(peer, Peer::Name("localhost".into()));
     assert_eq!(data, b"q");
+}
+
+fn opening_up() -> SettingsChange {
+    SettingsChange {
+        port: 18787,
+        allow_private: true,
+        allow_inbound: false,
+        origins: vec!["https://added.example".into()],
+    }
+}
+
+async fn settings(socket: &mut Socket) -> RelaySettings {
+    send(socket, ClientFrame::GetSettings).await;
+    match next(socket).await {
+        ServerFrame::Settings(settings) => settings,
+        other => panic!("settings, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_page_reads_the_settings_over_its_link() {
+    let overrides = Overrides {
+        allow_inbound: true,
+        origins: vec!["https://flag.example".into()],
+        ..Overrides::default()
+    };
+    let url = relay_config(overrides, Approval::Deny, Timeouts::default()).await;
+    let mut socket = page(&url).await;
+    let port: u16 = url.rsplit(':').next().unwrap().parse().unwrap();
+    assert_eq!(
+        settings(&mut socket).await,
+        RelaySettings {
+            listening: port,
+            port: 18787,
+            allow_private: false,
+            allow_inbound: true,
+            saved: false,
+            port_locked: false,
+            private_locked: false,
+            inbound_locked: true,
+            origins: Vec::new(),
+            fixed_origins: vec![
+                "http://localhost:8000".into(),
+                "https://tenshii.moe".into(),
+                "https://flag.example".into(),
+            ],
+        }
+    );
+}
+
+#[tokio::test]
+async fn opening_the_relay_up_waits_for_a_yes() {
+    let url = relay_config(Overrides::default(), Approval::Deny, Timeouts::default()).await;
+    let mut socket = page(&url).await;
+    send(&mut socket, ClientFrame::SetSettings(opening_up())).await;
+    assert_eq!(next(&mut socket).await, ServerFrame::Asking);
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::SettingsRefused(SettingsRefusal::Denied)
+    );
+
+    let port = echo().await;
+    send(&mut socket, tcp(1, port, 1024)).await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Failed {
+            stream: 1,
+            reason: Failure::Denied
+        }
+    );
+    let mut added = connect(&url, Some("https://added.example")).await;
+    assert_eq!(closed_with(&mut added).await, CloseCode::Policy);
+}
+
+#[tokio::test]
+async fn a_yes_changes_the_running_relay() {
+    let url = relay_config(Overrides::default(), Approval::Allow, Timeouts::default()).await;
+    let mut socket = page(&url).await;
+    send(&mut socket, ClientFrame::SetSettings(opening_up())).await;
+    assert_eq!(next(&mut socket).await, ServerFrame::Asking);
+    let ServerFrame::Settings(changed) = next(&mut socket).await else {
+        panic!("the new settings");
+    };
+    assert!(changed.allow_private);
+    assert_eq!(changed.origins, ["https://added.example"]);
+
+    let port = echo().await;
+    send(&mut socket, tcp(1, port, 1024)).await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Connected { stream: 1 }
+    );
+
+    let mut added = connect(&url, Some("https://added.example")).await;
+    assert!(matches!(next(&mut added).await, ServerFrame::Hello { .. }));
+
+    // Closing back down needs no answer, so there is no `ASKING` before it.
+    let closing = SettingsChange {
+        allow_private: false,
+        ..opening_up()
+    };
+    send(&mut socket, ClientFrame::SetSettings(closing)).await;
+    let ServerFrame::Settings(closed) = next(&mut socket).await else {
+        panic!("the new settings");
+    };
+    assert!(!closed.allow_private);
+    send(&mut socket, tcp(2, port, 1024)).await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Failed {
+            stream: 2,
+            reason: Failure::Denied
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_change_that_is_not_one_is_refused() {
+    let url = relay_config(Overrides::default(), Approval::Allow, Timeouts::default()).await;
+    let mut socket = page(&url).await;
+    let bad = SettingsChange {
+        origins: vec!["https://added.example/path".into()],
+        ..opening_up()
+    };
+    send(&mut socket, ClientFrame::SetSettings(bad)).await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::SettingsRefused(SettingsRefusal::Invalid)
+    );
 }

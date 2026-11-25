@@ -16,7 +16,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
-use crate::policy::Policy;
+use crate::config::Config;
 use crate::stream::{self, Accepted, Command, Credit, Kind, Links, Open};
 use crate::Timeouts;
 
@@ -51,9 +51,11 @@ pub enum End {
 
 pub async fn run(
     socket: WebSocketStream<TcpStream>,
-    policy: Arc<Policy>,
+    config: Arc<Config>,
+    from: &str,
     timeouts: Timeouts,
 ) -> End {
+    let policy = config.policy().clone();
     let (mut sink, mut source) = socket.split();
     let (out, mut outgoing) = unbounded_channel::<Message>();
     let writer = tokio::spawn(async move {
@@ -153,6 +155,29 @@ pub async fn run(
                         if let Some(handle) = streams.remove(&stream) {
                             handle.task.abort();
                         }
+                        continue;
+                    }
+                    // Both wait while a change waits for its answer, so neither holds up the
+                    // streams.
+                    ClientFrame::GetSettings => {
+                        let (config, frames) = (config.clone(), frames.clone());
+                        tokio::spawn(async move {
+                            let _ = frames.send(ServerFrame::Settings(config.report().await));
+                        });
+                        continue;
+                    }
+                    ClientFrame::SetSettings(change) => {
+                        let (config, frames, from) = (config.clone(), frames.clone(), from.to_owned());
+                        tokio::spawn(async move {
+                            let asking = || {
+                                let _ = frames.send(ServerFrame::Asking);
+                            };
+                            let reply = match config.change(&from, change, asking).await {
+                                Ok(settings) => ServerFrame::Settings(settings),
+                                Err(refusal) => ServerFrame::SettingsRefused(refusal),
+                            };
+                            let _ = frames.send(reply);
+                        });
                         continue;
                     }
                 };

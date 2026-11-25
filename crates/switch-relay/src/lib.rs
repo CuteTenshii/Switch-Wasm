@@ -1,9 +1,12 @@
 //! The relay server: one WebSocket per page, many TCP and UDP streams over it.
 //! `docs/relay.md` is the protocol.
 
+pub mod config;
+mod dialog;
 pub mod policy;
 mod session;
 mod stream;
+mod terminal;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,8 +19,8 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
+use config::Config;
 use futures_util::SinkExt;
-use policy::Policy;
 
 /// How long the relay waits on a page before it gives up on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,11 +48,11 @@ impl Default for Timeouts {
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(250);
 
 /// Accept pages for as long as the relay runs.
-pub async fn serve(listener: TcpListener, policy: Arc<Policy>, timeouts: Timeouts) {
+pub async fn serve(listener: TcpListener, config: Arc<Config>, timeouts: Timeouts) {
     loop {
         match listener.accept().await {
             Ok((socket, _)) => {
-                tokio::spawn(handle(socket, policy.clone(), timeouts));
+                tokio::spawn(handle(socket, config.clone(), timeouts));
             }
             Err(error) => {
                 eprintln!("cannot accept a page: {error}");
@@ -83,7 +86,7 @@ fn remember_origin(
 }
 
 #[allow(clippy::result_large_err)]
-async fn handle(socket: TcpStream, policy: Arc<Policy>, timeouts: Timeouts) {
+async fn handle(socket: TcpStream, config: Arc<Config>, timeouts: Timeouts) {
     let origin = Arc::new(Mutex::new(None::<String>));
     let seen = origin.clone();
     let upgrade = accept_hdr_async_with_config(
@@ -96,7 +99,7 @@ async fn handle(socket: TcpStream, policy: Arc<Policy>, timeouts: Timeouts) {
     };
     let origin = origin.lock().unwrap().take();
     let from = origin.as_deref().unwrap_or("no origin");
-    if !policy.origin_allowed(origin.as_deref()).await {
+    if !config.policy().origin_allowed(origin.as_deref()).await {
         eprintln!("refused {from}");
         let refusal = Message::Close(Some(CloseFrame {
             code: CloseCode::Policy,
@@ -106,7 +109,7 @@ async fn handle(socket: TcpStream, policy: Arc<Policy>, timeouts: Timeouts) {
         return;
     }
     eprintln!("page {from} connected");
-    match session::run(socket, policy, timeouts).await {
+    match session::run(socket, config, from, timeouts).await {
         session::End::Left => eprintln!("page {from} left"),
         session::End::Silent => eprintln!("page {from} stopped answering, dropped it"),
     }

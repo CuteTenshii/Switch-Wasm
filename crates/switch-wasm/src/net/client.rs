@@ -400,6 +400,8 @@ impl Client {
                     port,
                 });
             }
+            // The socket hands these to the page as they arrive; see `settings`.
+            ServerFrame::Settings(_) | ServerFrame::Asking | ServerFrame::SettingsRefused(_) => {}
         }
         Ok(pump)
     }
