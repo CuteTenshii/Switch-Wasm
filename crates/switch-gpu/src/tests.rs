@@ -2618,6 +2618,68 @@ fn a_draw_reads_constants_a_compute_launch_wrote_on_the_device() {
     assert_eq!(h.target(), expected);
 }
 
+/// An indexed constant read past the end of its bank is zero on the device, though the next
+/// bank sits right behind it in the buffer the device reads.
+#[test]
+fn an_indexed_constant_read_past_its_bank_is_zero() {
+    use switch_core::gpu::testing::{alu_fragment_shader, Harness};
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    const ONE: u32 = 0x3f80_0000;
+    const BANK_BYTES: u32 = 0x100;
+    // ldc.b32 dst, c<bank>[idx + offset].
+    let ldc = |dst: u64, bank: u64, idx: u64, offset: u64| {
+        0xef90u64 << 48 | 4 << 48 | bank << 36 | (offset & 0xffff) << 20 | 7 << 16 | idx << 8 | dst
+    };
+    // Alpha comes from bank 2, so the device has that bank's words in its buffer.
+    let shader = alu_fragment_shader(
+        &[(4, 0), (5, BANK_BYTES)],
+        &[
+            ldc(0, 0, 4, 0),
+            ldc(1, 0, 5, 0),
+            ldc(2, 0, 5, 0x7c),
+            ldc(3, 2, 4, 0),
+        ],
+    );
+    let mut h = Harness::with_fragment_shader(shader);
+    h.triangle([0.0; 4]);
+    for (bank, at) in [(0u32, 0x2800u64), (2, 0x2a00)] {
+        let address = h.base + at;
+        let mut ctx = h.ctx();
+        for word in 0..u64::from(BANK_BYTES) / 4 {
+            ctx.write_u32(address + word * 4, ONE).unwrap();
+        }
+        let mut ctx = switch_core::gpu::exec::ExecCtx {
+            mem: &h.mem,
+            vmm: &h.vmm,
+            as_id: h.as_id,
+            host1x: &mut h.host1x,
+            stats: &mut h.stats,
+            trace: false,
+        };
+        for (method, arg) in [
+            (0x8E0, BANK_BYTES),
+            (0x8E1, (address >> 32) as u32),
+            (0x8E2, address as u32),
+            // BindGroup[Fragment]: this bank, valid.
+            (0x900 + 4 * 8 + 4, 1 | bank << 4),
+        ] {
+            h.engine.write(method, arg, true, &mut ctx).unwrap();
+        }
+    }
+
+    h.draw_with(&mut gpu).unwrap();
+    assert!(gpu.reasons.is_empty(), "fell back: {:?}", gpu.reasons);
+    h.flush_with(&mut gpu);
+    assert_eq!(
+        h.texel(1, 1),
+        0xff00_00ff,
+        "red read inside the bank, green and blue past it"
+    );
+}
+
 /// Past the vertex buffer limit, an array a compute launch wrote keeps a buffer of its own
 /// for the copy and the others are folded.
 #[test]

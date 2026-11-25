@@ -357,16 +357,18 @@ pub fn module(
         "fn attrOut(offset: u32, value: f32) {{ attr_out[(offset >> 2u) & {mask}u] = value; }}\n\n"
     ));
 
-    // An unbound bank, or a read past the end of one, is zero.
+    // An unbound bank, or a read past the end of one, is zero; a branch here doubled the
+    // driver's compile of large vertex shaders (docs/gpu-backend.md).
     if layout.const_banks.is_empty() {
         out.push_str("fn cbRead(bank: u32, offset: u32) -> u32 { return 0u; }\n\n");
     } else {
+        let last = CONSTANT_BANKS - 1;
         out.push_str(&format!(
             "fn cbRead(bank: u32, offset: u32) -> u32 {{\n  \
-             if (bank >= {CONSTANT_BANKS}u) {{ return 0u; }}\n  \
              let word = offset >> 2u;\n  \
-             if (word >= cbs[bank * 2u + 1u]) {{ return 0u; }}\n  \
-             return cbs[cbs[bank * 2u] + word];\n}}\n\n"
+             let slot = min(bank, {last}u) * 2u;\n  \
+             let inside = (bank < {CONSTANT_BANKS}u) & (word < cbs[slot + 1u]);\n  \
+             return select(0u, cbs[cbs[slot] + word], inside);\n}}\n\n"
         ));
     }
 
