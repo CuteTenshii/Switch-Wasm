@@ -52,6 +52,14 @@ const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--k
   [--jit-stats] [--press=key@seconds[:every],...] [--script=file|steps]`;
 
 const SAMPLE_MS = 5000;
+
+// As `fmtCount` in web/shared/format.ts writes it; `--software-after` and log_summary.mjs read it.
+const fmtCount = (n) => {
+  if (n >= 1e12) return (n / 1e12).toFixed(2) + 'T';
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  return Math.round(n).toLocaleString('en');
+};
 const START_MS = 120_000;
 const PRESS_HOLD_MS = 200;
 const STEP_TIMEOUT_MS = 120_000;
@@ -441,6 +449,8 @@ try {
   })();
   let lastRows = -1;
   let lastLine = '';
+  let lastCount = null;
+  let lastCountAt = 0;
   while (running && !crashed && Date.now() - started < seconds * 1000) {
     await page.waitForTimeout(SAMPLE_MS);
     if (crashed) break;
@@ -448,7 +458,7 @@ try {
     try {
       sample = await page.evaluate(() => ({
         state: document.body.dataset.state,
-        instructions: document.getElementById('instructions')?.textContent ?? '',
+        count: document.body.dataset.instructions ?? null,
         fps: document.getElementById('fps')?.textContent ?? '',
         rows: document.getElementById('console')?.childElementCount ?? 0,
         last: document.getElementById('console')?.lastElementChild?.textContent ?? '',
@@ -460,6 +470,15 @@ try {
       break;
     }
     const at = elapsed();
+    // A rate only while running, and not across a count that went backwards: a new session.
+    const count = sample.count === null ? null : Number(sample.count);
+    const ran = count !== null && lastCount !== null ? count - lastCount : -1;
+    const rate = sample.state === 'running' && ran >= 0 && at > lastCountAt
+      ? ` (${fmtCount(ran / (at - lastCountAt))}/s)`
+      : '';
+    sample.instructions = count === null ? '' : fmtCount(count) + rate;
+    lastCount = count;
+    lastCountAt = at;
     // The console is capped, so quiet means the last line is unchanged.
     const unchanged = sample.rows === lastRows && sample.last === lastLine;
     const quiet = unchanged ? ', console quiet since the last sample' : '';

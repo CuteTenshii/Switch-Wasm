@@ -91,7 +91,7 @@ Section headings are paths under `crates/switch-wasm/src/`; a heading that start
 - After each slice the worker posts one report: steps, timing, frame count and size, paint time, and every 8 slices the housekeeping (readouts). The wasm side posts the rest itself: log lines go through the worker, and `error_dialog`, `keyboard` and `profiles_edited` messages arrive when the guest raises one (`keyboard.rs`) or an edit is stored. The page polls nothing; it reads file contents only when told they changed.
 - Run starts the loop and Pause asks it to stop after the slice in flight. Stop (`endTitle`) stops it at once, and the page ignores reports that arrive after Stop.
 - The release profile aborts on panic, an empty `unreachable` trap on wasm; `switch_panic_message` returns the stored message without a live session. Linear memory survives the trap, so panic context is collected afterwards, each piece separately.
-- The status bar shows instructions retired, not the guest clock, which jumps forward when all threads are blocked.
+- The CPU tab's rate counts instructions retired, not the guest clock, which jumps forward when all threads are blocked. The status bar leaves the total out; it is on `<body data-instructions>`, where `browser_boot.mjs` reads it.
 
 ## `web/worker/storage.ts`
 
