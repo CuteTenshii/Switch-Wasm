@@ -61,6 +61,12 @@ pub fn no_fragment_program() -> Program {
     }
 }
 
+/// Whether special register `sr` depends on the lane: `SR_LANEID` and `SR_EQMASK` to
+/// `SR_GEMASK`. A fragment reading one is shaded in its quad, whose place is its lane.
+pub fn reads_lane(sr: u8) -> bool {
+    matches!(sr, 0x00 | 0x38..=0x3C)
+}
+
 /// The varying slots `insns`' `ipa`s read, ascending: see [`varying_slot`].
 pub fn interpolated_slots(ops: &[Op]) -> Vec<usize> {
     let mut slots: Vec<usize> = ops

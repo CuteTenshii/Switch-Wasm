@@ -14,6 +14,21 @@ fn sr_y_direction_reads_a_sign_and_never_a_zero() {
     assert_eq!(f32::from_bits(down.read(0x12).unwrap()), -1.0);
 }
 
+/// Echoes of Wisdom's lit shader ORs its light masks across a warp with `SR_LTMASK`.
+#[test]
+fn the_lane_masks_are_relative_to_the_lane() {
+    let masks = |lane: u32| {
+        let special = SpecialRegs {
+            lane,
+            ..SpecialRegs::default()
+        };
+        [0x38, 0x39, 0x3A, 0x3B, 0x3C].map(|sr| special.read(sr).unwrap())
+    };
+    assert_eq!(masks(0), [1, 0, 1, !1, !0]);
+    assert_eq!(masks(2), [4, 3, 7, !7, !3]);
+    assert_eq!(masks(31), [1 << 31, !(1 << 31), !0, 0, 1 << 31]);
+}
+
 #[test]
 fn s2r_answers_the_thread_and_cta_registers_a_dispatch_set() {
     let consts = no_consts();

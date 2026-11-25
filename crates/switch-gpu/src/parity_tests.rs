@@ -1206,6 +1206,101 @@ fn a_quad_vote_gives_the_same_verdicts_and_ballot_on_both_renderers() {
     );
 }
 
+/// A fragment's lane id and lane masks name its place in its quad on both renderers, as its
+/// shuffles and votes do. Echoes of Wisdom's lit shader ORs light masks across lanes so.
+#[test]
+fn a_fragments_lane_registers_name_its_place_in_its_quad_on_both_renderers() {
+    use switch_core::gpu::shader::isa;
+    use switch_core::gpu::shader::Op;
+    use switch_core::gpu::testing::block;
+    const PT: u64 = 7 << 16;
+    const RZ: u64 = 0xff;
+    let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
+    let mov32i_if = |guard: u64, dst: u64, imm: u32| {
+        0x0100_0000_0000_0000 | (u64::from(imm) << 20) | guard << 16 | dst
+    };
+    let s2r = |dst: u64, sr: u64| 0xf0c8u64 << 48 | sr << 20 | PT | dst;
+    // isetp.eq.u32 p<p0>, pt, r<a>, r<b>, p<src>
+    let isetp_eq = |p0: u64, a: u64, b: u64, src: u64| {
+        0x5b60u64 << 48 | 2 << 49 | src << 39 | b << 20 | PT | a << 8 | p0 << 3 | 7
+    };
+    assert!(matches!(
+        isa::decode(s2r(4, 0x39)).op,
+        Op::S2r { dst: 4, sr: 0x39 }
+    ));
+    const ONE: u32 = 0x3f80_0000;
+    let words = [
+        s2r(4, 0x39),
+        s2r(5, 0x38),
+        s2r(6, 0x3A),
+        s2r(7, 0x00),
+        s2r(8, 0x3C),
+        mov32i(11, 2),
+        mov32i(12, 7),
+        mov32i(14, 0xffff_fff8),
+        isetp_eq(0, 4, RZ, 7),
+        isetp_eq(1, 5, 11, 7),
+        isetp_eq(2, 6, 12, 7),
+        isetp_eq(2, 7, 11, 2),
+        isetp_eq(3, 8, 14, 7),
+        mov32i(0, 0),
+        mov32i(1, 0),
+        mov32i(2, 0),
+        mov32i(3, 0),
+        mov32i_if(0, 0, ONE),
+        mov32i_if(1, 1, ONE),
+        mov32i_if(2, 2, ONE),
+        mov32i_if(3, 3, ONE),
+        0xe300_0000_0007_000f, // exit
+    ];
+    let split = |w: u64| (w as u32, (w >> 32) as u32);
+    let nop = (0x00070f00, 0x50b00000);
+    let shader = move || {
+        words
+            .chunks(3)
+            .flat_map(|slots| {
+                let slot = |i: usize| slots.get(i).map_or(nop, |&w| split(w));
+                block((0xffe1ffef, 0x001f8000), slot(0), slot(1), slot(2))
+            })
+            .collect::<Vec<u8>>()
+    };
+    let set_up = |h: &mut Harness| {
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+    };
+    for web_limits in [false, true] {
+        agrees_shading(
+            || Harness::with_fragment_shader(shader()),
+            move |gpu| gpu.set_web_limits(web_limits),
+            set_up,
+        );
+    }
+    let mut h = Harness::with_fragment_shader(shader());
+    set_up(&mut h);
+    h.draw_with(&mut Software).expect("the draw");
+    let lanes = [0x0000_00ff, 0x0000_ff00, 0x00ff_0000, 0xff00_0000];
+    let mut by_place = std::collections::BTreeMap::new();
+    for (i, &pixel) in h.target().iter().enumerate() {
+        if pixel == 0 {
+            continue;
+        }
+        let (x, y) = (
+            i as u32 % testing::TARGET_WIDTH,
+            i as u32 / testing::TARGET_WIDTH,
+        );
+        assert!(lanes.contains(&pixel), "pixel ({x}, {y}) is {pixel:#010x}");
+        let seen = *by_place.entry((x & 1, y & 1)).or_insert(pixel);
+        assert_eq!(seen, pixel, "pixel ({x}, {y}) differs from its quad place");
+    }
+    let named: std::collections::BTreeSet<u32> = by_place.values().copied().collect();
+    assert_eq!(
+        named.len(),
+        4,
+        "every lane names itself once: {by_place:x?}"
+    );
+}
+
 /// A funnel shift keeps the same word, clamps and fills the same way on both renderers.
 #[test]
 fn a_funnel_shift_gives_the_same_words_on_both_renderers() {

@@ -61,8 +61,16 @@ impl SpecialRegs {
 
     /// The value of special register `sr`, or `None` if not modelled (read as zero).
     pub fn read(&self, sr: u8) -> Option<u32> {
+        let below = ((1u64 << self.lane) - 1) as u32;
+        let up_to = ((1u64 << (self.lane + 1)) - 1) as u32;
         Some(match sr {
             0x00 => self.lane,
+            // `SR_EQMASK`, `SR_LTMASK`, `SR_LEMASK`, `SR_GTMASK`, `SR_GEMASK`.
+            0x38 => 1 << self.lane,
+            0x39 => below,
+            0x3A => up_to,
+            0x3B => !up_to,
+            0x3C => !below,
             0x21..=0x23 => self.tid[(sr - 0x21) as usize],
             0x25..=0x27 => self.ctaid[(sr - 0x25) as usize],
             0x32 => self.shared_size,

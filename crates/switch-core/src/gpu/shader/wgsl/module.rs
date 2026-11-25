@@ -122,7 +122,7 @@ pub fn module(
             out.push_str("diagnostic(off, derivative_uniformity);\n\n");
         }
     }
-    if translated.quad.is_some() {
+    if in_quad(translated, stage) {
         out.push_str("var<private> quad_lane: u32;\n");
         out.push_str("fn quadLane() -> u32 { return quad_lane; }\n\n");
     }
@@ -732,7 +732,11 @@ pub fn module(
     }
     out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
 
-    out.push_str(&special_registers(stage, layout));
+    out.push_str(&special_registers(
+        stage,
+        layout,
+        in_quad(translated, stage),
+    ));
 
     out.push_str(&translated.source);
     out.push('\n');
@@ -761,21 +765,42 @@ fn cropped(crop: Crop, (x, y): (i32, i32)) -> String {
     )
 }
 
+/// Whether a fragment knows its place in its quad: it exchanges values with its neighbours, or
+/// reads its lane as `raster` shades it, in a quad.
+fn in_quad(translated: &Translation, stage: Stage) -> bool {
+    translated.quad.is_some()
+        || (stage == Stage::Fragment
+            && translated
+                .special
+                .iter()
+                .any(|&sr| crate::gpu::shader::reads_lane(sr)))
+}
+
 /// `SR_TID` and `SR_NTID` read whole, refused as the interpreter refuses them.
 const PACKED_SPECIAL_REGISTERS: [u8; 2] = [0x20, 0x28];
 
-/// `sreg`, what `s2r` reads. Only a compute invocation has an identity; the graphics stages
-/// read zero, as they always have here.
-fn special_registers(stage: Stage, layout: &Layout) -> String {
+/// `sreg`, what `s2r` reads. A compute invocation has an identity; in the graphics stages only a
+/// fragment has a lane, its place in its quad, as its shuffles and votes have.
+fn special_registers(stage: Stage, layout: &Layout, quad: bool) -> String {
     let Some(shape) = layout.compute.filter(|_| stage == Stage::Compute) else {
-        return "fn sreg(sr: u32) -> u32 { return 0u; }\n\n".to_string();
+        let lane = if stage == Stage::Fragment && quad {
+            "quadLane()"
+        } else {
+            "0u"
+        };
+        return format!(
+            "fn sreg(sr: u32) -> u32 {{\n  let lane = {lane};\n  switch (sr) {{\n\
+             \x20   case 0x00u: {{ return lane; }}\n\
+             {LANE_MASKS}\
+             \x20   default: {{ return 0u; }}\n  }}\n}}\n\n"
+        );
     };
     format!(
         "var<private> sr_lane: u32;\n\
          var<private> sr_tid: vec3<u32>;\n\
          var<private> sr_ctaid: vec3<u32>;\n\n\
-         fn sreg(sr: u32) -> u32 {{\n  switch (sr) {{\n\
-         \x20   case 0x00u: {{ return sr_lane; }}\n\
+         fn sreg(sr: u32) -> u32 {{\n  let lane = sr_lane;\n  switch (sr) {{\n\
+         \x20   case 0x00u: {{ return lane; }}\n\
          \x20   case 0x21u: {{ return sr_tid.x; }}\n\
          \x20   case 0x22u: {{ return sr_tid.y; }}\n\
          \x20   case 0x23u: {{ return sr_tid.z; }}\n\
@@ -784,10 +809,21 @@ fn special_registers(stage: Stage, layout: &Layout) -> String {
          \x20   case 0x27u: {{ return sr_ctaid.z; }}\n\
          \x20   case 0x32u: {{ return {}u; }}\n\
          \x20   case 0x36u: {{ return {}u; }}\n\
+         {LANE_MASKS}\
          \x20   default: {{ return 0u; }}\n  }}\n}}\n\n",
         shape.shared_size, shape.local_size
     )
 }
+
+/// `SR_EQMASK` through `SR_GEMASK` for `lane`, as `interp::SpecialRegs::read` gives them. The
+/// at-or-below mask is built from two shifts, so lane 31 wraps to all ones.
+const LANE_MASKS: &str = "\
+\x20   case 0x38u: { return 1u << lane; }
+    case 0x39u: { return (1u << lane) - 1u; }
+    case 0x3Au: { return ((1u << lane) << 1u) - 1u; }
+    case 0x3Bu: { return ~(((1u << lane) << 1u) - 1u); }
+    case 0x3Cu: { return ~((1u << lane) - 1u); }
+";
 
 /// One invocation per thread of a CTA, a workgroup per CTA. A program with warp instructions
 /// takes its lane from the subgroup they run on: every invocation is active on entry, so the
@@ -1179,7 +1215,7 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
         }
     }
     // Quad lane numbered as `raster::quad_pixel`: row parity above column parity.
-    if translated.quad.is_some() {
+    if in_quad(translated, Stage::Fragment) {
         out.push_str(
             "  quad_lane = (u32(input.position.y) & 1u) * 2u + (u32(input.position.x) & 1u);\n",
         );
