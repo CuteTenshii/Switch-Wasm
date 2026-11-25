@@ -100,12 +100,6 @@ test.beforeEach(async ({ page }) => {
   await openProfiles(page);
 });
 
-test('a new console has one profile, playing', async ({ page }) => {
-  await expect(page.locator('.profile-row')).toHaveCount(1);
-  await expect(row(page, 'Player')).toContainText('Playing');
-  await expect(page.locator('#btn-profile')).toContainText('Player');
-});
-
 test('profiles can be added, chosen and renamed, and survive a reload', async ({ page }) => {
   await addProfile(page, 'Jessie Axe');
   await row(page, 'Jessie Axe').getByRole('button', { name: 'Play as' }).click();

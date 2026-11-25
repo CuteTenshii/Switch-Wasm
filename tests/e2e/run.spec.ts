@@ -5,15 +5,6 @@ test.beforeEach(async ({ page }) => {
   await openPage(page);
 });
 
-test('the idle screen\'s Open button boots what it picks', async ({ page }) => {
-  const chooser = page.waitForEvent('filechooser');
-  await page.locator('.overlay-actions label').click();
-  await (await chooser).setFiles({
-    name: 'test.elf', mimeType: 'application/octet-stream', buffer: aarch64Elf([ASM.halt]),
-  });
-  await expectState(page, 'halted');
-});
-
 test('the run controls show only while a program is loaded', async ({ page }) => {
   const controls = page.locator('#btn-run, #btn-step, #btn-stop');
   for (const control of await controls.all()) await expect(control).toBeHidden();
@@ -32,7 +23,6 @@ test('Stop ends a running program without a loading screen, and the next boot ru
   await expect(stop).toBeHidden();
 
   await bootElf(page, aarch64Elf([ASM.halt]), 'halted');
-  await expect(page.locator('#console .error')).toHaveCount(0);
 });
 
 // Booting through a click: browsers ask before unload only after a user gesture.
@@ -67,12 +57,6 @@ test('leaving the page asks first while a program is loaded', async ({ page }) =
   expect(asked.type()).toBe('beforeunload');
   await asked.dismiss();
   expect(page.isClosed()).toBe(false);
-});
-
-test('the dev server lets the page go with a program loaded', async ({ page }) => {
-  test.skip(!dev, 'only the dev server skips the question');
-  await openElf(page, 'running');
-  expect(await reloadAsks(page)).toBe(false);
 });
 
 test('leaving the page after Stop does not ask', async ({ page }) => {

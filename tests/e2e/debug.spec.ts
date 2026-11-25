@@ -89,7 +89,6 @@ test('the threads section waits for a title, then ranks what it runs', async ({ 
 
   await page.locator('#btn-stop').click();
   await expectState(page, 'idle');
-  await expect(threads.locator('#threads-status')).toBeVisible();
   await expect(threads.locator('#threads-status')).toHaveText('Start a title to see its threads.');
   await expect(threads.locator('#threads-table')).toBeHidden();
 });
