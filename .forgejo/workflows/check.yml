@@ -3,7 +3,41 @@ name: Check and deploy
 on:
   push:
     branches: [master]
+    paths:
+      - "crates/**"
+      - "web/**"
+      - "tests/**"
+      - "tools/**"
+      - ".cargo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "Makefile"
+      - "package.json"
+      - "bun.lock"
+      - "tsconfig*.json"
+      - "*.config.ts"
+      - "*.config.mjs"
+      - ".forgejo/workflows/check.yml"
   pull_request:
+    paths:
+      - "crates/**"
+      - "web/**"
+      - "tests/**"
+      - "tools/**"
+      - ".cargo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "Makefile"
+      - "package.json"
+      - "bun.lock"
+      - "tsconfig*.json"
+      - "*.config.ts"
+      - "*.config.mjs"
+      - ".forgejo/workflows/check.yml"
   workflow_dispatch:
 
 concurrency:
