@@ -19,6 +19,7 @@
 // instructions have run and the screen is lit (past the black loading screens), to compare with the device's frames.
 // `--trace-cpu` adds V8's sampling profiler to `--trace`; `tools/trace_cpu.mjs` reads it.
 // `--browser-arg` passes a switch to Chromium, and can be repeated.
+// `--firefox` runs Playwright's Firefox instead, with WebGPU turned on; not with `--trace` or `--browser-arg`.
 // `--no-webgpu` hides WebGPU, so the software rasterizer draws every frame: the reference
 // a device frame is compared against.
 // `--trace-from` switches the console to trace once a line contains the text: trace from
@@ -37,13 +38,13 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { preview } from 'vite';
-import { commandLine, fail, launchChromium, repoRoot } from './common.mjs';
+import { commandLine, fail, launchChromium, launchFirefox, repoRoot } from './common.mjs';
 import { hookSource, parseSpec, readTextures, writeTextures } from './texture_dump.mjs';
 
 const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--keys=prod.keys] [--title-keys=title.keys]
   [--firmware=dir] [--update=update.nsp] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--docked] [--dock-at=N] [--software-at=N] [--software-after=B]
   [--relay=ws://127.0.0.1:18787] [--port=N]
-  [--dump-wgsl=dir] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length] [--trace-cpu]
+  [--firefox] [--dump-wgsl=dir] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length] [--trace-cpu]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
   [--jit-stats] [--press=key@seconds[:every],...] [--script=file|steps]`;
 
@@ -84,6 +85,8 @@ const traceSpec = /^(.+)@(\d+):(\d+)$/.exec(flag('trace') ?? '');
 if (flag('trace') && !traceSpec) fail('--trace: expected file@seconds:length');
 const traceCpu = hasFlag('trace-cpu');
 const browserArgs = flags('browser-arg');
+const useFirefox = hasFlag('firefox');
+if (useFirefox && (traceSpec || browserArgs.length)) fail('--firefox: --trace and --browser-arg are Chromium\'s');
 const presses = (flag('press') ?? '').split(',').filter(Boolean).map((spec) => {
   const match = /^(.+)@(\d+(?:\.\d+)?)(?::(\d+(?:\.\d+)?))?$/.exec(spec);
   if (!match) fail(`--press=${spec}: expected key@seconds[:every]`);
@@ -119,7 +122,9 @@ const say = (text) => {
   console.log(text);
 };
 
-const browser = await launchChromium({ webGpu: !noWebGpu, args: browserArgs });
+const browser = useFirefox
+  ? await launchFirefox()
+  : await launchChromium({ webGpu: !noWebGpu, args: browserArgs });
 try {
   const page = await browser.newPage();
   // Chromium has no switch that takes WebGPU away, so the property goes before any

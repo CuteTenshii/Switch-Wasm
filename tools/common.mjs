@@ -26,6 +26,19 @@ export function commandLine() {
   };
 }
 
+/** Playwright's Firefox with WebGPU on in pages and workers, past the adapter blocklist. */
+export async function launchFirefox() {
+  const { firefox } = await import('playwright');
+  return firefox.launch({
+    headless: false,
+    firefoxUserPrefs: {
+      'dom.webgpu.enabled': true,
+      'dom.webgpu.workers.enabled': true,
+      'gfx.webgpu.ignore-blocklist': true,
+    },
+  });
+}
+
 // Imported here so that tools with no browser do not need Playwright.
 export async function launchChromium({ webGpu = true, args = [] } = {}) {
   const { chromium } = await import('playwright');
