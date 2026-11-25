@@ -39,8 +39,19 @@ impl Emitter<'_> {
     }
 
     /// Branch to the region's block `k`, charging `retired` to the fuel; out
-    /// of fuel, leave with nothing of block `k` retired.
+    /// of fuel, leave with nothing of block `k` retired. Block `k` reads NZCV
+    /// from its local, so an owed compare's is built first.
     pub(super) fn edge(&mut self, retired: usize, k: usize, fall: bool) {
+        let owed = self.pending;
+        if let Some(sf) = owed {
+            self.materialize_pending(sf);
+        }
+        self.jump_to_member(retired, k, fall);
+        // Only this path paid it; the code after a conditional edge still owes it.
+        self.pending = owed;
+    }
+
+    fn jump_to_member(&mut self, retired: usize, k: usize, fall: bool) {
         self.fuel_used = true;
         self.f.local_get(L_FUEL);
         self.f.i32_const(retired as i32);
@@ -152,6 +163,7 @@ impl Emitter<'_> {
 
     /// The current block's body and how it ends.
     pub(super) fn block(&mut self, block: &Block) -> Result<(), Refused> {
+        self.pending = None;
         let mut next_exit = 0usize;
         let mut i = 0usize;
         while i < block.ops.len() {
@@ -592,20 +604,31 @@ fn flag_effect(op: &Op) -> FlagEffect {
 
 /// Whether a fused compare ending at op `from` (its next exit being `exit`)
 /// has its flags overwritten by a later compare or flag-setting instruction
-/// of the block before anything reads them or the block ends.
-fn flags_overwritten(block: &Block, from: usize, exit: usize) -> bool {
-    for i in from..block.ops.len() {
+/// of the block before anything reads them or the block ends. Flags live at the
+/// block's end are built on every way out, so deferring them would save nothing.
+fn flags_overwritten(block: &Block, from: usize, mut exit: usize) -> bool {
+    let mut i = from;
+    while i < block.ops.len() {
         if let Some(branch) = block.exits.get(exit).filter(|b| b.at as usize == i) {
-            return matches!(
-                branch.exit,
-                Exit::CmpImm { .. } | Exit::CmpReg { .. } | Exit::UpdateCmpImm { .. }
-            );
+            match branch.exit {
+                Exit::CmpImm { .. } | Exit::CmpReg { .. } | Exit::UpdateCmpImm { .. } => {
+                    return true
+                }
+                // These test registers; a taken one into the region builds the owed NZCV first.
+                Exit::Jump { .. } | Exit::Cbz { .. } | Exit::Tbz { .. } => {
+                    i += branch.span as usize;
+                    exit += 1;
+                    continue;
+                }
+                Exit::Cond { .. } => return false,
+            }
         }
         match flag_effect(&block.ops[i]) {
             FlagEffect::Neutral => {}
             FlagEffect::Overwrites => return true,
             FlagEffect::Live => return false,
         }
+        i += 1;
     }
     false
 }

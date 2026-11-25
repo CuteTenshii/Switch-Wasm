@@ -241,6 +241,7 @@ impl Emitter<'_> {
         self.flags_used = true;
         self.flags_written = true;
         self.f.local_set(L_NZCV);
+        self.pending = None;
         if self.pend_kind != 0 {
             self.f.i32_const(0);
             self.f.local_set(self.pend_kind);
@@ -295,10 +296,8 @@ impl Emitter<'_> {
             }
         }
         self.f.op_raw(compare);
+        self.pending = Some(sf);
         self.f.if_void();
-        if self.inside(target).is_some() {
-            self.materialize_pending(sf);
-        }
         self.goto(retired, target, false);
         self.f.end();
     }

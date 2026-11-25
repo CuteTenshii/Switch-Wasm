@@ -434,6 +434,8 @@ struct Emitter<'a> {
     pend_forms: u8,
     /// Whether the compare being emitted is overwritten before anything reads its flags.
     flags_dead: bool,
+    /// The width of the lazy compare whose NZCV the code being emitted still owes, if any.
+    pending: Option<bool>,
     /// Whether a watchpoint was armed when the region was emitted.
     watches: bool,
     /// Where the region's calls return to: what a `RET` in it is compared with.
@@ -477,6 +479,7 @@ impl<'a> Emitter<'a> {
             pend_kind: 0,
             pend_forms: 0,
             flags_dead: false,
+            pending: None,
             flags_used: false,
             flags_written: false,
             fuel_used: false,

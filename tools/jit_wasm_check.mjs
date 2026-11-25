@@ -244,6 +244,33 @@ const PROGRAMS = [
     expect: { 0: 80001n, 3: 40000n },
   },
   {
+    name: 'a compare\'s deferred flags, read in a block a cbz branches to',
+    data: false,
+    code: [
+      0x1000001e, // adr  x30, #0        -> x30 = BASE
+      0xd2a00201, // mov  x1, #0x100000  -> above every x0 the run reaches
+      0x91000400, // add  x0, x0, #1
+      0x92400004, // and  x4, x0, #1
+      0xeb01001f, // cmp  x0, x1         -> lo; its flags deferred, since the cmp below overwrites them
+      0x54000160, // b.eq #0x2c          -> BASE+0x40, never taken
+      0xb40000a4, // cbz  x4, #0x14      -> BASE+0x2c when x0 is even
+      0x91000463, // add  x3, x3, #1
+      0xf100007f, // cmp  x3, #0
+      0x540000e0, // b.eq #0x1c          -> BASE+0x40, never taken
+      0xd65f03c0, // ret  x30
+      0x54000068, // b.hi #0xc           -> BASE+0x38; reads the first cmp's flags, so never taken
+      0x910004a5, // add  x5, x5, #1
+      0xd65f03c0, // ret  x30
+      0x910004c6, // add  x6, x6, #1     -> reached only on stale flags
+      0xd65f03c0, // ret  x30
+      0x910004e7, // add  x7, x7, #1
+      0xd65f03c0, // ret  x30
+    ],
+    // An odd and an even trip are 21 instructions: 1260000 steps is 60000 pairs.
+    steps: 1260000n,
+    expect: { 0: 120000n, 3: 60000n, 5: 60000n, 6: 0n },
+  },
+  {
     name: 'calls and returns',
     data: false,
     code: [
