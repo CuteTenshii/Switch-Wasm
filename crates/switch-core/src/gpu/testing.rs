@@ -458,6 +458,29 @@ pub fn tlds_fragment_shader(encoding: u64, set: &[(u8, u32)]) -> Vec<u8> {
     bytes
 }
 
+/// `tld` from slot 4 into r0..r3 after `mov32i`s of `set`: coordinates from r4 on, the meta
+/// registers (level, then offsets) from r6. `form` carries the texture type at bit 28 and the
+/// `.LZ`-less level at bit 55 and `.AOFFI` at bit 35.
+pub fn tld_fragment_shader(form: u64, set: &[(u8, u32)]) -> Vec<u8> {
+    const NOP: (u32, u32) = (0x00070f00, 0x50b00000);
+    let tld = 0xdcu64 << 56 | 4 << 36 | 0xf << 31 | 6 << 20 | 7 << 16 | 4 << 8 | form;
+    let mut loads = set.iter().map(|&(reg, value)| mov32i(reg, value));
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        loads.next().unwrap_or(NOP),
+        loads.next().unwrap_or(NOP),
+        loads.next().unwrap_or(NOP),
+    );
+    assert!(loads.next().is_none(), "three registers at most");
+    bytes.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        (tld as u32, (tld >> 32) as u32), // tld $r0 $r4 $r6 0x4 0xf
+        (0x0007000f, 0xe3000000),         // exit
+        (0xff87000f, 0xe2400fff),         // bra (padding, never reached)
+    ));
+    bytes
+}
+
 /// `oColor = textureGather(cubeArray, vec4(vColor.xyz, layer), component)` from slot 4.
 pub fn gather_cube_array_fragment_shader(component: u32, layer: u32) -> Vec<u8> {
     let tld4_high = 0xc83a0047 | (component & 3) << 24;

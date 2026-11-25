@@ -1794,6 +1794,85 @@ fn a_tlds_fetches_the_level_its_register_names() {
     }
 }
 
+/// `tld`, the general texel fetch, reads what the rasterizer reads in each form `tlds` has: a plain
+/// fetch, an offset one, an array layer, a volume slice, a fetch outside the image and a level.
+#[test]
+fn a_tld_fetches_the_texel_the_rasterizer_fetches() {
+    use testing::{bindless_texel, tld_fragment_shader};
+    type SetUp = fn(&mut Harness);
+    type Form<'a> = (&'a str, u64, &'a [(u8, u32)], SetUp, u32);
+    const TWO_D: u64 = 2 << 28;
+    const AOFFI: u64 = 1 << 35;
+    const LOD: u64 = 1 << 55;
+    // The packed offset `0xe1` is +1 in x and -2 in y; a layer sits in its register's low half.
+    let forms: [Form; 7] = [
+        (
+            "plain",
+            TWO_D,
+            &[(4, 3), (5, 5)],
+            Harness::bindless_texture,
+            bindless_texel(3, 5),
+        ),
+        (
+            "offset",
+            TWO_D | AOFFI,
+            &[(4, 2), (5, 6), (6, 0xe1)],
+            Harness::bindless_texture,
+            bindless_texel(3, 4),
+        ),
+        (
+            "array layer",
+            3 << 28,
+            &[(4, 0xabcd_0002), (5, 4), (6, 1)],
+            Harness::bindless_array_texture,
+            bindless_texel(6, 1),
+        ),
+        (
+            "volume slice",
+            4 << 28,
+            &[(4, 1), (5, 2), (6, 2)],
+            Harness::bindless_volume_texture,
+            bindless_texel(3, 2),
+        ),
+        (
+            "outside the image",
+            TWO_D | AOFFI,
+            &[(4, 0), (5, 3), (6, 0xf)],
+            Harness::bindless_texture,
+            0,
+        ),
+        (
+            "level 1",
+            TWO_D | LOD,
+            &[(4, 2), (5, 3), (6, 1)],
+            Harness::bindless_mipmapped_texture,
+            bindless_texel(5, 4),
+        ),
+        (
+            "past the levels",
+            TWO_D | LOD,
+            &[(4, 2), (5, 3), (6, 2)],
+            Harness::bindless_mipmapped_texture,
+            0,
+        ),
+    ];
+    for (name, form, set, image, texel) in forms {
+        let set_up = move |h: &mut Harness| {
+            image(h);
+            colour_triangle(h, [[0.0; 4]; 3]);
+        };
+        let new = || Harness::with_fragment_shader(tld_fragment_shader(form, set));
+        let mut h = new();
+        set_up(&mut h);
+        h.draw_with(&mut Software).expect("the draw");
+        let drawn: std::collections::BTreeSet<u32> = h.target().into_iter().collect();
+        let want: std::collections::BTreeSet<u32> = [0, texel].into();
+        assert_eq!(drawn, want, "{name}: the texel the registers name");
+
+        agrees_shading(new, |_| {}, set_up);
+    }
+}
+
 /// `tld4` forms beyond the plain gather: a shadow gather, a gather with an offset per texel and a
 /// cube gather read what the rasterizer reads.
 #[test]

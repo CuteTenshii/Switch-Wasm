@@ -574,6 +574,9 @@ impl Invocation {
                 Op::Tlds { .. } => {
                     self.run_tlds(program, pc, op, env, pending)?;
                 }
+                Op::Tld { .. } => {
+                    self.run_tld(program, pc, op, env, pending)?;
+                }
                 Op::Tex { .. } => {
                     self.run_tex(program, pc, op, env, pending)?;
                 }
@@ -661,9 +664,10 @@ pub(super) fn texs_writes_for(ops: &[Op]) -> Vec<super::TexsWrites> {
                 ..
             } => isa::texs_destinations(dst, dst2, mask, f16),
             // `tex` channels land in consecutive registers from `dst`, one per mask bit.
-            Op::Tex { dst, mask, .. } | Op::Txq { dst, mask, .. } | Op::Tld4 { dst, mask, .. } => {
-                consecutive_destinations(dst, mask)
-            }
+            Op::Tex { dst, mask, .. }
+            | Op::Txq { dst, mask, .. }
+            | Op::Tld4 { dst, mask, .. }
+            | Op::Tld { dst, mask, .. } => consecutive_destinations(dst, mask),
             // A surface load lands the same way.
             Op::Suld { dst, data, .. } => consecutive_destinations(dst, data.channels()),
             _ => continue,
@@ -689,7 +693,7 @@ pub(super) fn writes_pred(op: &Op, p: u8) -> bool {
         | Op::Psetp { p0, p1, .. }
         | Op::Csetp { p0, p1, .. } => p0 == p || p1 == p,
         Op::Lop { pred, .. } | Op::Lop3 { pred, .. } => pred.is_some_and(|(out, _)| out == p),
-        Op::Tld4 { sparse, .. } => sparse == p,
+        Op::Tld4 { sparse, .. } | Op::Tld { sparse, .. } => sparse == p,
         Op::Shfl { pred, .. } | Op::Vote { pred, .. } => pred == p,
         // Its mask can be a register, so any predicate may be the one it writes.
         Op::R2p { flags, .. } => !flags,
@@ -776,8 +780,10 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
             .map(|(reg, _)| reg)
             .collect(),
         // One register per set mask bit, consecutive from `dst`.
-        Op::Tex { dst, mask, .. } | Op::Txq { dst, mask, .. } | Op::Tld4 { dst, mask, .. } => (0
-            ..mask.iter().filter(|&&m| m).count() as u8)
+        Op::Tex { dst, mask, .. }
+        | Op::Txq { dst, mask, .. }
+        | Op::Tld4 { dst, mask, .. }
+        | Op::Tld { dst, mask, .. } => (0..mask.iter().filter(|&&m| m).count() as u8)
             .map(|i| dst.wrapping_add(i))
             .collect(),
         Op::Suld { dst, data, .. } => (0..data.channels().iter().filter(|&&m| m).count() as u8)

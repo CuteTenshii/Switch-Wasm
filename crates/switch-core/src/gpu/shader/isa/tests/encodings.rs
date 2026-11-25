@@ -929,6 +929,84 @@ fn a_tlds_encoding_picks_where_its_registers_go() {
     }
 }
 
+#[test]
+fn a_tld_takes_its_coordinates_from_its_type_and_its_meta_registers_in_order() {
+    // tld r0, r4, r12, handle 10, rgba, the predicate PT: each form only changes type, .LL and .AOFFI.
+    const BASE: u64 = 0xdc << 56 | 7 << 51 | 10 << 36 | 0xf << 31 | 12 << 20 | 4 << 8;
+    let with = |form: u64| match decode(BASE | form).op {
+        Op::Tld {
+            dim,
+            coords,
+            layer,
+            lod,
+            offset,
+            handle,
+            handle_reg,
+            ..
+        } => (dim, coords, layer, lod, offset, handle, handle_reg),
+        other => panic!("form {form:#x}: {other:?}"),
+    };
+    let (lod, aoffi) = (1 << 55, 1 << 35);
+    assert_eq!(
+        with(0),
+        (TexDim::T2d, [4, RZ, RZ], None, None, None, 10, None)
+    );
+    assert_eq!(
+        with(1 << 28 | lod),
+        (
+            TexDim::T2dArray,
+            [5, RZ, RZ],
+            Some(4),
+            Some(12),
+            None,
+            10,
+            None
+        )
+    );
+    assert_eq!(
+        with(2 << 28 | aoffi),
+        (TexDim::T2d, [4, 5, RZ], None, None, Some(12), 10, None)
+    );
+    assert_eq!(
+        with(3 << 28 | lod | aoffi),
+        (
+            TexDim::T2dArray,
+            [5, 6, RZ],
+            Some(4),
+            Some(12),
+            Some(13),
+            10,
+            None
+        )
+    );
+    assert_eq!(
+        with(4 << 28),
+        (TexDim::T3d, [4, 5, 6], None, None, None, 10, None)
+    );
+    // The bindless form reads its handle from the first meta register.
+    let bindless = BASE & !(0xff << 56) | 0xdd << 56 | 2 << 28 | lod;
+    assert!(matches!(
+        decode(bindless).op,
+        Op::Tld {
+            handle_reg: Some(12),
+            lod: Some(13),
+            sparse: 7,
+            ..
+        }
+    ));
+    // A cube, a clamp, a multisample index and an empty mask are not fetched.
+    for unsupported in [5 << 28, 1 << 54, 1 << 50] {
+        assert!(matches!(
+            decode(BASE | unsupported).op,
+            Op::Unimplemented { .. }
+        ));
+    }
+    assert!(matches!(
+        decode(BASE & !(0xf << 31)).op,
+        Op::Unimplemented { .. }
+    ));
+}
+
 /// Eden throws on a register pair that starts on an odd register, so the decoder refuses it.
 #[test]
 fn a_tlds_pair_on_an_odd_register_is_unimplemented() {

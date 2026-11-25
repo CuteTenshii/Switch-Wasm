@@ -640,6 +640,13 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
         return un;
     }
 
+    // tld, 0xdc00/0xff00, and tld.b, 0xdd00/0xff00 (Eden's `maxwell.inc`).
+    match insn >> 56 {
+        0xdc => return decode_tld(insn, false),
+        0xdd => return decode_tld(insn, true),
+        _ => {}
+    }
+
     // tlds, `texs`'s neighbour in the opcode space.
     if insn & 0xf600_0000_0000_0000 == 0xd200_0000_0000_0000 {
         return decode_tlds(insn);

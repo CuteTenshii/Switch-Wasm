@@ -203,6 +203,18 @@ pub(super) fn reads(op: &Op) -> Vec<u8> {
             v.extend([layer, dref, offset, lod, handle_reg].into_iter().flatten());
             v
         }
+        Op::Tld {
+            coords,
+            layer,
+            lod,
+            offset,
+            handle_reg,
+            ..
+        } => {
+            let mut v = coords.to_vec();
+            v.extend([layer, lod, offset, handle_reg].into_iter().flatten());
+            v
+        }
         Op::Txq { lod, .. } => vec![lod],
         Op::Tld4s {
             coords,

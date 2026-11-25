@@ -1200,6 +1200,7 @@ impl Invocation {
             | Op::Vote { .. }
             | Op::Texs { .. }
             | Op::Tlds { .. }
+            | Op::Tld { .. }
             | Op::Tex { .. }
             | Op::Txq { .. }
             | Op::Tld4 { .. }

@@ -179,6 +179,41 @@ impl Emitter<'_> {
                 };
                 self.fetch_texture(at, fetch)?;
             }
+            Op::Tld {
+                coords,
+                layer,
+                lod,
+                offset,
+                handle,
+                handle_reg,
+                dim,
+                sparse,
+                ..
+            } => {
+                let level = lod.filter(|&reg| reg != RZ);
+                // Each level binds as a 2D texture of its own, and `Fetch` offsets two axes.
+                if (level.is_some() && dim != TexDim::T2d)
+                    || (offset.is_some() && dim == TexDim::T3d)
+                {
+                    return Err(Unsupported::Op { at, op });
+                }
+                let slot = match handle_reg {
+                    None => TextureSlot::Bound(handle),
+                    Some(reg) => self
+                        .bindless_slot(at, reg)
+                        .ok_or(Unsupported::UntracedHandle { at })?,
+                };
+                let fetch = Fetch {
+                    slot,
+                    dim,
+                    coords,
+                    layer,
+                    offset,
+                    level,
+                };
+                self.fetch_texture(at, fetch)?;
+                self.set_p(sparse, "false");
+            }
             // `tex` keeps the layer before the coordinates; `.LL`/`.LB` sample the one level.
             Op::Tex {
                 coords,

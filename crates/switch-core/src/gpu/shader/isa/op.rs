@@ -646,6 +646,26 @@ pub enum Op {
         f16: bool,
     },
 
+    /// `tld dst, coords.., handle, dim, mask`, the general texel fetch: [`Op::Tlds`] with `tex`'s
+    /// register layout, channels landing in consecutive registers from `dst`.
+    Tld {
+        dst: u8,
+        /// `x`, `y` and a 3D image's `z`; unused axes are `RZ`.
+        coords: [u8; 3],
+        /// An array's layer, in the low half of its register.
+        layer: Option<u8>,
+        lod: Option<u8>,
+        /// `.AOFFI`'s register: a signed four-bit offset per axis, `x` low.
+        offset: Option<u8>,
+        handle: u16,
+        /// `tld.b`: the handle is in this register.
+        handle_reg: Option<u8>,
+        dim: TexDim,
+        mask: [bool; 4],
+        /// Written with whether the texel was missing; the texture model holds every texel.
+        sparse: u8,
+    },
+
     /// `tex dst, coords.., handle, dim, mask`, the general texture sample.
     Tex {
         dst: u8,

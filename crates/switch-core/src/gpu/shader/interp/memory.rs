@@ -192,6 +192,57 @@ impl Invocation {
         Ok(())
     }
 
+    /// `tld`: [`Self::run_tlds`]'s fetch, with a bindless handle and a third offset for 3D.
+    pub(super) fn run_tld(
+        &mut self,
+        program: &Compiled,
+        pc: usize,
+        op: Op,
+        env: &Env,
+        pending: &mut Vec<(usize, u8, u32)>,
+    ) -> ShaderResult<()> {
+        let Op::Tld {
+            coords,
+            layer,
+            lod,
+            offset,
+            handle,
+            handle_reg,
+            dim,
+            sparse,
+            ..
+        } = op
+        else {
+            unreachable!("run_tld called with {op:?}");
+        };
+        let level = lod.map_or(0, |reg| self.reg(reg));
+        let handle = match handle_reg {
+            Some(reg) => self.reg(reg),
+            None => env
+                .consts
+                .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?,
+        };
+        let mut at = [self.reg(coords[0]), self.reg(coords[1]), 0];
+        at[2] = match dim {
+            TexDim::T3d => self.reg(coords[2]),
+            TexDim::T2dArray => layer.map_or(0, |reg| self.reg(reg) & 0xffff),
+            _ => 0,
+        };
+        if let Some(reg) = offset {
+            let packed = self.reg(reg);
+            let axis = |shift: u32| (((packed >> shift) as i32) << 28 >> 28) as u32;
+            at[0] = at[0].wrapping_add(axis(0));
+            at[1] = at[1].wrapping_add(axis(4));
+            if dim == TexDim::T3d {
+                at[2] = at[2].wrapping_add(axis(8));
+            }
+        }
+        let texel = env.textures.fetch_level(handle, at, level)?;
+        self.set_pred(sparse, false);
+        self.land_texture(program, pc, texel, pending);
+        Ok(())
+    }
+
     /// The general `tex`: LOD, offset and shadow reference share one register, and
     /// an array's layer comes before the coordinates.
     pub(super) fn run_tex(

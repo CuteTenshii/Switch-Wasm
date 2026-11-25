@@ -399,6 +399,60 @@ pub(super) fn decode_tlds(insn: u64) -> Op {
     }
 }
 
+/// `tld` and `tld.b`: Eden's `texture_load.cpp`. The meta registers carry the bindless handle,
+/// the level, the offsets and a multisample index, in that order, each only when used.
+pub(super) fn decode_tld(insn: u64, bindless: bool) -> Op {
+    let un = Op::Unimplemented { raw: insn };
+    // `.CL` and a multisample index: the texture model has no clamp and one sample.
+    if field(insn, 54, 1) != 0 || field(insn, 50, 1) != 0 {
+        return un;
+    }
+    let dst = reg(insn, 0, 8);
+    let bits = field(insn, 31, 4);
+    if bits == 0 || dst == RZ {
+        return un;
+    }
+    let a = reg(insn, 8, 8);
+    let (dim, coords, layer) = match field(insn, 28, 3) {
+        // A 1D image is a 2D one a texel tall, as `tlds` treats it.
+        0 => (TexDim::T2d, [a, RZ, RZ], None),
+        1 => (TexDim::T2dArray, [a.wrapping_add(1), RZ, RZ], Some(a)),
+        2 => (TexDim::T2d, [a, a.wrapping_add(1), RZ], None),
+        3 => (
+            TexDim::T2dArray,
+            [a.wrapping_add(1), a.wrapping_add(2), RZ],
+            Some(a),
+        ),
+        4 => (TexDim::T3d, [a, a.wrapping_add(1), a.wrapping_add(2)], None),
+        _ => return un,
+    };
+    let mut meta = reg(insn, 20, 8);
+    let mut take = || {
+        let r = meta;
+        meta = meta.wrapping_add(1);
+        r
+    };
+    let handle_reg = bindless.then(&mut take);
+    let lod = (field(insn, 55, 1) != 0).then(&mut take);
+    let offset = (field(insn, 35, 1) != 0).then(&mut take);
+    Op::Tld {
+        dst,
+        coords,
+        layer,
+        lod,
+        offset,
+        handle: if bindless {
+            0
+        } else {
+            field(insn, 36, 13) as u16
+        },
+        handle_reg,
+        dim,
+        mask: [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0],
+        sparse: field(insn, 51, 3) as u8,
+    }
+}
+
 /// What one of a `texs`'s destination registers ends up holding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TexsStore {
