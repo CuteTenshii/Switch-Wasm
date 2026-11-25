@@ -8,6 +8,8 @@ Status, lowest to highest:
 - **In-game**: reaches gameplay.
 - **Playable**: in-game in the browser at a usable speed, with working input.
 
+Every entry was measured on a MacBook Air (M4, 24 GB of RAM); speeds and frame rates are that machine's.
+
 ## Retail
 
 | Title | Title ID | Version | Status | How far it gets | Measured |
