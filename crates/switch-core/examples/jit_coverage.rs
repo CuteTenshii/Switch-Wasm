@@ -1,6 +1,6 @@
 //! Lists the instructions a program runs that the block emitter has no writer for,
-//! weighted by one steady frame's instruction mix:
-//! `jit_coverage <target> [--keys <prod.keys>]`.
+//! weighted by one frame's instruction mix:
+//! `jit_coverage <target> [--keys <prod.keys>] [--frame <n>]`.
 mod common;
 
 use clap::Parser;
@@ -23,6 +23,9 @@ struct Cli {
     boot: common::Boot,
     #[command(flatten)]
     report: common::Report,
+    /// The presented frame to sample; the default skips startup to a steady frame.
+    #[arg(long, default_value_t = 2)]
+    frame: u64,
 }
 
 fn written(insn: u32) -> bool {
@@ -33,10 +36,9 @@ fn percent(part: u64, whole: u64) -> f64 {
     part as f64 * 100.0 / whole as f64
 }
 
-/// Executed encodings of one steady-state frame, with how often each ran, and the frame's length.
-fn sample_frame(cpu: &mut switch_core::cpu::Cpu) -> Option<(HashMap<u32, u64>, u64)> {
-    // Two frames of startup, so what follows is a steady-state frame.
-    common::reach_frame(cpu, 2, u64::MAX)?;
+/// Executed encodings of the frame after `frame`, with how often each ran, and the frame's length.
+fn sample_frame(cpu: &mut switch_core::cpu::Cpu, frame: u64) -> Option<(HashMap<u32, u64>, u64)> {
+    common::reach_frame(cpu, frame, u64::MAX)?;
 
     let mut seen: HashMap<u32, u64> = HashMap::new();
     let start = cpu.nv.gpu.frames;
@@ -103,7 +105,7 @@ fn main() {
     program.boot(&mut cpu, None);
     common::start_play(&mut cpu);
 
-    let Some((seen, total)) = sample_frame(&mut cpu) else {
+    let Some((seen, total)) = sample_frame(&mut cpu, cli.frame) else {
         return;
     };
     let mut missing: Vec<(u64, u32)> = seen

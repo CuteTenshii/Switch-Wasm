@@ -10,6 +10,7 @@
 // `--docked` starts the console docked; `--dock-at=N` toggles it that long after the title starts.
 // `--dump-wgsl` writes every shader the worker hands the browser into a directory.
 // `--stream` prints console lines matching a regular expression as they appear; `--stream=.` is all.
+// `--dist=dir` serves another site build instead of `dist`, to compare two builds.
 // `--trace=file@seconds:length` records a Chromium trace of the GPU process from that long after the
 // title starts; `tools/trace_summary.mjs` reads it.
 // `--dump-texture=dir@WxH[xLAYERS]` reads back the device textures of that size when the run ends:
@@ -46,7 +47,7 @@ import { hookSource, parseSpec, readTextures, writeTextures } from './texture_du
 
 const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--keys=prod.keys] [--title-keys=title.keys]
   [--firmware=dir] [--update=update.nsp] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--docked] [--dock-at=N] [--software-at=N] [--software-after=B]
-  [--relay=ws://127.0.0.1:18787] [--port=N]
+  [--relay=ws://127.0.0.1:18787] [--port=N] [--dist=dir]
   [--firefox] [--gpu-objects] [--dump-wgsl=dir] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length] [--trace-cpu]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
   [--jit-stats] [--press=key@seconds[:every],...] [--script=file|steps]`;
@@ -68,7 +69,8 @@ const { flag, flags, has: hasFlag, path: pathFlag, positional } = commandLine();
 const container = positional[0];
 const nand = flag('nand');
 if (!container && !nand) fail(USAGE);
-if (!existsSync(join(repoRoot, 'dist/index.html'))) fail('dist/ has not been built: run `make assets` first');
+const dist = pathFlag('dist') ?? join(repoRoot, 'dist');
+if (!existsSync(join(dist, 'index.html'))) fail(`${dist} has no site build: run \`make assets\` first`);
 
 const keys = pathFlag('keys');
 const titleKeys = pathFlag('title-keys');
@@ -123,6 +125,7 @@ const steps = (flag('script')
 
 const server = await preview({
   configFile: join(repoRoot, 'vite.config.ts'),
+  build: { outDir: dist },
   logLevel: 'error',
   preview: { host: '127.0.0.1', port, strictPort: port !== 0, open: false },
 });
