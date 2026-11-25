@@ -66,6 +66,33 @@ test('the memory section waits for a title, then shows where its RAM is', async 
   await expect(page.locator('#heap-size')).not.toHaveText('-');
 });
 
+test('the audio group waits for a title, then reads its mixers, clock and output', async ({ page }) => {
+  await page.getByRole('button', { name: 'Audio' }).click();
+  const mixer = page.locator('#audio-mixer-section');
+  const clock = page.locator('#audio-clock-section');
+  const output = page.locator('#audio-output-section');
+  await expect(page.getByText('Tracing', { exact: true })).toBeHidden();
+  await expect(mixer.locator('#audio-mixer-status')).toHaveText('Start a title to see its audio.');
+  await expect(clock.locator('#audio-clock-data')).toBeHidden();
+  await expect(output.locator('#audio-output-data')).toBeHidden();
+
+  await bootElf(page, aarch64Elf([ASM.spin]), 'running');
+  // A program that never opens audio has no mixer, but its clock and ring report.
+  await expect(mixer.locator('#audio-mixer-status'))
+    .toHaveText('The title has not opened an audio renderer or output yet.');
+  await expect(clock.locator('#audio-clock-data')).toBeVisible();
+  // Rates need two readings, a second apart.
+  await expect(clock.locator('#audio-clock-jumps')).toHaveText(/^[\d,.]+\/s$/);
+  await expect(output.locator('#audio-ring-format')).toHaveText('nothing played yet');
+  await expect(output.locator('#audio-page-status'))
+    .toHaveText('The browser output opens with the first sound the title plays.');
+
+  await page.locator('#btn-stop').click();
+  await expectState(page, 'idle');
+  await expect(mixer.locator('#audio-mixer-status')).toHaveText('Start a title to see its audio.');
+  await expect(clock.locator('#audio-clock-data')).toBeHidden();
+});
+
 test('the translation section counts the blocks a program ran', async ({ page }) => {
   await bootElf(page, aarch64Elf([ASM.exitProcess]), 'halted');
   await expect(page.locator('#jit-translated')).toHaveText(/^[1-9][\d,.]*[MBT]?$/);

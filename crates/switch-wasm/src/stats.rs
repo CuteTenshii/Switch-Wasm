@@ -1,7 +1,8 @@
-//! Translator, thread, GPU and memory reports.
+//! Translator, thread, GPU, memory and audio reports.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use switch_core::cpu::{AudioActivity, Pacing};
 use switch_core::json;
 use switch_core::trace::Level;
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -86,5 +87,77 @@ pub fn switch_memory_json() -> String {
         });
         o.field("elsewhere", memory.elsewhere)
             .field("allProcesses", memory.all_processes);
+    })
+}
+
+/// The guest's mixers, the host ring and the clock's catch-ups, as JSON for the Audio
+/// debug section. Counts are totals since they started; the page turns them into rates.
+#[wasm_bindgen]
+pub fn switch_audio_json() -> String {
+    let cpu = &session().cpu;
+    audio_json(&cpu.audio_activity(), cpu.pacing())
+}
+
+pub(crate) fn audio_json(audio: &AudioActivity, pacing: Pacing) -> String {
+    json::object(|o| {
+        o.object("clock", |c| {
+            c.field("hz", pacing.clock_hz)
+                .field("jumps", pacing.jumps)
+                .field("skipped", pacing.skipped_cycles)
+                .field("ahead", pacing.ahead_cycles);
+        });
+        o.object("ring", |r| {
+            r.field("sampleRate", audio.sample_rate)
+                .field("channels", audio.channels)
+                .field("produced", audio.produced)
+                .field("taken", audio.taken)
+                .field("dropped", audio.dropped)
+                .field("backlog", audio.backlog);
+        });
+        o.array("renderers", |a| {
+            for r in &audio.renderers {
+                a.object(|o| {
+                    o.field("handle", r.handle)
+                        .field("sampleRate", r.sample_rate)
+                        .field("started", r.started)
+                        .field("updates", r.updates)
+                        .field("renderedFrames", r.rendered_frames)
+                        .field("frameWakes", r.frame_wakes)
+                        .field("frameWakesDropped", r.frame_wakes_dropped)
+                        .field("voices", r.voices)
+                        .field("voicesPlaying", r.voices_playing)
+                        .field("sinkChannels", r.sink_channels)
+                        .field("underruns", r.underruns);
+                    o.array("voiceList", |v| {
+                        for voice in &r.voice_list {
+                            v.object(|o| {
+                                o.field("id", voice.id)
+                                    .field("format", voice.format)
+                                    .field("sampleRate", voice.sample_rate)
+                                    .field("pitch", voice.pitch)
+                                    .field("channels", voice.channels)
+                                    .field("volume", voice.volume)
+                                    .field("playing", voice.playing)
+                                    .field("queuedBuffers", voice.queued_buffers)
+                                    .field("underruns", voice.underruns);
+                            });
+                        }
+                    });
+                });
+            }
+        });
+        o.array("outputs", |a| {
+            for out in &audio.outputs {
+                a.object(|o| {
+                    o.field("handle", out.handle)
+                        .field("sampleRate", out.sample_rate)
+                        .field("channels", out.channels)
+                        .field("started", out.started)
+                        .field("appendedFrames", out.appended_frames)
+                        .field("pendingBuffers", out.pending_buffers)
+                        .field("discardedFrames", out.discarded_frames);
+                });
+            }
+        });
     })
 }

@@ -133,6 +133,56 @@ export interface ThreadReading {
   threads: ThreadActivity[];
 }
 
+// `switch_audio_json`: totals since each counter started; the Audio section turns them into rates.
+export interface AudioReport {
+  // The clock's catch-ups with real time, in cycles of a clock running at `hz`.
+  clock: { hz: number; jumps: number; skipped: number; ahead: number };
+  // The host ring the worklet plays from, in interleaved samples.
+  ring: {
+    sampleRate: number; channels: number;
+    produced: number; taken: number; dropped: number; backlog: number;
+  };
+  renderers: AudioRendererReport[];
+  outputs: AudioOutReport[];
+}
+
+export interface AudioRendererReport {
+  handle: number;
+  sampleRate: number;
+  started: boolean;
+  updates: number;
+  renderedFrames: number;
+  frameWakes: number;
+  frameWakesDropped: number;
+  voices: number;
+  voicesPlaying: number;
+  sinkChannels: number;
+  underruns: number;
+  voiceList: AudioVoiceReport[];
+}
+
+export interface AudioVoiceReport {
+  id: number;
+  format: string;
+  sampleRate: number;
+  pitch: number;
+  channels: number;
+  volume: number;
+  playing: boolean;
+  queuedBuffers: number;
+  underruns: number;
+}
+
+export interface AudioOutReport {
+  handle: number;
+  sampleRate: number;
+  channels: number;
+  started: boolean;
+  appendedFrames: number;
+  pendingBuffers: number;
+  discardedFrames: number;
+}
+
 export interface JitStats {
   enabled: boolean;
   blocks: number;
@@ -387,6 +437,7 @@ export interface Commands {
   jitStats(): JitStats;
   threads(): ThreadReading;
   gpuReport(): GpuReport;
+  audioReport(): AudioReport;
   lastError(): string;
 
   // The stored SD card and saves. Changes go to IndexedDB first, then to the running session.

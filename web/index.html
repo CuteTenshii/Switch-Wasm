@@ -349,6 +349,8 @@
         aria-pressed="false">Graphics</button>
       <button class="btn small debug-group" data-debug-group="memory"
         aria-pressed="false">Memory</button>
+      <button class="btn small debug-group" data-debug-group="audio"
+        aria-pressed="false">Audio</button>
     </div>
 
     <details class="section" id="threads-debug-section" data-debug-section="cpu" open>
@@ -573,6 +575,65 @@
           <div><dt>Everything else</dt><dd id="heap-rest">-</dd></div>
         </dl>
         <p class="muted tiny" id="heap-device-textures"></p>
+      </div>
+    </details>
+
+    <details class="section" id="audio-mixer-section" data-debug-section="audio" open hidden>
+      <summary class="section-head">
+        <span class="section-title">Game mixer</span>
+        <info-tip text="The title's audio renderers, read once a second. A renderer is woken for every 5 ms frame, and titles like Just Dance mix one frame per wake, so their music keeps time only while updates per frame stay at 1.00. Underruns count voices that ran out of samples while playing."></info-tip>
+        <span class="section-note" id="audio-mixer-badge"></span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny" id="audio-mixer-status">Start a title to see its audio.</p>
+        <div id="audio-renderers"></div>
+      </div>
+    </details>
+
+    <details class="section" id="audio-clock-section" data-debug-section="audio" open hidden>
+      <summary class="section-head">
+        <span class="section-title">Clock</span>
+        <info-tip text="When the title falls behind real time, the emulator jumps its clock forward instead of slowing down. Audio frames come due by that clock, so each jump makes several due at once."></info-tip>
+        <span class="section-note" id="audio-clock-badge"></span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny" id="audio-clock-status">Start a title to see its clock.</p>
+        <dl class="debug-totals" id="audio-clock-data" hidden>
+          <div><dt>Catch-up jumps</dt><dd id="audio-clock-jumps">-</dd></div>
+          <div><dt>Time skipped</dt><dd id="audio-clock-skipped">-</dd></div>
+          <div><dt>Ahead of real time</dt><dd id="audio-clock-ahead">-</dd></div>
+        </dl>
+      </div>
+    </details>
+
+    <details class="section" id="audio-output-section" data-debug-section="audio" open hidden>
+      <summary class="section-head">
+        <span class="section-title">Sound output</span>
+        <info-tip text="The mixed sound on its way out: the ring the emulator writes it into, then the browser's audio output, which plays from the ring and drops the oldest sound once more than 200 ms is waiting."></info-tip>
+        <span class="section-note" id="audio-output-badge"></span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny" id="audio-output-status">Start a title to see its sound output.</p>
+        <div id="audio-output-data" hidden>
+          <p class="muted tiny debug-caption">Emulator ring</p>
+          <dl class="debug-totals">
+            <div><dt>Format</dt><dd id="audio-ring-format">-</dd></div>
+            <div><dt>Written</dt><dd id="audio-ring-produced">-</dd></div>
+            <div><dt>Taken by the page</dt><dd id="audio-ring-taken">-</dd></div>
+            <div><dt>Waiting</dt><dd id="audio-ring-backlog">-</dd></div>
+            <div><dt>Dropped</dt><dd id="audio-ring-dropped">-</dd></div>
+          </dl>
+          <p class="muted tiny debug-caption">Browser output</p>
+          <p class="muted tiny" id="audio-page-status" hidden></p>
+          <dl class="debug-totals" id="audio-page-data">
+            <div><dt>Output</dt><dd id="audio-page-format">-</dd></div>
+            <div><dt>Latency</dt><dd id="audio-page-latency">-</dd></div>
+            <div><dt>Played</dt><dd id="audio-page-played">-</dd></div>
+            <div><dt>Gaps</dt><dd id="audio-page-gaps">-</dd></div>
+            <div><dt>Dropped as too late</dt><dd id="audio-page-trimmed">-</dd></div>
+            <div><dt>Queued</dt><dd id="audio-page-queued">-</dd></div>
+          </dl>
+        </div>
       </div>
     </details>
 

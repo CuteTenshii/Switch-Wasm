@@ -646,6 +646,63 @@ fn the_translator_and_gpu_reports_are_the_json_the_page_reads() {
     assert_eq!(switch_gpu_report_json(), r#"{"frames":0}"#);
 }
 
+/// The Audio debug section's report: the clock, the ring, each renderer and its voices.
+#[test]
+fn the_audio_report_is_the_json_the_page_reads() {
+    use switch_core::cpu::{AudioActivity, AudioRendererActivity, AudioVoiceActivity, Pacing};
+    let audio = AudioActivity {
+        sample_rate: 48_000,
+        channels: 2,
+        produced: 9_600,
+        taken: 9_000,
+        dropped: 0,
+        backlog: 600,
+        outputs: Vec::new(),
+        renderers: vec![AudioRendererActivity {
+            handle: 0x100a,
+            sample_rate: 48_000,
+            started: true,
+            updates: 199,
+            rendered_frames: 200,
+            voices: 24,
+            voices_playing: 1,
+            sink_channels: 2,
+            underruns: 3,
+            frame_wakes: 199,
+            frame_wakes_dropped: 1,
+            voice_list: vec![AudioVoiceActivity {
+                id: 5,
+                format: "ADPCM",
+                sample_rate: 32_000,
+                pitch: 1.0,
+                channels: 1,
+                volume: 0.5,
+                playing: true,
+                queued_buffers: 2,
+                underruns: 3,
+            }],
+        }],
+    };
+    let pacing = Pacing {
+        clock_hz: 1_000,
+        jumps: 4,
+        skipped_cycles: 250,
+        ahead_cycles: 10,
+    };
+    assert_eq!(
+        crate::stats::audio_json(&audio, pacing),
+        concat!(
+            r#"{"clock":{"hz":1000,"jumps":4,"skipped":250,"ahead":10},"#,
+            r#""ring":{"sampleRate":48000,"channels":2,"produced":9600,"taken":9000,"dropped":0,"backlog":600},"#,
+            r#""renderers":[{"handle":4106,"sampleRate":48000,"started":true,"updates":199,"#,
+            r#""renderedFrames":200,"frameWakes":199,"frameWakesDropped":1,"voices":24,"voicesPlaying":1,"#,
+            r#""sinkChannels":2,"underruns":3,"voiceList":[{"id":5,"format":"ADPCM","sampleRate":32000,"#,
+            r#""pitch":1,"channels":1,"volume":0.5,"playing":true,"queuedBuffers":2,"underruns":3}]}],"#,
+            r#""outputs":[]}"#
+        )
+    );
+}
+
 /// A title's control data and an unreadable NCA, in the bytes the page parses.
 #[test]
 fn control_data_and_nca_summaries_are_the_json_the_page_reads() {

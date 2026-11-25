@@ -34,6 +34,9 @@ test('the debug panel fits a phone and its category buttons are tappable', async
     expect((await group.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   }
   expect(await page.locator('#panel').evaluate((panel) => panel.scrollWidth > panel.clientWidth)).toBe(false);
+  await page.getByRole('button', { name: 'Audio' }).click();
+  await expect(page.locator('#audio-mixer-status')).toBeVisible();
+  expect(await page.locator('#panel').evaluate((panel) => panel.scrollWidth > panel.clientWidth)).toBe(false);
 });
 
 test('the crash screen fits a phone and its actions are tappable', async ({ page }) => {

@@ -1,13 +1,13 @@
 // Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
 
 import type {
-  CommandHandlers, ControlData, ControlInfo, GpuReport, JitStats, MemoryReport, NandIdentity, NcaInfo,
+  AudioReport, CommandHandlers, ControlData, ControlInfo, GpuReport, JitStats, MemoryReport, NandIdentity, NcaInfo,
   OpenedContainer, PeekedTitle, ThreadReading,
 } from '../shared/protocol';
 import { noteRegistered } from './activity';
 import { flushLog } from './log';
 import {
-  switch_clear_screen,
+  switch_audio_json, switch_clear_screen,
   switch_control_icon, switch_control_json, switch_end_title, switch_flush_storage, switch_force_software, switch_get_reg,
   switch_get_steps, switch_gpu_report_json, switch_guest_fatal, switch_guest_ram, switch_halted,
   switch_jit_stats_json, switch_keyboard_answer, switch_last_error, switch_load_control,
@@ -137,6 +137,14 @@ export const CMD = {
   },
   gpuReport() {
     return parseOr<GpuReport>(switch_gpu_report_json(), {});
+  },
+  audioReport() {
+    return parseOr<AudioReport>(switch_audio_json(), {
+      clock: { hz: 0, jumps: 0, skipped: 0, ahead: 0 },
+      ring: { sampleRate: 0, channels: 0, produced: 0, taken: 0, dropped: 0, backlog: 0 },
+      renderers: [],
+      outputs: [],
+    });
   },
   lastError: switch_last_error,
 

@@ -13,6 +13,7 @@ import './elements/info-tip';
 import { fmtCount } from '../shared/format';
 import { formatBytes } from './format';
 import { log } from './log';
+import { updateAudioDebug } from './audio-debug';
 import { updateMemoryDebug } from './memory';
 import { call, hasSession } from './rpc';
 import { titleBooted } from './session';
@@ -37,6 +38,7 @@ function selectDebugGroup(name: string): void {
     if (hasSession()) void updateRenderDebug();
   }
   if (name === 'memory') void updateMemoryDebug();
+  if (name === 'audio') void updateAudioDebug();
   if (name === 'cpu') void updateThreadsDebug();
 }
 

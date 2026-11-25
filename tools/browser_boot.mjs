@@ -584,7 +584,10 @@ try {
     // Rates need two readings a second apart, so the group is read after a few.
     try {
       await press('[data-debug-group="audio"]');
-      await page.waitForTimeout(3000);
+      // The first reading comes when the worker answers; rates need a second after it.
+      await page.locator('#audio-clock-data').waitFor({ state: 'visible', timeout: 30_000 })
+        .catch(() => say('the Audio section had no reading after 30 s'));
+      await page.waitForTimeout(2500);
       const sections = ['#audio-mixer-section', '#audio-clock-section', '#audio-output-section'];
       audio = (await Promise.all(sections.map((section) => page.locator(section).innerText()))).join('\n');
     } catch (error) {

@@ -39,3 +39,4 @@ Game images and keys (`.nro`, `.nsp`, `.xci`, `.nca`, `.keys`) are gitignored.
 - **Debug > Graphics > Rendering** shows which renderer is drawing and why, device totals, device time per frame, fallback reasons and device errors.
 - **Debug > Graphics > Display** is the display path. Guest frames against canvas updates say how many presents were never painted; the timing table separates the worker's run slice from painting its newest frame on the canvas.
 - **Debug > CPU > Translation** counts blocks translated, compiled to wasm, entered and chained.
+- **Debug > Audio** reads the title's mixers (frames, frame wakes and updates per second, where updates per frame should stay at 1.00, and each voice's underruns), the clock's catch-up jumps, and the sound's way out through the emulator ring and the browser output. Slow or garbled music shows up there as underruns and a clock skipping time.
