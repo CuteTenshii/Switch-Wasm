@@ -32,6 +32,7 @@ bun run preview   # the built site from dist/
 
 - [Eden Emulator](https://git.eden-emu.dev/eden-emu/eden)
 - [libopus](https://opus-codec.org)
+- [libvpx](https://chromium.googlesource.com/webm/libvpx)
 - [EnvyTools](https://github.com/envytools/envytools)
 - [libnx](https://github.com/switchbrew/libnx)
 - [SwitchBrew](https://switchbrew.org)
@@ -39,3 +40,7 @@ bun run preview   # the built site from dist/
 - [Mesa / nouveau](https://gitlab.freedesktop.org/mesa/mesa)
 - [hactool](https://github.com/SciresM/hactool)
 - [libtransistor](https://github.com/reswitched/libtransistor)
+
+## License
+
+[GNU AGPL v3.0 or later](LICENSE). If you host a modified version, you must offer its source to the people who use it. Code adapted from other projects keeps its own license; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

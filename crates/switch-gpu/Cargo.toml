@@ -3,7 +3,7 @@ name = "switch-gpu"
 version = "0.1.0"
 edition = "2021"
 description = "A GPU backend for switch-core's 3D engine, on wgpu"
-license = "MIT"
+license = "AGPL-3.0-or-later"
 
 [dependencies]
 pollster = "1.0.1"

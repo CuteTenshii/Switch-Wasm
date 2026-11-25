@@ -3,7 +3,7 @@ name = "switch-relay"
 version = "0.1.0"
 edition = "2021"
 description = "WebSocket relay that carries the emulator's TCP and UDP traffic, see docs/relay.md"
-license = "MIT"
+license = "AGPL-3.0-or-later"
 
 [dependencies]
 dirs = "7.0.0"
