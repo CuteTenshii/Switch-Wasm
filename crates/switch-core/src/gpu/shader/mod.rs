@@ -22,6 +22,29 @@ pub mod uses {
 
     thread_local! {
         static BOUND: RefCell<Option<Vec<(Stage, u64, Program)>>> = const { RefCell::new(None) };
+        static DECODED: RefCell<Option<std::collections::BTreeMap<u64, Program>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// Keep every program decoded from memory from now on, on either renderer, by address.
+    pub fn record_decoded() {
+        DECODED.with(|decoded| *decoded.borrow_mut() = Some(std::collections::BTreeMap::new()));
+    }
+
+    /// Note a program decoded at `addr`; the first decode of an address is kept.
+    pub fn note_decoded(addr: u64, program: &Program) {
+        DECODED.with(|decoded| {
+            if let Some(map) = decoded.borrow_mut().as_mut() {
+                map.entry(addr).or_insert_with(|| program.clone());
+            }
+        });
+    }
+
+    /// Everything noted since [`record_decoded`], by address; stops recording.
+    pub fn take_decoded() -> std::collections::BTreeMap<u64, Program> {
+        DECODED
+            .with(|decoded| decoded.borrow_mut().take())
+            .unwrap_or_default()
     }
 
     pub fn record() {
@@ -300,6 +323,7 @@ pub fn decode_program_from_memory_recording(
         crate::traceln!("[sph] program at {addr:#x} {header:?}");
     }
     pages.sort_unstable();
+    uses::note_decoded(addr, &program);
     Ok((program, DecodeReads { pages, consts }))
 }
 

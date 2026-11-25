@@ -128,6 +128,9 @@ struct Memory {
     /// Find the title's gate word and keep it zero.
     #[arg(long)]
     gate_sniff: bool,
+    /// List the instructions the decoder leaves unimplemented in every program the run decodes.
+    #[arg(long)]
+    undecoded: bool,
     /// Print where these four bytes sit in guest memory.
     #[arg(long, value_name = "TEXT")]
     find_magic: Option<String>,
@@ -185,6 +188,9 @@ fn main() {
     let mut press = common::Press::from_flags();
 
     let memory = &cli.memory;
+    if memory.undecoded {
+        switch_core::gpu::shader::uses::record_decoded();
+    }
     let interval = match (memory.profile, memory.stacks) {
         (0, true) => DEFAULT_INTERVAL,
         (given, _) => given,
@@ -306,6 +312,9 @@ fn main() {
     // The browser's Rendering panel: device draws and fallbacks.
     println!("rendering: {}", cpu.nv.gpu.renderer_report());
 
+    if memory.undecoded {
+        report_undecoded(switch_core::gpu::shader::uses::take_decoded());
+    }
     for spec in &memory.dump_surface {
         dump_surface(&cpu, spec, out);
     }
@@ -418,6 +427,42 @@ fn scan_mem(cpu: &switch_core::cpu::Cpu, lo: u64, hi: u64) {
     println!("  {} non-zero spans in {lo:#x}+{:#x}", spans.len(), hi - lo);
     for (at, len) in spans.iter().take(40) {
         println!("    {at:#x} .. +{len:#x}");
+    }
+}
+
+/// `--undecoded`: unimplemented instructions by their top 16 opcode bits, the most common first.
+fn report_undecoded(programs: std::collections::BTreeMap<u64, switch_core::gpu::shader::Program>) {
+    use switch_core::gpu::shader::Op;
+    // Per opcode: instructions, programs, and one word to decode by hand.
+    let mut seen: std::collections::BTreeMap<u16, (u64, u64, u64)> = Default::default();
+    for program in programs.values() {
+        let mut here = std::collections::BTreeSet::new();
+        for insn in &program.insns {
+            if let Op::Unimplemented { raw } = insn.op {
+                let opcode = (raw >> 48) as u16;
+                let row = seen.entry(opcode).or_insert((0, 0, raw));
+                row.0 += 1;
+                if here.insert(opcode) {
+                    row.1 += 1;
+                }
+            }
+        }
+    }
+    println!(
+        "[undecoded] {} program(s) decoded, {} opcode(s) left unimplemented",
+        programs.len(),
+        seen.len()
+    );
+    let mut rows: Vec<_> = seen.into_iter().collect();
+    rows.sort_by_key(|&(opcode, (insns, programs, _))| {
+        (
+            std::cmp::Reverse(programs),
+            std::cmp::Reverse(insns),
+            opcode,
+        )
+    });
+    for (opcode, (insns, programs, raw)) in rows {
+        println!("[undecoded] {opcode:#06x}  {programs:>4} program(s)  {insns:>5} instruction(s)  e.g. {raw:016x}");
     }
 }
 
