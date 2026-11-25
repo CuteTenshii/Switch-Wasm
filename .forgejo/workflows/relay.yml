@@ -1,0 +1,137 @@
+name: Relay
+
+on:
+  push:
+    branches: [master]
+    tags: ["relay-v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: relay-${{ forgejo.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            system: x86_64-linux
+          - target: aarch64-unknown-linux-musl
+            system: aarch64-linux
+          - target: x86_64-pc-windows-gnu
+            system: x86_64-windows
+            suffix: .exe
+          # Without a deployment target, zig marks the binary as needing the macOS it was released with
+          - target: x86_64-apple-darwin
+            system: x86_64-macos
+            macos: "10.12"
+          - target: aarch64-apple-darwin
+            system: aarch64-macos
+            macos: "11.0"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: https://github.com/dtolnay/rust-toolchain@1.100.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: relay-${{ matrix.target }}
+
+      - name: Install zig
+        uses: https://codeberg.org/mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+          cache-key: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        run: cargo install --locked cargo-zigbuild@0.24.1
+
+      - name: Build the relay
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: "true"
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos }}
+        run: cargo zigbuild --release --locked -p switch-relay --target ${{ matrix.target }}
+
+      - name: Copy the binary as switch-relay-<version>-<system>
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/switch-relay/Cargo.toml | head -1)
+          mkdir out
+          cp target/${{ matrix.target }}/release/switch-relay${{ matrix.suffix }} \
+            out/switch-relay-$version-${{ matrix.system }}${{ matrix.suffix }}
+
+      - name: Upload the binary
+        uses: forgejo/upload-artifact@v5
+        with:
+          name: switch-relay-${{ matrix.system }}
+          path: out/
+
+  release:
+    needs: [build]
+    if: startsWith(forgejo.ref, 'refs/tags/relay-v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Collect the binaries
+        uses: forgejo/download-artifact@v7
+        with:
+          pattern: switch-relay-*
+          path: out
+          merge-multiple: true
+
+      - name: Check the tag against Cargo.toml and write checksums and notes
+        env:
+          TAG: ${{ forgejo.ref_name }}
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/switch-relay/Cargo.toml | head -1)
+          if [ "$TAG" != "relay-v$VERSION" ]; then
+            echo "$TAG does not match switch-relay $VERSION in Cargo.toml" >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          (cd out && sha256sum switch-relay-* > SHA256SUMS)
+          cat > notes.md <<EOF
+          The WebSocket relay that gives the emulator Internet access. Download the file for your system, run it with no arguments, then turn it on in the Network tab.
+
+          ## Linux
+
+          Static binaries. Run \`chmod +x\` on the file first.
+
+          - x86_64: \`switch-relay-$VERSION-x86_64-linux\`
+          - ARM64, such as a Raspberry Pi 3 or later on a 64-bit OS: \`switch-relay-$VERSION-aarch64-linux\`
+
+          ## Windows
+
+          - x86_64, Windows 10 or later: \`switch-relay-$VERSION-x86_64-windows.exe\`
+
+          ## macOS
+
+          - Apple Silicon (11 or later): \`switch-relay-$VERSION-aarch64-macos\`
+          - Intel (10.12 or later): \`switch-relay-$VERSION-x86_64-macos\`
+
+          It is not notarized, so macOS blocks it after a download. Run it from Terminal after:
+
+          \`\`\`
+          chmod +x switch-relay-$VERSION-aarch64-macos
+          xattr -d com.apple.quarantine switch-relay-$VERSION-aarch64-macos
+          \`\`\`
+
+          \`SHA256SUMS\` has the checksums. The protocol is described in docs/relay.md.
+          EOF
+
+      - name: Publish the release
+        uses: actions/forgejo-release@v2
+        with:
+          direction: upload
+          title: switch-relay ${{ env.VERSION }}
+          release-dir: out
+          release-notes-file: notes.md
