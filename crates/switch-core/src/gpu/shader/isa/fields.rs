@@ -201,8 +201,9 @@ pub(super) fn mem_size(bits: u64) -> MemSize {
         3 => MemSize::S16,
         4 => MemSize::B32,
         5 => MemSize::B64,
-        6 => MemSize::B128,
-        _ => MemSize::B32,
+        // 7 is `.U.128`, a 128-bit load as `.128` is; Echoes of Wisdom's depth reduction reads
+        // projection rows so.
+        _ => MemSize::B128,
     }
 }
 

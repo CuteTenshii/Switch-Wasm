@@ -172,6 +172,21 @@ fn decodes_ld_st_b128_attribute_space() {
 }
 
 #[test]
+fn decodes_an_unaligned_128_bit_global_load_as_four_words() {
+    // "ldg.e.u.128 r8, [r0 + 0x120]": size 7 in bits 48..51 of the `0xeed0` opcode.
+    let ldg = 0xeed7u64 << 48 | 0x120 << 20 | 7 << 16 | 8;
+    assert_eq!(
+        op(ldg),
+        Op::Ldg {
+            dst: 8,
+            addr: 0,
+            offset: 0x120,
+            size: MemSize::B128
+        }
+    );
+}
+
+#[test]
 fn decodes_fmul_constant_bank_and_register_forms() {
     // mvp.vert: "fmul ftz $r4 $r0 c2[0x0]"
     assert_eq!(
