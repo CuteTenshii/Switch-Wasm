@@ -489,15 +489,24 @@ try {
 
   let pageConsole = '(the page crashed, and its console went with it)';
   let rendering = '(not read)';
+  let threads = '(not read)';
   if (!crashed) {
     // Save's download holds every line; the view keeps only the newest.
     const saved = page.waitForEvent('download', { timeout: 60_000 });
     await page.evaluate(() => document.getElementById('btn-save-console').click());
     pageConsole = readFileSync(await (await saved).path(), 'utf8');
+    try {
+      await openDebugTab();
+      await press('[data-debug-group="cpu"]');
+      await page.locator('#threads-table').waitFor({ state: 'visible', timeout: 30_000 })
+        .catch(() => say('the Threads section had no reading after 30 s'));
+      threads = await page.locator('#threads-debug-section').innerText();
+    } catch (error) {
+      threads = `(not read: ${String(error.message).split('\n')[0]})`;
+    }
     // The Rendering section refreshes only while it is on screen; a page busy logging
     // can be too slow to open it, which costs the section and not the report.
     try {
-      await openDebugTab();
       await press('[data-debug-group="graphics"]');
       // The worker answers between run slices, which a slow title stretches to seconds.
       await page.locator('#render-debug-data').waitFor({ state: 'visible', timeout: 60_000 })
@@ -511,7 +520,7 @@ try {
   }
   const consoleSection = `=== the page's console ===\n${pageConsole}`;
   if (out) {
-    writeFileSync(out, `${lines.join('\n')}\n=== rendering ===\n${rendering}\n=== network ===\n${network}\n${consoleSection}\n`);
+    writeFileSync(out, `${lines.join('\n')}\n=== threads ===\n${threads}\n=== rendering ===\n${rendering}\n=== network ===\n${network}\n${consoleSection}\n`);
     console.log(`wrote ${out}`);
   } else {
     console.log(consoleSection);

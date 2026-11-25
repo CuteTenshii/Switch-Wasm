@@ -29,7 +29,7 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 
 ## `tools/browser_boot.mjs`
 
-- Samples the run state (`body[data-state]`) and the page's console every 5 s so stalls are observed, then saves the Debug panel's Rendering and Display sections and the full console, periodic activity and thread reports included. `--jit-stats` adds the Translation section's block stats to every sample; only the browser build can measure them.
+- Samples the run state (`body[data-state]`) and the page's console every 5 s so stalls are observed, then saves the Debug panel's Threads, Rendering and Display sections and the full console, periodic activity and thread reports included. `--jit-stats` adds the Translation section's block stats to every sample; only the browser build can measure them.
 - WebGPU is force-enabled. A window opens so the browser gets the machine's GPU; without one Chromium falls back to SwiftShader, where readbacks never land and no device frame is presented. Each run uses a fresh profile so stored keys, SD card, saves and NAND do not leak between runs.
 - A fresh profile has an empty NAND, so library applets report themselves cancelled; `--firmware=<dir>` installs a firmware directory's NCAs first.
 - `--update=<nsp>` opens an update before the container and waits for the page to hold it, so the title launches patched, as dropping the update first does in the page.
