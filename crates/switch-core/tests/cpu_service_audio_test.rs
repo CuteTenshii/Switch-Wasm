@@ -747,6 +747,64 @@ fn audren_frame_event_fires_on_the_clock() {
     );
 }
 
+/// QuerySystemEvent on a fresh stereo renderer: (cpu, frame event).
+fn renderer_with_frame_event() -> (Cpu, u32) {
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    let renderer = audren_stereo(&mut cpu);
+    ipc_request_plain(&mut cpu, renderer, 7, &[]);
+    let event = cpu.mem.read_u32(cpu.tls_base() + 0x0c).unwrap();
+    (cpu, event)
+}
+
+/// Wake on the frame event as `nn::os` does (wait, then reset) until it stops firing.
+fn take_frame_wakes(cpu: &mut Cpu, event: u32) -> u64 {
+    let mut wakes = 0;
+    while wait_sync(cpu, &[event], 0).0 == 0 {
+        reset_signal(cpu, event);
+        wakes += 1;
+    }
+    wakes
+}
+
+#[test]
+fn audren_frames_that_come_due_together_each_get_a_wake() {
+    // Just Dance 2017 mixes one frame per wake; one wake for three frames slowed its music.
+    let (mut cpu, event) = renderer_with_frame_event();
+    cpu.cycles += AUDREN_FRAME_CYCLES * 3;
+    assert_eq!(take_frame_wakes(&mut cpu, event), 3);
+}
+
+#[test]
+fn audren_frame_events_keep_pace_when_every_tick_comes_late() {
+    let (mut cpu, event) = renderer_with_frame_event();
+    let start = cpu.cycles;
+    let mut wakes = 0;
+    for _ in 0..100 {
+        cpu.cycles += AUDREN_FRAME_CYCLES * 11 / 10;
+        wakes += take_frame_wakes(&mut cpu, event);
+    }
+    assert_eq!(wakes, (cpu.cycles - start) / AUDREN_FRAME_CYCLES);
+}
+
+#[test]
+fn audren_frame_events_owed_past_the_catch_up_limit_are_dropped() {
+    let (mut cpu, event) = renderer_with_frame_event();
+    cpu.cycles += AUDREN_FRAME_CYCLES * 100;
+    let caught_up = take_frame_wakes(&mut cpu, event);
+    assert!(
+        (1..100).contains(&caught_up),
+        "a long stall is cut short, not replayed: {caught_up} wakes"
+    );
+    cpu.cycles += AUDREN_FRAME_CYCLES;
+    assert_eq!(
+        take_frame_wakes(&mut cpu, event),
+        1,
+        "the clock restarted from the drop"
+    );
+}
+
 #[test]
 fn audren_refuses_a_wave_buffer_that_is_outside_its_allocation() {
     // Where `end_sample_offset` exceeds the allocation, the allocation wins;

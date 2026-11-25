@@ -101,7 +101,11 @@ pub(crate) struct AudioRenderer {
     pub started: bool,
     /// Fired once per rendered frame; what `audrenWaitFrame` blocks on.
     pub frame_event: Option<u64>,
+    /// When the next frame comes due; advances in whole frames so a late tick does not drift.
     pub next_frame_at: u64,
+    /// Frames come due whose event has not fired yet, because the guest had not taken the
+    /// last one: titles mix one frame per wake, so each owed frame is owed a wake of its own.
+    pub frame_events_owed: u64,
     /// The cycle the mix has been rendered up to.
     pub rendered_through: u64,
     /// Reported in the `RendererInfoOut` tail.
@@ -416,6 +420,7 @@ impl Cpu {
                         started: true,
                         frame_event: None,
                         next_frame_at: now.wrapping_add(FRAME_CYCLES),
+                        frame_events_owed: 0,
                         rendered_through: now,
                         elapsed_frames: 0,
                         voices: vec![Voice::default(); voice_count as usize],
@@ -556,6 +561,7 @@ impl Cpu {
                     // Restart the clock from now; a stopped renderer owes no backlog.
                     renderer.rendered_through = now;
                     renderer.next_frame_at = now.wrapping_add(FRAME_CYCLES);
+                    renderer.frame_events_owed = 0;
                 }
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
@@ -570,9 +576,13 @@ impl Cpu {
                     Some(event) => event,
                     None => {
                         let event = self.alloc_event("audren:frame", false);
+                        let now = self.cycles;
                         if let Some(renderer) = self.process_mut().audren_renderers.get_mut(&handle)
                         {
+                            // Frames before anyone could wait are owed no wake.
                             renderer.frame_event = Some(event);
+                            renderer.next_frame_at = now.wrapping_add(FRAME_CYCLES);
+                            renderer.frame_events_owed = 0;
                         }
                         event
                     }
@@ -586,11 +596,15 @@ impl Cpu {
         }
     }
 
-    /// Fire the frame event of every renderer whose 5 ms period has come, and
+    /// Fire the frame event of every renderer owed one for a 5 ms frame come due, and
     /// return the earliest cycle at which one of `handles` will fire.
+    ///
+    /// A title mixes one frame per wake, so frames that came due together (the clock jumps
+    /// to catch up with real time) fire one at a time as the guest takes each signal;
+    /// collapsing them into one signal starved the mix and slowed Just Dance 2017's music.
     pub(crate) fn audren_tick(&mut self, handles: &[u64]) -> Option<u64> {
         let now = self.cycles;
-        let mut fire = Vec::new();
+        let mut candidates = Vec::new();
         let mut next = None;
         for renderer in self.process_mut().audren_renderers.values_mut() {
             let Some(event) = renderer.frame_event else {
@@ -600,15 +614,39 @@ impl Cpu {
                 continue;
             }
             if renderer.next_frame_at <= now {
-                renderer.next_frame_at = now.wrapping_add(FRAME_CYCLES);
-                fire.push(event);
-            } else if handles.contains(&event) {
+                let due = (now - renderer.next_frame_at) / FRAME_CYCLES + 1;
+                let owed = renderer.frame_events_owed + due;
+                if owed > MAX_CATCHUP_FRAMES {
+                    // Too far behind to catch up, as `audren_render` drops its backlog.
+                    renderer.frame_events_owed = MAX_CATCHUP_FRAMES;
+                    renderer.next_frame_at = now.wrapping_add(FRAME_CYCLES);
+                } else {
+                    renderer.frame_events_owed = owed;
+                    renderer.next_frame_at += due * FRAME_CYCLES;
+                }
+            }
+            if renderer.frame_events_owed > 0 {
+                candidates.push(event);
+            }
+            if handles.contains(&event) {
                 let due = renderer.next_frame_at;
                 next = Some(next.map_or(due, |soonest: u64| soonest.min(due)));
             }
         }
-        for event in fire {
+        for event in candidates {
+            // Still signalled: the guest has not taken the last frame, so this one waits.
+            if self.event_signaled(event) != Some(false) {
+                continue;
+            }
             self.signal_event(event);
+            if let Some(renderer) = self
+                .process_mut()
+                .audren_renderers
+                .values_mut()
+                .find(|renderer| renderer.frame_event == Some(event))
+            {
+                renderer.frame_events_owed -= 1;
+            }
         }
         next
     }
