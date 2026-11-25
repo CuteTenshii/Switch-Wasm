@@ -20,6 +20,8 @@
 // `--trace-cpu` adds V8's sampling profiler to `--trace`; `tools/trace_cpu.mjs` reads it.
 // `--browser-arg` passes a switch to Chromium, and can be repeated.
 // `--firefox` runs Playwright's Firefox instead, with WebGPU turned on; not with `--trace` or `--browser-arg`.
+// `--gpu-objects` prints the worker's undestroyed device textures and buffers by label every 10 s;
+// not with `--dump-wgsl`, `--dump-texture` or `--no-webgpu`, which rewrite the same scripts.
 // `--no-webgpu` hides WebGPU, so the software rasterizer draws every frame: the reference
 // a device frame is compared against.
 // `--trace-from` switches the console to trace once a line contains the text: trace from
@@ -39,12 +41,13 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { join, resolve } from 'node:path';
 import { preview } from 'vite';
 import { commandLine, fail, launchChromium, launchFirefox, repoRoot } from './common.mjs';
+import { GPU_OBJECTS_MARK, hookSource as gpuObjectsHook } from './gpu_objects.mjs';
 import { hookSource, parseSpec, readTextures, writeTextures } from './texture_dump.mjs';
 
 const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--keys=prod.keys] [--title-keys=title.keys]
   [--firmware=dir] [--update=update.nsp] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--docked] [--dock-at=N] [--software-at=N] [--software-after=B]
   [--relay=ws://127.0.0.1:18787] [--port=N]
-  [--firefox] [--dump-wgsl=dir] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length] [--trace-cpu]
+  [--firefox] [--gpu-objects] [--dump-wgsl=dir] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length] [--trace-cpu]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
   [--jit-stats] [--press=key@seconds[:every],...] [--script=file|steps]`;
 
@@ -87,6 +90,11 @@ const traceCpu = hasFlag('trace-cpu');
 const browserArgs = flags('browser-arg');
 const useFirefox = hasFlag('firefox');
 if (useFirefox && (traceSpec || browserArgs.length)) fail('--firefox: --trace and --browser-arg are Chromium\'s');
+const gpuObjects = hasFlag('gpu-objects');
+if (gpuObjects && (dumpWgsl || dumpTexture || noWebGpu)) {
+  fail('--gpu-objects: not with --dump-wgsl, --dump-texture or --no-webgpu');
+}
+const GPU_OBJECTS_EVERY_MS = 10_000;
 const presses = (flag('press') ?? '').split(',').filter(Boolean).map((spec) => {
   const match = /^(.+)@(\d+(?:\.\d+)?)(?::(\d+(?:\.\d+)?))?$/.exec(spec);
   if (!match) fail(`--press=${spec}: expected key@seconds[:every]`);
@@ -160,6 +168,12 @@ try {
       await route.fulfill({ response, body: hookSource(spec) + await response.text() });
     });
   }
+  if (gpuObjects) {
+    await page.route(/\.js$/, async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, body: gpuObjectsHook(GPU_OBJECTS_EVERY_MS) + await response.text() });
+    });
+  }
   page.on('console', (m) => note(`page ${m.type()}: ${m.text()}`));
   page.on('pageerror', (e) => say(`page error: ${e.stack || e.message}`));
   let crashed = false;
@@ -171,7 +185,9 @@ try {
     note(`worker started: ${worker.url()}`);
     worker.on('console', (m) => {
       const text = m.text();
-      if (dumpWgsl && text.startsWith(WGSL_MARK)) {
+      if (text.startsWith(GPU_OBJECTS_MARK)) {
+        say(`gpu objects: ${text.slice(GPU_OBJECTS_MARK.length)}`);
+      } else if (dumpWgsl && text.startsWith(WGSL_MARK)) {
         writeFileSync(join(dumpWgsl, `${shadersDumped++}.wgsl`), text.slice(WGSL_MARK.length));
       } else {
         note(`worker ${m.type()}: ${text}`);
