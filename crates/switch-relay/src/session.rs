@@ -17,14 +17,16 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 use crate::config::Config;
-use crate::stream::{self, Accepted, Command, Credit, Kind, Links, Open};
+use crate::stream::{self, Accepted, Command, Commands, Credit, Kind, Links, Open};
 use crate::Timeouts;
 
 /// Most streams one WebSocket may have open.
 pub const MAX_STREAMS: u16 = 256;
 
 struct Handle {
-    commands: UnboundedSender<Command>,
+    commands: Commands,
+    /// A UDP socket drops what it has no room for; a connection is reset instead.
+    udp: bool,
     credit: Arc<Credit>,
     task: JoinHandle<()>,
 }
@@ -38,6 +40,23 @@ fn close(code: CloseCode) -> Message {
         code,
         reason: "".into(),
     }))
+}
+
+/// A stream whose backlog is full: a UDP socket loses the datagram, as on a busy link; anything
+/// else is reset, since a TCP stream cannot lose bytes.
+fn overflowed(
+    streams: &mut HashMap<StreamId, Handle>,
+    stream: StreamId,
+    frames: &UnboundedSender<ServerFrame>,
+) {
+    if streams.get(&stream).is_some_and(|handle| handle.udp) {
+        return;
+    }
+    if let Some(handle) = streams.remove(&stream) {
+        handle.task.abort();
+        eprintln!("#{stream} sent more than the relay holds, reset");
+        let _ = frames.send(ServerFrame::Reset { stream });
+    }
 }
 
 /// Why a session ended.
@@ -124,8 +143,11 @@ pub async fn run(
                             ending = CloseCode::Protocol;
                             break;
                         }
-                        if let Some(handle) = streams.get(&stream) {
-                            let _ = handle.commands.send(Command::Data(data));
+                        let full = streams
+                            .get(&stream)
+                            .is_some_and(|handle| !handle.commands.send(Command::Data(data)));
+                        if full {
+                            overflowed(&mut streams, stream, &frames);
                         }
                         continue;
                     }
@@ -134,14 +156,17 @@ pub async fn run(
                             ending = CloseCode::Protocol;
                             break;
                         }
-                        if let Some(handle) = streams.get(&stream) {
-                            let _ = handle.commands.send(Command::SendTo { port, peer, data });
+                        let full = streams.get(&stream).is_some_and(|handle| {
+                            !handle.commands.send(Command::SendTo { port, peer, data })
+                        });
+                        if full {
+                            overflowed(&mut streams, stream, &frames);
                         }
                         continue;
                     }
                     ClientFrame::ShutdownWrite { stream } => {
                         if let Some(handle) = streams.get(&stream) {
-                            let _ = handle.commands.send(Command::ShutdownWrite);
+                            handle.commands.send(Command::ShutdownWrite);
                         }
                         continue;
                     }
@@ -191,7 +216,8 @@ pub async fn run(
                     let _ = frames.send(ServerFrame::Failed { stream, reason });
                     continue;
                 }
-                let (commands, commands_rx) = unbounded_channel();
+                let udp = matches!(kind, Kind::Udp { .. });
+                let (commands, commands_rx) = stream::commands();
                 let credit = Arc::new(Credit::new(window));
                 let links = Links { out: frames.clone(), commands: commands_rx, done: done.clone() };
                 let task = tokio::spawn(stream::run(
@@ -201,7 +227,7 @@ pub async fn run(
                     links,
                     accepted.clone(),
                 ));
-                streams.insert(stream, Handle { commands, credit, task });
+                streams.insert(stream, Handle { commands, udp, credit, task });
             }
             Some(id) = finished.recv() => {
                 streams.remove(&id);
@@ -219,7 +245,7 @@ pub async fn run(
                     port: connection.from.port(),
                     peer: stream::peer_of(connection.from.ip()),
                 });
-                let (commands, commands_rx) = unbounded_channel();
+                let (commands, commands_rx) = stream::commands();
                 let credit = Arc::new(Credit::new(connection.window));
                 let links = Links { out: frames.clone(), commands: commands_rx, done: done.clone() };
                 let task = tokio::spawn(stream::run_accepted(
@@ -228,7 +254,7 @@ pub async fn run(
                     credit.clone(),
                     links,
                 ));
-                streams.insert(id, Handle { commands, credit, task });
+                streams.insert(id, Handle { commands, udp: false, credit, task });
             }
             _ = ping.tick() => {
                 // The browser answers the ping itself but never shows it to the page, which

@@ -108,7 +108,7 @@ The relay is a proxy to anywhere its host can reach, and any web page can open a
 - `--allow-inbound` lets guests host: a UDP socket gets the guest's own port when it is free (any port otherwise) and hears from anyone, and `LISTEN` opens that port on every interface, IPv4 and IPv6, failing with reason 5 when it is taken. Reaching it from the Internet is up to the user's router.
 - `--port`, `--allow-origin` and `--allow-private` cover the remaining cases.
 - The settings file (see [Settings](#settings)) holds the same four choices; a flag sets its choice for one run, over the file.
-- Limits: 256 streams per WebSocket (an open over it is reason 4; an accepted connection over it is dropped), a `window` capped at 1 MiB, 16 KiB of `DATA` per frame, 65,507 bytes per datagram, and per WebSocket message a full datagram with its header.
+- Limits: 256 streams per WebSocket (an open over it is reason 4; an accepted connection over it is dropped), a `window` capped at 1 MiB, 16 KiB of `DATA` per frame, 65,507 bytes per datagram, and per WebSocket message a full datagram with its header. A stream holds at most 4 MiB of `DATA` or datagrams the relay has not yet taken up: a TCP connection or listener sent past that is `RESET`, and a UDP socket drops the datagram. The page's own limit (see [Flow control](#flow-control)) keeps it far below that.
 
 ## Settings
 

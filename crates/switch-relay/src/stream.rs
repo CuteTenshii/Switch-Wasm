@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -91,6 +91,11 @@ impl Drop for Reader {
     }
 }
 
+/// Most bytes of `DATA` and `SEND_TO` a stream may have waiting for it. The page keeps far
+/// less unacknowledged; only a page that ignores `SENT`, or sends to a stream that takes
+/// nothing, such as a listener, gets here.
+pub const MAX_BACKLOG: usize = 4 << 20;
+
 /// What the session tells a stream to do.
 pub enum Command {
     Data(Vec<u8>),
@@ -100,6 +105,66 @@ pub enum Command {
         peer: Peer,
         data: Vec<u8>,
     },
+}
+
+impl Command {
+    fn len(&self) -> usize {
+        match self {
+            Command::Data(data) | Command::SendTo { data, .. } => data.len(),
+            Command::ShutdownWrite => 0,
+        }
+    }
+}
+
+/// A stream's command queue, from the session's end.
+pub struct Commands {
+    sender: UnboundedSender<Command>,
+    backlog: Arc<AtomicUsize>,
+}
+
+impl Commands {
+    /// Queue `command`; `false`, with nothing queued, when it would take the stream's backlog
+    /// past [`MAX_BACKLOG`].
+    pub fn send(&self, command: Command) -> bool {
+        let len = command.len();
+        let fits = self
+            .backlog
+            .try_update(Relaxed, Relaxed, |held| {
+                held.checked_add(len).filter(|&total| total <= MAX_BACKLOG)
+            })
+            .is_ok();
+        if fits {
+            let _ = self.sender.send(command);
+        }
+        fits
+    }
+}
+
+/// A stream's command queue, from the stream's end.
+pub struct CommandQueue {
+    receiver: UnboundedReceiver<Command>,
+    backlog: Arc<AtomicUsize>,
+}
+
+impl CommandQueue {
+    async fn recv(&mut self) -> Option<Command> {
+        let command = self.receiver.recv().await?;
+        self.backlog.fetch_sub(command.len(), Relaxed);
+        Some(command)
+    }
+}
+
+/// A new stream's command queue.
+pub fn commands() -> (Commands, CommandQueue) {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let backlog = Arc::new(AtomicUsize::new(0));
+    (
+        Commands {
+            sender,
+            backlog: backlog.clone(),
+        },
+        CommandQueue { receiver, backlog },
+    )
 }
 
 pub enum Kind {
@@ -133,7 +198,7 @@ pub struct Accepted {
 /// Where a stream's frames go, and who hears when it ends.
 pub struct Links {
     pub out: UnboundedSender<ServerFrame>,
-    pub commands: UnboundedReceiver<Command>,
+    pub commands: CommandQueue,
     pub done: UnboundedSender<StreamId>,
 }
 
@@ -301,7 +366,7 @@ async fn pump_tcp(
     socket: TcpStream,
     credit: Arc<Credit>,
     out: UnboundedSender<ServerFrame>,
-    mut commands: UnboundedReceiver<Command>,
+    mut commands: CommandQueue,
 ) {
     let (mut reader, mut writer) = socket.into_split();
     let broke = Arc::new(Notify::new());
@@ -430,7 +495,7 @@ async fn pump_udp(
     policy: Arc<Policy>,
     credit: Arc<Credit>,
     out: UnboundedSender<ServerFrame>,
-    mut commands: UnboundedReceiver<Command>,
+    mut commands: CommandQueue,
 ) {
     let sockets = Arc::new(sockets);
     // Each host sent to, and the name the guest gave it, if it gave one.

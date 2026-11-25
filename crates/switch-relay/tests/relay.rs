@@ -1071,3 +1071,34 @@ async fn a_change_that_is_not_one_is_refused() {
         ServerFrame::SettingsRefused(SettingsRefusal::Invalid)
     );
 }
+
+#[tokio::test]
+async fn a_stream_sent_more_than_the_relay_holds_is_reset() {
+    let mut socket = page(&inbound_relay().await).await;
+    // A listener takes no data, so everything sent to it waits.
+    let listen = ClientFrame::Listen {
+        stream: 1,
+        port: 0,
+        window: 100,
+    };
+    send(&mut socket, listen).await;
+    assert_eq!(
+        next(&mut socket).await,
+        ServerFrame::Connected { stream: 1 }
+    );
+    let chunk = vec![0u8; switch_relay_proto::MAX_DATA];
+    for _ in 0..switch_relay::MAX_BACKLOG / chunk.len() {
+        let data = ClientFrame::Data {
+            stream: 1,
+            data: chunk.clone(),
+        };
+        send(&mut socket, data).await;
+    }
+    quiet(&mut socket).await;
+    let data = ClientFrame::Data {
+        stream: 1,
+        data: vec![0],
+    };
+    send(&mut socket, data).await;
+    assert_eq!(next(&mut socket).await, ServerFrame::Reset { stream: 1 });
+}

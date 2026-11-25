@@ -21,6 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use config::Config;
 use futures_util::SinkExt;
+pub use stream::MAX_BACKLOG;
 
 /// How long the relay waits on a page before it gives up on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
