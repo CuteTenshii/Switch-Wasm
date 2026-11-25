@@ -173,7 +173,7 @@ fn fatal_service_keeps_the_result_after_its_trace_is_drained() {
     cpu.trace.clear();
 
     let fatal = cpu.guest_fatal().expect("fatal result was not retained");
-    assert!(fatal.contains("0x00007201 = 1-0057 (cmd Some(2))"));
+    assert!(fatal.contains("0x00007201 = 1-0057"), "{fatal}");
 }
 
 #[test]

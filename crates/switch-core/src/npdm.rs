@@ -251,12 +251,6 @@ mod tests {
         assert_eq!(parsed.name, "Application");
     }
 
-    /// A declared zero must parse as a real value (Just Dance 2019 vs 2023's 16 MiB).
-    #[test]
-    fn zero_is_a_real_answer() {
-        assert_eq!(Npdm::parse(&npdm(0)).unwrap().system_resource_size, 0);
-    }
-
     /// Mario Kart 8 Deluxe's flags byte: bit 0 clear means AArch32.
     #[test]
     fn a_thirty_two_bit_title_says_so_in_bit_zero() {

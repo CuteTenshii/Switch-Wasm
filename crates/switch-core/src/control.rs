@@ -685,8 +685,8 @@ mod tests {
         assert_eq!(nacp.isbn, "9781234567897");
         assert!(nacp.is_demo);
         assert_eq!(nacp.startup_user_account, StartupUserAccount::Required);
-        assert_eq!(nacp.screenshot.name(), "blocked");
-        assert_eq!(nacp.video_capture.name(), "enabled");
+        assert_eq!(nacp.screenshot, CaptureSupport::Screenshot(1));
+        assert_eq!(nacp.video_capture, CaptureSupport::Video(2));
         assert_eq!(nacp.user_account_save_data_size, 0x100_0000);
         assert_eq!(nacp.user_account_save_data_journal_size, 0x20_0000);
         assert_eq!(nacp.bcat_delivery_cache_storage_size, 0x40_0000);
@@ -705,7 +705,7 @@ mod tests {
         assert!(nacp.ratings.is_empty());
         assert!(!nacp.is_demo);
         assert_eq!(nacp.startup_user_account, StartupUserAccount::None);
-        assert_eq!(nacp.screenshot.name(), "allowed");
+        assert_eq!(nacp.screenshot, CaptureSupport::Screenshot(0));
     }
 
     #[test]

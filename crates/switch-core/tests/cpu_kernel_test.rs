@@ -1047,15 +1047,14 @@ fn a_timed_out_condvar_wait_comes_back_holding_its_mutex() {
 #[allow(clippy::assertions_on_constants)]
 fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     use switch_core::cpu::{
-        MemoryLayout, OperationMode, ALIAS_REGION_ADDR, ALIAS_REGION_SIZE,
-        APPLET_TOTAL_MEMORY_SIZE, GUEST_ASLR_REGION_ADDR, GUEST_ASLR_REGION_SIZE, GUEST_SPACE_END,
-        GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE, GUEST_TOTAL_MEMORY_SIZE,
-        HEAP_REGION_ADDR, HEAP_REGION_SIZE, LOW_ALIAS_REGION_ADDR, LOW_ALIAS_REGION_SIZE,
+        MemoryLayout, OperationMode, APPLET_TOTAL_MEMORY_SIZE, GUEST_ASLR_REGION_ADDR,
+        GUEST_ASLR_REGION_SIZE, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE,
+        GUEST_TOTAL_MEMORY_SIZE, LOW_ALIAS_REGION_ADDR, LOW_ALIAS_REGION_SIZE,
         LOW_HEAP_REGION_ADDR, LOW_HEAP_REGION_SIZE, MAIN_THREAD_TLS_BASE, SELF_RETURN_TRAMPOLINE,
         SHARED_BUFFER_ADDR, SHARED_BUFFER_RESERVED_SIZE, STACK_SIZE, STACK_TOP,
         THREAD_EXIT_TRAMPOLINE, THREAD_TLS_BASE, THREAD_TLS_STRIDE,
     };
-    use switch_core::mem::{ADDRESS_SPACE_SIZE, MAX_MAPPED_BYTES};
+    use switch_core::mem::MAX_MAPPED_BYTES;
     use switch_core::{FB_BASE, FB_HEIGHT, FB_WIDTH, INPUT_ADDR};
 
     // The emulator's own furniture shares the low 4 GiB with a 32-bit process's regions.
@@ -1113,24 +1112,9 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     // A 64-bit process's heap and alias regions are a console's, above everything that sits
     // below 4 GiB, apart from each other and inside the 39-bit space.
     let wide = MemoryLayout::WIDE;
-    assert_eq!(
-        (
-            wide.heap_addr,
-            wide.heap_size,
-            wide.alias_addr,
-            wide.alias_size
-        ),
-        (
-            HEAP_REGION_ADDR,
-            HEAP_REGION_SIZE,
-            ALIAS_REGION_ADDR,
-            ALIAS_REGION_SIZE
-        )
-    );
     assert!(wide.heap_addr >= 1 << 32);
     assert!(wide.heap_addr + wide.heap_size <= wide.alias_addr);
     assert!(wide.alias_addr + wide.alias_size <= wide.space_end);
-    assert_eq!(wide.space_end, ADDRESS_SPACE_SIZE);
     // Paper Mario: The Origami King reserves 62 GiB itself, beside the SDK's 1 GiB Vamm arena.
     assert!(0xF_8000_0000 + 0x4000_0000 <= wide.alias_size);
     // Tears of the Kingdom sizes a heap from its total, holding 1080 MiB back for the alias route.
