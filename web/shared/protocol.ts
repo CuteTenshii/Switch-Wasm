@@ -454,9 +454,11 @@ export interface SliceReport {
   housekeeping: Housekeeping | null;
 }
 
-// `log` is unprompted worker output, routed through the page's log; `slice` and
-// `loop_failed` come from the worker's run loop.
+// `reply` answers the `CallRequest` with its id; `log` is unprompted worker output, routed through
+// the page's log; `slice` and `loop_failed` come from the worker's run loop.
 export type WorkerMessage =
+  | { type: 'reply'; id: number; ok: true; result: unknown }
+  | { type: 'reply'; id: number; ok: false; error: string }
   | { type: 'ready'; error?: string }
   | { type: 'log'; text: string; level: LogLevel }
   | { type: 'slice'; report: SliceReport }
@@ -479,6 +481,4 @@ export type WorkerMessage =
   // The link to the relay changed: `unreachable` is a socket that failed or closed.
   | { type: 'net_state'; state: NetState }
   // The relay's settings or an answer about changing them, as JSON (`net/settings.rs`).
-  | { type: 'net_settings'; json: string }
-  | { id: number; ok: true; result: unknown }
-  | { id: number; ok: false; error: string };
+  | { type: 'net_settings'; json: string };

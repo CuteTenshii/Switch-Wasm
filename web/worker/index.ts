@@ -17,7 +17,7 @@ import readerUrl from './reader.ts?worker&url';
 // `self` is typed as the shared WorkerGlobalScope, which lacks postMessage.
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
-function reply(message: WorkerMessage, transfer?: Transferable[]): void {
+function post(message: WorkerMessage, transfer?: Transferable[]): void {
   if (transfer) ctx.postMessage(message, transfer);
   else ctx.postMessage(message);
 }
@@ -47,11 +47,11 @@ ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {
       result.then(
         (value: unknown) => {
           flushLog();
-          reply({ id, ok: true, result: value });
+          post({ type: 'reply', id, ok: true, result: value });
         },
         (err: unknown) => {
           flushLog();
-          reply({ id, ok: false, error: explainFailure(err) });
+          post({ type: 'reply', id, ok: false, error: explainFailure(err) });
         },
       );
       return;
@@ -60,11 +60,11 @@ ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {
     flushLog();
     const stopped = cmd === 'run' && typeof result === 'number' && result < Number(args[0]);
     if (result instanceof Uint8Array) {
-      reply({ id, ok: true, result }, [result.buffer as ArrayBuffer]);
+      post({ type: 'reply', id, ok: true, result }, [result.buffer as ArrayBuffer]);
     } else if (result && typeof result === 'object' && 'error' in result) {
-      reply({ id, ok: false, error: String((result).error) });
+      post({ type: 'reply', id, ok: false, error: String((result).error) });
     } else {
-      reply({ id, ok: true, result });
+      post({ type: 'reply', id, ok: true, result });
     }
     if (cmd === 'run') {
       paint();
@@ -72,7 +72,7 @@ ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {
       reportActivity(stopped);
     }
   } catch (err) {
-    reply({ id, ok: false, error: explainFailure(err) });
+    post({ type: 'reply', id, ok: false, error: explainFailure(err) });
   }
 };
 
@@ -92,8 +92,8 @@ void (async () => {
     switch_set_reader(reader);
     startCores(module, core.memory);
     await readerRunning;
-    reply({ type: 'ready' });
+    post({ type: 'ready' });
   } catch (err) {
-    reply({ type: 'ready', error: String(err) });
+    post({ type: 'ready', error: String(err) });
   }
 })();

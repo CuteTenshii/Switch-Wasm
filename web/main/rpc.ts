@@ -104,15 +104,15 @@ export function initWorker(): void {
   });
   worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
     const d = e.data;
-    if (!('type' in d)) {
-      const p = pending.get(d.id);
-      if (!p) return;
-      pending.delete(d.id);
-      if (d.ok) p.resolve(d.result);
-      else p.reject(new Error(d.error || 'unknown error'));
-      return;
-    }
     switch (d.type) {
+      case 'reply': {
+        const p = pending.get(d.id);
+        if (!p) break;
+        pending.delete(d.id);
+        if (d.ok) p.resolve(d.result);
+        else p.reject(new Error(d.error || 'unknown error'));
+        break;
+      }
       case 'log':
         log(d.text, d.level);
         break;
