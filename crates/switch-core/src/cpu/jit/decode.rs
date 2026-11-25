@@ -843,7 +843,7 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
                 wb,
             );
         }
-        return Op::SimdLoadStore { insn };
+        return decode_vec_load_store(insn, rn).unwrap_or(Op::SimdLoadStore { insn });
     }
 
     let opc = ((insn >> 22) & 0b11) as u8;
@@ -926,9 +926,104 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
     Op::Interpret { insn }
 }
 
+/// The immediate-offset SIMD&FP register and S/D pair forms, as `try_simd_load_store`
+/// reads them; `None` leaves the rest, the reserved encodings included, to it.
+fn decode_vec_load_store(insn: u32, rn: u8) -> Option<Op> {
+    let rt = (insn & 0x1F) as u8;
+    let load = (insn >> 22) & 1 == 1;
+    match (insn >> 27) & 0b111 {
+        0b111 => {
+            let (sz, opc) = ((insn >> 30) & 0b11, (insn >> 22) & 0b11);
+            let log2 = match (sz, opc) {
+                (_, 0b00 | 0b01) => sz as u8,
+                (0b00, 0b10 | 0b11) => 4,
+                _ => return None,
+            };
+            let (wb, offset) = match (insn >> 24) & 0b11 {
+                0b01 => (Wb::None, (((insn >> 10) & 0xFFF) << log2) as i32),
+                0b00 if (insn >> 21) & 1 == 0 => {
+                    let wb = match (insn >> 10) & 0b11 {
+                        0b00 => Wb::None,
+                        0b01 => Wb::Post,
+                        0b11 => Wb::Pre,
+                        _ => return None,
+                    };
+                    (wb, sext_u64((insn >> 12) & 0x1FF, 9) as i32)
+                }
+                _ => return None,
+            };
+            Some(Op::VecImm {
+                insn,
+                rt,
+                rn,
+                log2,
+                load,
+                wb,
+                offset,
+            })
+        }
+        0b101 if (insn >> 25) & 1 == 0 => {
+            let log2 = match (insn >> 30) & 0b11 {
+                0b00 => 2u8,
+                0b01 => 3,
+                _ => return None,
+            };
+            let wb = match (insn >> 23) & 0b11 {
+                0b01 => Wb::Post,
+                0b11 => Wb::Pre,
+                _ => Wb::None,
+            };
+            Some(Op::VecPair {
+                insn,
+                rt,
+                rt2: ((insn >> 10) & 0x1F) as u8,
+                rn,
+                log2,
+                load,
+                wb,
+                offset: (sext_u64((insn >> 15) & 0x7F, 7) as i16) << log2,
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simd_register_loads_and_stores_decode_to_their_own_ops() {
+        // ldr q1, [x2, #16]! ; ldur s3, [x2, #-4] ; str b5, [x3, #40] ; ldr d14, [sp, #8]
+        for insn in [0x3cc10c41u32, 0xbc5fc043, 0x3d00a065, 0xfd4007ee] {
+            assert!(
+                matches!(decode_load_store(insn, 0), Op::VecImm { .. }),
+                "{insn:#010x}"
+            );
+        }
+        // ldp d10, d11, [x2], #-32 ; stnp d10, d11, [x3, #80] ; ldnp s12, s13, [x2, #4]
+        for insn in [0x6cfe2c4au32, 0x6c052c6a, 0x2c40b44c] {
+            assert!(
+                matches!(decode_load_store(insn, 0), Op::VecPair { .. }),
+                "{insn:#010x}"
+            );
+        }
+        // ldr q0, [x2, x1] (register offset) and ld1 {v0.16b}, [x2] keep the decoder.
+        for insn in [0x3ce16840u32, 0x4c407040] {
+            assert!(
+                matches!(decode_load_store(insn, 0), Op::SimdLoadStore { .. }),
+                "{insn:#010x}"
+            );
+        }
+        match decode_load_store(0x6cfe2c4a, 0) {
+            Op::VecPair { offset, wb, .. } => assert_eq!((offset, wb), (-32, Wb::Post)),
+            _ => unreachable!(),
+        }
+        match decode_load_store(0x3d00a065, 0) {
+            Op::VecImm { offset, log2, .. } => assert_eq!((offset, log2), (40, 0)),
+            _ => unreachable!(),
+        }
+    }
 
     #[test]
     fn an_update_compare_and_branch_is_one_exit() {

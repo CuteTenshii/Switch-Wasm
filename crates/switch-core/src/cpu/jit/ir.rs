@@ -32,6 +32,29 @@ pub(in crate::cpu) enum Op {
     SimdLoadStore {
         insn: u32,
     },
+    /// SIMD&FP `LDR`/`STR`/`LDUR`/`STUR` of one B, H, S, D or Q register (`log2` 0 to 4)
+    /// at an immediate offset. `insn` is for the emitter, which writes from the encoding.
+    VecImm {
+        insn: u32,
+        rt: u8,
+        rn: u8,
+        log2: u8,
+        load: bool,
+        wb: Wb,
+        offset: i32,
+    },
+    /// SIMD&FP `LDP`/`STP`/`LDNP`/`STNP` of S or D registers (`log2` 2 or 3); Q pairs are
+    /// [`Op::Pair`]. `insn` is for the emitter.
+    VecPair {
+        insn: u32,
+        rt: u8,
+        rt2: u8,
+        rn: u8,
+        log2: u8,
+        load: bool,
+        wb: Wb,
+        offset: i16,
+    },
 
     /// A precomputed value: `MOVZ`/`MOVN`, `ADR`/`ADRP`.
     MovConst {

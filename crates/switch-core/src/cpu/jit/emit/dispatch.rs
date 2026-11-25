@@ -609,7 +609,9 @@ impl Emitter<'_> {
                     self.simd(insn)
                 }
             }
-            Op::SimdLoadStore { insn } => self.simd_load_store(insn, retired),
+            Op::SimdLoadStore { insn } | Op::VecImm { insn, .. } | Op::VecPair { insn, .. } => {
+                self.simd_load_store(insn, retired)
+            }
             Op::LoadLiteral { rt, addr, acc } => {
                 self.f.i32_const(addr as i32);
                 self.set_addr32();

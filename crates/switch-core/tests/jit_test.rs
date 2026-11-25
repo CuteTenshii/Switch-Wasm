@@ -718,3 +718,65 @@ fn simd_loads_and_stores_match_the_interpreter() {
         0x0123_4567_89AB_CDEF
     );
 }
+
+/// [`loaded`] with [`DATA`] filled with distinct bytes, so loads have something to tell apart.
+fn loaded_with_data(code: &[u32], jit: bool) -> Cpu {
+    let cpu = loaded(code, jit);
+    let pattern: Vec<u8> = (0..DATA_LEN).map(|i| (i * 7 + 3) as u8).collect();
+    cpu.mem.write_bytes(u64::from(DATA), &pattern).unwrap();
+    cpu
+}
+
+#[test]
+fn simd_register_loads_and_stores_match_at_every_step_budget() {
+    // llvm-mc:
+    //   movz x2, #0x8000 ; movz x3, #0x8100
+    //   ldr q0, [x2] ; ldr q1, [x2, #16]! ; ldr d2, [x2], #8 ; ldur s3, [x2, #-4]
+    //   ldr h4, [x2, #6] ; ldr b5, [x2, #3]
+    //   str q0, [x3] ; str d2, [x3, #16]! ; str s3, [x3], #-8 ; stur h4, [x3, #-3]
+    //   str b5, [x3, #40] ; str q1, [x3, #64]
+    //   ldp s6, s7, [x2] ; ldp d8, d9, [x2, #16]! ; ldp d10, d11, [x2], #-32
+    //   stp s6, s7, [x3, #8] ; stp d8, d9, [x3, #-16]! ; stnp d10, d11, [x3, #80]
+    //   ldnp s12, s13, [x2, #4] ; stp d8, d9, [x3], #24
+    //   mov sp, x2 ; ldr d14, [sp, #8] ; str q14, [sp, #16]! ; ldr h15, [sp], #2 ; b .
+    let code = [
+        0xd2900002, 0xd2902003, 0x3dc00040, 0x3cc10c41, 0xfc408442, 0xbc5fc043, 0x7d400c44,
+        0x3d400c45, 0x3d800060, 0xfc010c62, 0xbc1f8463, 0x7c1fd064, 0x3d00a065, 0x3d801061,
+        0x2d401c46, 0x6dc12448, 0x6cfe2c4a, 0x2d011c66, 0x6dbf2468, 0x6c052c6a, 0x2c40b44c,
+        0x6c81a468, 0x9100005f, 0xfd4007ee, 0x3c810fee, 0x7c4027ef, 0x14000000,
+    ];
+    for steps in 1..=code.len() as u64 + 2 {
+        let mut interpreted = loaded_with_data(&code, false);
+        let mut translated = loaded_with_data(&code, true);
+        let a = interpreted.run(steps).unwrap();
+        let b = translated.run(steps).unwrap();
+        let what = format!("SIMD loads and stores, {steps} steps");
+        assert_eq!(a, b, "{what}: run reports differ");
+        assert_same(&snapshot(&interpreted), &snapshot(&translated), &what);
+    }
+    let mut cpu = loaded_with_data(&code, true);
+    cpu.run(code.len() as u64).unwrap();
+    assert_ne!(cpu.read_vreg(1), 0, "the loads read the pattern");
+    assert_eq!(
+        cpu.jit_stats().interpreted,
+        0,
+        "every instruction has an op"
+    );
+}
+
+#[test]
+fn a_simd_load_across_into_an_unmapped_page_faults_as_the_interpreter_does() {
+    // movz x2, #0x8ff8 ; ldr q0, [x2]: the second half is past the mapped data page.
+    let code = [0xd291ff02u32, 0x3dc00040];
+    let mut interpreted = loaded(&code, false);
+    let mut translated = loaded(&code, true);
+    let a = interpreted.run(2).unwrap_err();
+    let b = translated.run(2).unwrap_err();
+    assert_eq!(a.to_string(), b.to_string(), "fault messages differ");
+    assert_eq!(interpreted.get_pc(), translated.get_pc());
+    assert_eq!(
+        translated.get_pc(),
+        CODE + 4,
+        "the pc should be on the load"
+    );
+}

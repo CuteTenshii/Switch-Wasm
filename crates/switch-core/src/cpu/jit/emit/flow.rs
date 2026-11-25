@@ -597,7 +597,9 @@ fn flag_effect(op: &Op) -> FlagEffect {
         | Op::PairLoad64 { .. }
         | Op::PairStore64 { .. }
         | Op::LoadLiteral { .. }
-        | Op::SimdLoadStore { .. } => FlagEffect::Neutral,
+        | Op::SimdLoadStore { .. }
+        | Op::VecImm { .. }
+        | Op::VecPair { .. } => FlagEffect::Neutral,
         _ => FlagEffect::Live,
     }
 }

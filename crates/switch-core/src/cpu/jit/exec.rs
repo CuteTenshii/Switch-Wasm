@@ -819,6 +819,41 @@ impl Cpu {
                     self.execute(insn, pc.wrapping_add(4))?;
                 }
             }
+            Op::VecImm {
+                rt,
+                rn,
+                log2,
+                load,
+                wb,
+                offset,
+                ..
+            } => {
+                let (addr, wb_val) = Self::indexed(self.reg_at(rn), i64::from(offset), wb);
+                if !self.vec_access_fast(addr, rt, log2, load) {
+                    return self.exec_op_slow(op);
+                }
+                if let Some(v) = wb_val {
+                    self.set_reg_at(rn, v);
+                }
+            }
+            Op::VecPair {
+                rt,
+                rt2,
+                rn,
+                log2,
+                load,
+                wb,
+                offset,
+                ..
+            } => {
+                let (addr, wb_val) = Self::indexed(self.reg_at(rn), i64::from(offset), wb);
+                if !self.vec_pair_fast(addr, rt, rt2, log2, load) {
+                    return self.exec_op_slow(op);
+                }
+                if let Some(v) = wb_val {
+                    self.set_reg_at(rn, v);
+                }
+            }
 
             Op::MovConst { rd, val } => self.set_reg_at(rd, val),
             Op::Mov32 { rd, rn } => self.copy_reg(rd, rn, false),
@@ -1235,7 +1270,154 @@ impl Cpu {
                 offset,
                 wb,
             } => self.pair(rt, rt2, rn, offset, PairKind::Store64, wb),
+            Op::VecImm {
+                rt,
+                rn,
+                log2,
+                load,
+                wb,
+                offset,
+                ..
+            } => {
+                let (addr, wb_val) = Self::indexed(self.reg_at(rn), i64::from(offset), wb);
+                if load {
+                    self.vregs[rt as usize] = match log2 {
+                        0 => u128::from(self.mem.read_u8(addr)?),
+                        1 => u128::from(self.mem.read_u16(addr)?),
+                        2 => u128::from(self.mem.read_u32(addr)?),
+                        3 => u128::from(self.mem.read_u64(addr)?),
+                        _ => self.load_q(addr)?,
+                    };
+                } else {
+                    let v = self.vregs[rt as usize];
+                    match log2 {
+                        0 => self.mem.write_u8(addr, v as u8)?,
+                        1 => self.mem.write_u16(addr, v as u16)?,
+                        2 => self.mem.write_u32(addr, v as u32)?,
+                        3 => self.mem.write_u64(addr, v as u64)?,
+                        _ => self.store_q(addr, v)?,
+                    }
+                }
+                if let Some(v) = wb_val {
+                    self.set_reg_at(rn, v);
+                }
+                Ok(())
+            }
+            Op::VecPair {
+                rt,
+                rt2,
+                rn,
+                log2,
+                load,
+                wb,
+                offset,
+                ..
+            } => {
+                let (addr, wb_val) = Self::indexed(self.reg_at(rn), i64::from(offset), wb);
+                let second = addr.wrapping_add(1 << log2);
+                // Both read before either is written, as `try_simd_load_store` does.
+                if load {
+                    let (v0, v1) = if log2 == 2 {
+                        (
+                            u128::from(self.mem.read_u32(addr)?),
+                            u128::from(self.mem.read_u32(second)?),
+                        )
+                    } else {
+                        (
+                            u128::from(self.mem.read_u64(addr)?),
+                            u128::from(self.mem.read_u64(second)?),
+                        )
+                    };
+                    self.vregs[rt as usize] = v0;
+                    self.vregs[rt2 as usize] = v1;
+                } else {
+                    let (v0, v1) = (self.vregs[rt as usize], self.vregs[rt2 as usize]);
+                    if log2 == 2 {
+                        self.mem.write_u32(addr, v0 as u32)?;
+                        self.mem.write_u32(second, v1 as u32)?;
+                    } else {
+                        self.mem.write_u64(addr, v0 as u64)?;
+                        self.mem.write_u64(second, v1 as u64)?;
+                    }
+                }
+                if let Some(v) = wb_val {
+                    self.set_reg_at(rn, v);
+                }
+                Ok(())
+            }
             _ => unreachable!("only the fast load and store arms fall back to the full path"),
+        }
+    }
+
+    /// One SIMD&FP register loaded or stored via `peek`/`poke`; a load zeroes the bits
+    /// above the element. Declining leaves all state unchanged.
+    #[inline(always)]
+    fn vec_access_fast(&mut self, addr: u64, rt: u8, log2: u8, load: bool) -> bool {
+        let mem = &self.mem;
+        if load {
+            let loaded = match log2 {
+                0 => mem.peek(addr).map(|[b]: [u8; 1]| u128::from(b)),
+                1 => mem.peek(addr).map(|b| u128::from(u16::from_le_bytes(b))),
+                2 => mem.peek(addr).map(|b| u128::from(u32::from_le_bytes(b))),
+                3 => mem.peek(addr).map(|b| u128::from(u64::from_le_bytes(b))),
+                _ => mem.peek(addr).map(u128::from_le_bytes),
+            };
+            match loaded {
+                Some(value) => {
+                    self.vregs[rt as usize] = value;
+                    true
+                }
+                None => false,
+            }
+        } else {
+            let v = self.vregs[rt as usize];
+            match log2 {
+                0 => mem.poke(addr, [v as u8]),
+                1 => mem.poke(addr, (v as u16).to_le_bytes()),
+                2 => mem.poke(addr, (v as u32).to_le_bytes()),
+                3 => mem.poke(addr, (v as u64).to_le_bytes()),
+                _ => mem.poke(addr, v.to_le_bytes()),
+            }
+        }
+    }
+
+    /// [`Cpu::vec_access_fast`] for an S or D pair in one page.
+    #[inline(always)]
+    fn vec_pair_fast(&mut self, addr: u64, rt: u8, rt2: u8, log2: u8, load: bool) -> bool {
+        let mem = &self.mem;
+        if load {
+            let loaded = if log2 == 2 {
+                mem.peek::<8>(addr).map(|b| {
+                    let (first, second) = b.split_at(4);
+                    (
+                        u128::from(u32::from_le_bytes(first.try_into().unwrap())),
+                        u128::from(u32::from_le_bytes(second.try_into().unwrap())),
+                    )
+                })
+            } else {
+                mem.peek::<16>(addr).map(|b| {
+                    let (first, second) = b.split_at(8);
+                    (
+                        u128::from(u64::from_le_bytes(first.try_into().unwrap())),
+                        u128::from(u64::from_le_bytes(second.try_into().unwrap())),
+                    )
+                })
+            };
+            match loaded {
+                Some((v0, v1)) => {
+                    self.vregs[rt as usize] = v0;
+                    self.vregs[rt2 as usize] = v1;
+                    true
+                }
+                None => false,
+            }
+        } else {
+            let (v0, v1) = (self.vregs[rt as usize], self.vregs[rt2 as usize]);
+            if log2 == 2 {
+                mem.poke_pair(addr, (v0 as u32).to_le_bytes(), (v1 as u32).to_le_bytes())
+            } else {
+                mem.poke_pair(addr, (v0 as u64).to_le_bytes(), (v1 as u64).to_le_bytes())
+            }
         }
     }
 
