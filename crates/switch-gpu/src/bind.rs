@@ -1978,9 +1978,9 @@ impl Gpu {
             depth_or_array_layers: upload.layers.max(1),
         };
         let format = wgpu::TextureFormat::Depth32Float;
-        let texture = self.blank_shadow_texture(upload);
         // The staging image `load_depth` reads: `r32float`.
         let depths = self.shadow_depths(upload)?;
+        let texture = self.blank_shadow_texture(upload);
         let staging = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shadow upload"),
             size,
@@ -2006,9 +2006,12 @@ impl Gpu {
             },
             size,
         );
-        self.load_depth(&texture, &staging, format)
-            .map_err(|e| format!("{e:?}"))?;
+        let loaded = self.load_depth(&texture, &staging, format);
         staging.destroy();
+        if let Err(e) = loaded {
+            texture.destroy();
+            return Err(format!("{e:?}"));
+        }
         Ok(texture)
     }
 

@@ -490,6 +490,8 @@ impl Gpu {
                     size,
                 );
                 self.submit_with_batch(encoder);
+                // Now, since an attachment failing below drops it.
+                self.scratch.push(Scratch::Texture(texture.clone()));
                 Some((held, texture, size))
             }
             _ => None,
@@ -845,7 +847,6 @@ impl Gpu {
                     *size,
                 );
             }
-            self.scratch.push(Scratch::Texture(texture.clone()));
         }
         self.later_instances += u64::from(p.instance > 0);
         self.batched_draws += 1;

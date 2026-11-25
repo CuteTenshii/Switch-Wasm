@@ -200,11 +200,6 @@ impl Gpu {
             (entry, [round.to_bits(), u32::from(is_srgb(target.format))])
         };
         let format = device_attachment_format(self.features(), target.format).ok()?;
-        let stencil = if packed {
-            Some(self.stencil_words(&source, ctx)?)
-        } else {
-            None
-        };
         // A surface about to be written whole need not be uploaded.
         if (x0, y0, x1, y1) == (0, 0, target.width, target.height) {
             self.hold_blank(&target).ok()?;
@@ -238,6 +233,18 @@ impl Gpu {
         }
         bytes.resize(48, 0);
         let parameters = self.buffer("blit", &bytes, wgpu::BufferUsages::UNIFORM);
+        if !self.space.held.contains_key(&source.addr)
+            || !self.space.held.contains_key(&target.addr)
+        {
+            return None;
+        }
+        // Made once nothing can turn the blit away, which would drop it undestroyed. Source
+        // and target do not overlap, so holding the target left the source's words as they were.
+        let stencil = if packed {
+            Some(self.stencil_words(&source, ctx)?)
+        } else {
+            None
+        };
         let source_texture = &self.space.held.get(&source.addr)?.texture;
         let source_view = source_texture.create_view(&wgpu::TextureViewDescriptor {
             aspect: if packed {

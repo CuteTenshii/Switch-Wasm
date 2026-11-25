@@ -5,7 +5,7 @@
 use crate::bind::pack_banks;
 use crate::convert::{device_attachment_format, storage_format};
 use crate::held::{spans_overlap, surface_span};
-use crate::readback::Readback;
+use crate::readback::{Readback, Scratch};
 use crate::{Feed, GlobalUpload, Gpu, Patch, Resource};
 use switch_core::gpu::compute::{self as software, Launch};
 use switch_core::gpu::engine::compute::EngineCompute;
@@ -553,6 +553,7 @@ impl Gpu {
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        self.scratch.push(Scratch::Buffer(buffer.clone()));
         Ok(ImageLayer::Words {
             texture,
             buffer,
@@ -644,12 +645,13 @@ impl Gpu {
         if let Some(held) = self.space.held.get_mut(&target.addr) {
             held.texture = texture.clone();
         }
+        self.scratch.push(Scratch::Texture(old));
         Ok(texture)
     }
 
     /// What a store to a null image lands in: one texel nothing reads.
     fn null_image(&mut self) -> wgpu::Texture {
-        self.device.create_texture(&wgpu::TextureDescriptor {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("null image"),
             size: wgpu::Extent3d {
                 width: 1,
@@ -662,7 +664,9 @@ impl Gpu {
             format: NULL_IMAGE_FORMAT,
             usage: wgpu::TextureUsages::STORAGE_BINDING,
             view_formats: &[],
-        })
+        });
+        self.scratch.push(Scratch::Texture(texture.clone()));
+        texture
     }
 
     /// Buffers shaders wrote on the device that guest memory does not have yet, oldest first:
@@ -771,6 +775,6 @@ fn compute_entries(layout: &Layout, globals: &[GlobalUpload]) -> Vec<wgpu::BindG
 }
 
 /// A word layer's row: its words, padded to the alignment a texture copy needs.
-fn word_row_bytes(width: u32) -> u32 {
+pub(crate) fn word_row_bytes(width: u32) -> u32 {
     (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
 }

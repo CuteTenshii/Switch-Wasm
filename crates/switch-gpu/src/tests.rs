@@ -2134,6 +2134,73 @@ fn a_compute_reduction_into_an_image_runs_on_the_device() {
     assert_eq!(device.image(), want, "the device");
 }
 
+/// What a launch makes for its storage images goes to the scratch list, which destroys it:
+/// a browser frees a dropped resource only on GC, and Firefox ran out of device memory first.
+#[test]
+fn a_compute_launch_hands_what_its_images_made_to_the_scratch_list() {
+    use crate::readback::Scratch;
+    use switch_core::gpu::renderer::Renderer;
+    use switch_core::gpu::testing::{
+        image_copy_program, image_reduce_program, ComputeHarness, IMAGE_COPY_SIZE,
+    };
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let (width, height) = IMAGE_COPY_SIZE;
+    let block = [width, height, 1];
+
+    // A reduction stores through a buffer of the image's words.
+    let mut reduce = ComputeHarness::new(&image_reduce_program(), [1, 1, 1], block, 0);
+    let engine = reduce.image_copy();
+    reduce.image_copy_words();
+    assert!(
+        gpu.dispatch(&engine, &mut reduce.ctx()).unwrap(),
+        "refused: {:?}",
+        gpu.compute_refusals
+    );
+    let words = u64::from(crate::compute::word_row_bytes(width)) * u64::from(height);
+    let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC;
+    assert!(
+        gpu.scratch
+            .iter()
+            .any(|made| matches!(made, Scratch::Buffer(buffer)
+            if buffer.size() == words && buffer.usage().contains(storage))),
+        "the image's words buffer was not handed over"
+    );
+
+    // A held surface made writable by a shader: the texture it held before is replaced. The
+    // two harnesses share addresses, so the first one's caches go with its address space.
+    gpu.submit_batch();
+    gpu.release_scratch();
+    gpu.address_space_closed(gpu.space_id);
+    let mut copy = ComputeHarness::new(&image_copy_program(), [1, 1, 1], block, 0);
+    let engine = copy.image_copy();
+    assert!(
+        gpu.dispatch(&engine, &mut copy.ctx()).unwrap(),
+        "refused: {:?}",
+        gpu.compute_refusals
+    );
+    let stored = gpu
+        .space
+        .held
+        .values()
+        .map(|held| held.texture.clone())
+        .find(|texture| {
+            texture
+                .usage()
+                .contains(wgpu::TextureUsages::STORAGE_BINDING)
+        })
+        .expect("the image is held as a storage texture");
+    assert!(
+        gpu.scratch
+            .iter()
+            .any(|made| matches!(made, Scratch::Texture(old)
+            if *old != stored && old.size() == stored.size() && old.format() == stored.format())),
+        "the texture the storage image replaced was not handed over"
+    );
+}
+
 /// The distinct subgroup sizes one 64-invocation workgroup runs with.
 fn subgroup_sizes(gpu: &super::Gpu) -> Vec<u32> {
     let module = gpu
