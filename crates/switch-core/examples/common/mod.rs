@@ -178,6 +178,9 @@ fn flags() -> &'static Flags {
 /// what the flags ask for: the trace channels and the dump directories. The core itself reads no
 /// environment.
 pub fn parse<C: Parser>(groups_of: impl FnOnce(&C) -> Flags) -> C {
+    // MangoHud's blacklist hides only its HUD: its NVML polling thread took 13% of a run's CPU.
+    // Set before any thread starts, so nothing reads the environment as it changes.
+    std::env::set_var("DISABLE_MANGOHUD", "1");
     let cli = C::parse();
     let flags = groups_of(&cli);
     let mut channels = flags.shared.trace.clone();
