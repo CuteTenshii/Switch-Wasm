@@ -205,8 +205,10 @@ impl Gpu {
         self.evict_written(ctx);
         let out = write(&mut self.software, ctx);
         let dirty = ctx.mem.dirty_gpu_pages();
+        // A stencil clear dirties every page of its surface; a list lookup per watched page was quadratic.
+        let written: std::collections::HashSet<u32> = dirty.iter().copied().collect();
         for held in self.space.held.values() {
-            for &page in held.watched.iter().filter(|page| dirty.contains(page)) {
+            for &page in held.watched.iter().filter(|page| written.contains(page)) {
                 ctx.mem.mark_gpu_page(u64::from(page) << PAGE_BITS);
             }
         }
