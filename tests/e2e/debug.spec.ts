@@ -72,3 +72,24 @@ test('the translation section counts the blocks a program ran', async ({ page })
   await bootElf(page, aarch64Elf([ASM.exitProcess]), 'halted');
   await expect(page.locator('#jit-translated')).toHaveText(/^[1-9][\d,.]*[MBT]?$/);
 });
+
+test('the threads section waits for a title, then ranks what it runs', async ({ page }) => {
+  const threads = page.locator('#threads-debug-section');
+  await expect(threads.locator('#threads-status')).toHaveText('Start a title to see its threads.');
+  await expect(threads.locator('#threads-table')).toBeHidden();
+
+  await bootElf(page, aarch64Elf([ASM.spin]), 'running');
+  const main = threads.locator('#threads-rows tr').first();
+  await expect(main.locator('th')).toContainText('0 main');
+  await expect(main.locator('th')).toContainText('running, priority');
+  await expect(main.locator('td').first()).toHaveText('100.0%');
+  // The second reading covers a known span, so it has a rate.
+  await expect(main.locator('td').nth(1)).toHaveText(/^[1-9][\d,.]*[MBT]?$/);
+  await expect(page.locator('#threads-badge')).toHaveText(/instructions\/s$/);
+
+  await page.locator('#btn-stop').click();
+  await expectState(page, 'idle');
+  await expect(threads.locator('#threads-status')).toBeVisible();
+  await expect(threads.locator('#threads-status')).toHaveText('Start a title to see its threads.');
+  await expect(threads.locator('#threads-table')).toBeHidden();
+});

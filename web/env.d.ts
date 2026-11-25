@@ -127,6 +127,7 @@ declare module '@core/switch_wasm.js' {
   export function switch_jit_stats_json(): string;
   export function switch_gpu_report_json(): string;
   export function switch_memory_json(): string;
+  export function switch_threads_json(): string;
   // `input.rs`, `keyboard.rs`, `users.rs`
   export function switch_set_touch(points: Uint32Array): void;
   export function switch_keyboard_answer(text: string | null): number;

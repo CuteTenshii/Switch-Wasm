@@ -1,7 +1,7 @@
 // The debug panel: instruction tracing, register dumps, and the translator and
 // renderer readouts.
 
-import type { GpuReport } from '../shared/protocol';
+import type { GpuReport, ThreadActivity, ThreadReading } from '../shared/protocol';
 import {
   displayMetrics, resetDisplayMetrics, type DisplayMetrics, type DisplayTiming,
 } from './display-metrics';
@@ -13,6 +13,7 @@ import { formatBytes } from './format';
 import { log } from './log';
 import { updateMemoryDebug } from './memory';
 import { call, hasSession } from './rpc';
+import { titleBooted } from './session';
 import { openPanel, setNote } from './shell';
 
 const traceCb = $<HTMLInputElement>('trace-cb');
@@ -34,6 +35,7 @@ function selectDebugGroup(name: string): void {
     if (hasSession()) void updateRenderDebug();
   }
   if (name === 'memory') void updateMemoryDebug();
+  if (name === 'cpu') void updateThreadsDebug();
 }
 
 for (const button of debugGroups) {
@@ -74,6 +76,84 @@ async function updateJitDebug(): Promise<void> {
   $('jit-entered-emitted').textContent = ofEntries(s.enteredEmitted ?? 0);
   $('jit-chained').textContent = ofEntries(s.chained ?? 0);
 }
+
+const threadsSection = $<HTMLDetailsElement>('threads-debug-section');
+
+function showThreadsStatus(text: string): void {
+  const status = $('threads-status');
+  status.textContent = text;
+  status.hidden = false;
+  $('threads-table').hidden = true;
+  $('threads-idle').hidden = true;
+  setNote('threads-badge', '');
+}
+
+function threadLabel(t: ThreadActivity): string {
+  const who = t.name ?? t.entry ?? (t.index === 0 ? 'main' : null);
+  return who ? `${t.index} ${who}` : String(t.index);
+}
+
+function threadRow(t: ThreadActivity, total: number, seconds: number | null): HTMLTableRowElement {
+  const name = el('th', null, threadLabel(t));
+  name.scope = 'row';
+  const switches = `${fmtCount(t.switches)} ${t.switches === 1 ? 'switch' : 'switches'}`;
+  name.append(
+    el('span', 'thread-detail', `${t.state}, priority ${t.priority}, ${switches}`),
+    el('span', 'thread-detail at', t.at),
+  );
+  const tr = el('tr');
+  tr.append(
+    name,
+    el('td', null, total ? `${((100 * t.ran) / total).toFixed(1)}%` : '-'),
+    el('td', null, seconds ? fmtCount(t.ran / seconds) : '-'),
+  );
+  return tr;
+}
+
+function showThreads(reading: ThreadReading): void {
+  const byWork = [...reading.threads].sort((a, b) => b.ran - a.ran || a.index - b.index);
+  const busy = byWork.filter((t) => t.ran > 0);
+  // An exited thread that did nothing in the reading is history, not load.
+  const idle = byWork.filter((t) => t.ran === 0 && t.state !== 'exited');
+  if (!busy.length && !idle.length) {
+    showThreadsStatus('Waiting for the first reading, a second after the title starts.');
+    return;
+  }
+  const total = busy.reduce((sum, t) => sum + t.ran, 0);
+  const status = $('threads-status');
+  status.hidden = busy.length > 0;
+  status.textContent = 'No thread ran in the last reading.';
+  $('threads-table').hidden = !busy.length;
+  $('threads-rows').replaceChildren(...busy.map((t) => threadRow(t, total, reading.seconds)));
+  $('threads-idle').hidden = !idle.length;
+  $('threads-idle-summary').textContent =
+    `${idle.length} ${idle.length === 1 ? 'thread' : 'threads'} did not run`;
+  $('threads-idle-list').replaceChildren(
+    ...idle.map((t) => el('li', null, `${threadLabel(t)}: ${t.state}, priority ${t.priority}`)),
+  );
+  setNote('threads-badge', reading.seconds ? `${fmtCount(total / reading.seconds)} instructions/s` : '');
+}
+
+async function updateThreadsDebug(): Promise<void> {
+  if (!titleBooted()) {
+    showThreadsStatus('Start a title to see its threads.');
+    return;
+  }
+  let reading: ThreadReading;
+  try {
+    reading = await call('threads');
+  } catch (err) {
+    showThreadsStatus(`Couldn't read the threads: ${String(err)}`);
+    return;
+  }
+  // The title may have ended while the worker answered.
+  if (titleBooted()) showThreads(reading);
+  else showThreadsStatus('Start a title to see its threads.');
+}
+
+threadsSection.addEventListener('toggle', () => {
+  if (threadsSection.open && onScreen(threadsSection)) void updateThreadsDebug();
+});
 
 const renderSection = $<HTMLDetailsElement>('render-debug-section');
 
@@ -207,6 +287,7 @@ renderSection.addEventListener('toggle', () => {
 });
 // Live sections ask the worker only while someone can see them.
 setInterval(() => {
+  if (threadsSection.open && onScreen(threadsSection)) void updateThreadsDebug();
   if (!hasSession()) return;
   if (renderSection.open && onScreen(renderSection)) void updateRenderDebug();
   if (onScreen(jitSection)) void updateJitDebug();

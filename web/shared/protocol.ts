@@ -93,6 +93,30 @@ export interface GpuReport {
   };
 }
 
+// One guest thread as the last activity report found it.
+export interface ThreadActivity {
+  // 0 is the main thread, the rest in creation order.
+  index: number;
+  // The `nn::os` name, quoted, or "unnamed, runs <function>".
+  name: string | null;
+  // As `module+offset`; null for the main thread.
+  entry: string | null;
+  // The pc and its callers.
+  at: string;
+  state: string;
+  priority: number;
+  running: boolean;
+  // Instructions retired and times scheduled over the reading.
+  ran: number;
+  switches: number;
+}
+
+// The last per-thread reading; `seconds` is null until one covers a known span.
+export interface ThreadReading {
+  seconds: number | null;
+  threads: ThreadActivity[];
+}
+
 export interface JitStats {
   enabled: boolean;
   blocks: number;
@@ -336,6 +360,7 @@ export interface Commands {
   ram(): RamUsage;
   memory(): MemoryReport;
   jitStats(): JitStats;
+  threads(): ThreadReading;
   gpuReport(): GpuReport;
   lastError(): string;
 

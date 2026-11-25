@@ -230,6 +230,34 @@
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
 }
+.threads-table th:first-child { width: 56%; }
+.threads-table th[scope="row"] {
+  color: var(--text);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.thread-detail {
+  display: block;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.thread-detail.at { font-family: var(--mono); }
+.threads-table tbody th,
+.threads-table tbody td { vertical-align: top; }
+.threads-idle { margin-top: 10px; }
+.threads-idle summary {
+  padding: 4px 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.threads-idle summary:hover { color: var(--text); }
+.threads-idle summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.threads-idle .debug-list { margin-top: 4px; }
+.threads-idle li + li { margin-top: 4px; }
 .memory-regions th:first-child { width: 62%; }
 .memory-regions th[scope="row"] { white-space: normal; }
 .memory-range {

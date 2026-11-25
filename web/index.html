@@ -352,6 +352,27 @@
         aria-pressed="false">Memory</button>
     </div>
 
+    <details class="section" id="threads-debug-section" data-debug-section="cpu" open>
+      <summary class="section-head">
+        <span class="section-title">Threads</span>
+        <info-tip text="The title's threads, busiest first, read once a second. Share counts instructions, not time: a thread running SIMD-heavy code costs more per instruction than one shuffling integers. Only the running process is listed, so a library applet on screen shows its own threads. While paused, the last second before the pause stays up."></info-tip>
+        <span class="section-note" id="threads-badge"></span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny" id="threads-status">Start a title to see its threads.</p>
+        <table class="debug-timings threads-table" id="threads-table" hidden>
+          <caption>Instructions retired over the last reading</caption>
+          <thead><tr><th scope="col">Thread</th><th scope="col">Share</th>
+            <th scope="col">Per second</th></tr></thead>
+          <tbody id="threads-rows"></tbody>
+        </table>
+        <details class="threads-idle" id="threads-idle" hidden>
+          <summary id="threads-idle-summary"></summary>
+          <ul class="debug-list" id="threads-idle-list"></ul>
+        </details>
+      </div>
+    </details>
+
     <details class="section" data-debug-section="cpu" open>
       <summary class="section-head">
         <span class="section-title">Tracing</span>

@@ -14,6 +14,7 @@ use crate::{container, nsp_file_source, session, Added, Dlc, Session};
 pub fn switch_end_title() {
     let s = session();
     s.cpu.end_title();
+    s.activity.forget_threads();
     crate::audio::drop_queued();
     crate::input::reset();
     s.control = None;

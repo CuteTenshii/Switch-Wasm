@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use switch_core::cpu::{AudioActivity, Cpu, GapKind, ThreadReport};
 use switch_core::gpu::activity::{Kind, Tally};
+use switch_core::json;
 use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::hostfiles::Io;
@@ -56,6 +57,21 @@ pub(crate) struct Reporter {
     idle_warned: HashMap<usize, u64>,
     /// Guest RAM and WebAssembly heap at the last memory line.
     memory: (u64, u64),
+    /// The last thread reading, kept for the debug panel because taking one drains the counters.
+    threads: Option<ThreadReading>,
+}
+
+impl Reporter {
+    /// The ended title's threads are no one's load now.
+    pub(crate) fn forget_threads(&mut self) {
+        self.threads = None;
+    }
+}
+
+/// Every thread as one report found it, with the seconds it covers (0 for the first).
+pub(crate) struct ThreadReading {
+    pub(crate) seconds: f64,
+    pub(crate) threads: Vec<ThreadReport>,
 }
 
 /// Write what changed since the last report into the log. `seconds` is the time since
@@ -72,6 +88,10 @@ fn report(cpu: &mut Cpu, reporter: &mut Reporter, seconds: f64) {
     let mut activity = cpu.nv.gpu.take_activity();
     gpu(&before, &now, seconds, activity.take());
     let threads = threads(cpu, reporter);
+    reporter.threads = Some(ThreadReading {
+        seconds,
+        threads: threads.clone(),
+    });
     fs(cpu, &before, &now);
     audio(&before.audio, &now.audio);
     problems(cpu, activity.take_refusals());
@@ -82,6 +102,35 @@ fn report(cpu: &mut Cpu, reporter: &mut Reporter, seconds: f64) {
         push(level, &line);
     }
     reporter.previous = now;
+}
+
+/// The last thread reading as JSON; `seconds` is null before one that covers a known span.
+pub(crate) fn threads_json(reporter: &Reporter) -> String {
+    let (seconds, threads) = match &reporter.threads {
+        Some(reading) => (
+            (reading.seconds > 0.0).then_some(reading.seconds),
+            &reading.threads[..],
+        ),
+        None => (None, &[][..]),
+    };
+    json::object(|o| {
+        o.field("seconds", seconds);
+        o.array("threads", |a| {
+            for t in threads {
+                a.object(|r| {
+                    r.field("index", t.index)
+                        .field("name", t.name.as_deref())
+                        .field("entry", t.entry.as_deref())
+                        .field("at", &t.at)
+                        .field("state", &t.state)
+                        .field("priority", t.priority)
+                        .field("running", t.running)
+                        .field("ran", t.ran)
+                        .field("switches", t.switches);
+                });
+            }
+        });
+    })
 }
 
 /// Up to this much read per file per report, with no failures, is a header read.

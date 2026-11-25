@@ -1,4 +1,4 @@
-//! Translator, GPU and memory reports.
+//! Translator, thread, GPU and memory reports.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -57,6 +57,12 @@ pub fn switch_gpu_lost() -> bool {
         s.cpu.log(Level::Error, &format!("[gpu] {why}"));
     }
     true
+}
+
+/// Each thread's share of the last second's instructions, as JSON.
+#[wasm_bindgen]
+pub fn switch_threads_json() -> String {
+    crate::activity::threads_json(&session().activity)
 }
 
 /// The title's backed guest memory by region, as JSON. The page adds the heap size itself.

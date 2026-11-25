@@ -589,6 +589,35 @@ fn an_error_message_comes_back_whole() {
     assert_eq!(switch_last_error(), MSG);
 }
 
+/// The thread table reads the activity report's last reading, which reading it does not drain.
+#[test]
+fn the_thread_table_shows_the_last_reading_of_the_activity_report() {
+    use crate::stats::switch_threads_json;
+    let _guard = new_session();
+    assert_eq!(switch_threads_json(), r#"{"seconds":null,"threads":[]}"#);
+
+    session().cpu.steps += 5000;
+    switch_log_activity(0.0);
+    let first = switch_threads_json();
+    assert!(
+        first.starts_with(r#"{"seconds":null,"threads":[{"index":0,"#)
+            && first.contains(r#""running":true,"ran":5000,"#),
+        "the first reading covers no known span: {first}"
+    );
+
+    session().cpu.steps += 2000;
+    switch_log_activity(0.5);
+    let second = switch_threads_json();
+    assert!(
+        second.starts_with(r#"{"seconds":0.5,"#) && second.contains(r#""ran":2000,"#),
+        "{second}"
+    );
+    assert_eq!(switch_threads_json(), second, "read, not taken");
+
+    crate::boot::switch_end_title();
+    assert_eq!(switch_threads_json(), r#"{"seconds":null,"threads":[]}"#);
+}
+
 /// The translator's and the GPU's reports, in the bytes the page parses.
 #[test]
 fn the_translator_and_gpu_reports_are_the_json_the_page_reads() {

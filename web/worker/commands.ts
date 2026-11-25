@@ -2,7 +2,7 @@
 
 import type {
   CommandHandlers, ControlData, ControlInfo, GpuReport, JitStats, MemoryReport, NandIdentity, NcaInfo,
-  OpenedContainer, PeekedTitle,
+  OpenedContainer, PeekedTitle, ThreadReading,
 } from '../shared/protocol';
 import { noteRegistered } from './activity';
 import { flushLog } from './log';
@@ -17,7 +17,7 @@ import {
   switch_net_connections_json, switch_net_disconnect, switch_net_status_json, switch_next_load,
   switch_open_nca,
   switch_inspect_nca, switch_open_container, switch_peek_icon, switch_peek_title, switch_reg_dump, switch_restore_nand, switch_restore_storage, switch_run,
-  switch_set_battery, switch_set_jit, switch_set_operation_mode, switch_set_touch,
+  switch_set_battery, switch_set_jit, switch_set_operation_mode, switch_set_touch, switch_threads_json,
   switch_set_trace, switch_set_trace_channels, switch_store_profile_edits, switch_thread_dump,
   switch_user_stage, switch_users_commit,
 } from '@core/switch_wasm.js';
@@ -128,6 +128,9 @@ export const CMD = {
       switch_jit_stats_json(),
       { enabled: false, blocks: 0, translated: 0, executed: 0, linked: 0, invalidated: 0 },
     );
+  },
+  threads() {
+    return parseOr<ThreadReading>(switch_threads_json(), { seconds: null, threads: [] });
   },
   gpuReport() {
     return parseOr<GpuReport>(switch_gpu_report_json(), {});
