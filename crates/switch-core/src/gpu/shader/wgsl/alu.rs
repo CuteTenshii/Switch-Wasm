@@ -86,6 +86,8 @@ impl Emitter<'_> {
             | Op::Iscadd { .. }
             | Op::Lea { .. }
             | Op::Vmnmx { .. }
+            | Op::Vmad { .. }
+            | Op::Vsetp { .. }
             | Op::Imnmx { .. }
             | Op::Imul { .. }
             | Op::Xmad { .. }

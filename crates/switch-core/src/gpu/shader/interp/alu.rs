@@ -434,6 +434,28 @@ impl Invocation {
                 let base = self.operand(b, env)?;
                 self.set_reg(dst, base.wrapping_add(offset));
             }
+            Op::Vmad { dst, a, b, c } => {
+                let x = a.extract(self.operand(a.src, env)?);
+                let y = b.extract(self.operand(b.src, env)?);
+                self.set_reg(dst, x.wrapping_mul(y).wrapping_add(self.reg(c)));
+            }
+            Op::Vsetp {
+                p0,
+                p1,
+                a,
+                b,
+                cmp,
+                signed,
+                bop,
+                src,
+            } => {
+                let x = a.extract(self.operand(a.src, env)?);
+                let y = b.extract(self.operand(b.src, env)?);
+                let r = int_compare(cmp, x, y, signed);
+                let s = self.holds(src);
+                self.set_pred(p0, combine(bop, r, s));
+                self.set_pred(p1, combine(bop, !r, s));
+            }
             Op::Vmnmx {
                 dst,
                 a,

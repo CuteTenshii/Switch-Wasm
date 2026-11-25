@@ -2,7 +2,9 @@
 
 use super::emitter::Emitter;
 use super::Unsupported;
-use crate::gpu::shader::isa::{Half16, Iadd3Shift, LogicOp, LopTest, Op, Pred, ShfMax, XmadC};
+use crate::gpu::shader::isa::{
+    Half16, Iadd3Shift, LogicOp, LopTest, Op, Pred, ShfMax, VideoOperand, XmadC,
+};
 
 impl Emitter<'_> {
     pub(super) fn emit_integer(&mut self, op: Op) -> Result<(), Unsupported> {
@@ -155,6 +157,33 @@ impl Emitter<'_> {
                 };
                 let y = self.operand(b);
                 self.set_r(dst, &format!("({offset}) + ({y})"));
+            }
+            Op::Vmad { dst, a, b, c } => {
+                let x = self.video(a);
+                let y = self.video(b);
+                let z = self.r(c);
+                self.set_r(dst, &format!("(({x}) * ({y}) + {z})"));
+            }
+            Op::Vsetp {
+                p0,
+                p1,
+                a,
+                b,
+                cmp,
+                signed,
+                bop,
+                src,
+            } => {
+                let x = self.video(a);
+                let y = self.video(b);
+                let taken = self.int_compare(cmp, &x, &y, signed);
+                let taken = self.bind(&taken);
+                let guard = self.holds(src);
+                let guard = self.bind(&guard);
+                let set = self.combine(bop, &taken, &guard);
+                self.set_p(p0, &set);
+                let clear = self.combine(bop, &format!("!{taken}"), &guard);
+                self.set_p(p1, &clear);
             }
             Op::Vmnmx {
                 dst,
@@ -566,5 +595,24 @@ fn half16(value: &str, half: Half16) -> String {
         Half16::All => value.to_string(),
         Half16::Lower => format!("(({value}) & 0xffffu)"),
         Half16::Upper => format!("(({value}) >> 16u)"),
+    }
+}
+
+impl Emitter<'_> {
+    /// [`VideoOperand::extract`] as WGSL.
+    fn video(&mut self, v: VideoOperand) -> String {
+        let raw = self.operand(v.src);
+        if v.bits >= 32 {
+            return raw;
+        }
+        let at = u32::from(v.sel) * u32::from(v.bits);
+        if v.signed {
+            format!(
+                "bitcast<u32>(extractBits(bitcast<i32>({raw}), {at}u, {}u))",
+                v.bits
+            )
+        } else {
+            format!("extractBits({raw}, {at}u, {}u)", v.bits)
+        }
     }
 }

@@ -1474,6 +1474,129 @@ fn p2r_and_cset_give_the_same_words_on_both_renderers() {
     );
 }
 
+/// `vmad` and `vsetp` pick, extend and compare bytes and halves the same way on both renderers.
+#[test]
+fn video_ops_give_the_same_words_on_both_renderers() {
+    use switch_core::gpu::shader::isa;
+    use switch_core::gpu::shader::Op;
+    use switch_core::gpu::testing::block;
+    const PT: u64 = 7 << 16;
+    // Eden's three bits from 36 (a) or 28 (b): the selector's low bit, then the width.
+    const BYTE0: u64 = 0b000;
+    const BYTE2: u64 = 0b010;
+    const BYTE3: u64 = 0b011;
+    const SHORT0: u64 = 0b100;
+    const SHORT1: u64 = 0b101;
+    const WORD: u64 = 0b110;
+    let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
+    let mov32i_if = |guard: u64, dst: u64, imm: u32| {
+        0x0100_0000_0000_0000 | (u64::from(imm) << 20) | guard << 16 | dst
+    };
+    let isetp_eq = |p0: u64, a: u64, b: u64| {
+        0x5b60u64 << 48 | 2 << 49 | 7 << 39 | b << 20 | PT | a << 8 | p0 << 3 | 7
+    };
+    // vmad r<dst>, r<a>.<am>, (r<b>.<bm> | imm), r<c>, with the signs as two bits.
+    let vmad = |dst: u64, a: u64, am: u64, b: Result<u64, u64>, bm: u64, c: u64, signs: u64| {
+        let b = match b {
+            Ok(reg) => 1 << 50 | bm << 28 | reg << 20,
+            Err(imm) => imm << 20,
+        };
+        0x5fu64 << 56 | signs << 48 | c << 39 | am << 36 | b | PT | a << 8 | dst
+    };
+    // vsetp.<cmp>.and p<pa>, p<pb>, r<a>.<am>, (r<b>.<bm> | imm), p<src>
+    let vsetp = |pa: u64,
+                 pb: u64,
+                 a: u64,
+                 am: u64,
+                 b: Result<u64, u64>,
+                 bm: u64,
+                 cmp: u64,
+                 src: u64,
+                 signs: u64| {
+        let b = match b {
+            Ok(reg) => 1 << 50 | bm << 28 | reg << 20,
+            Err(imm) => imm << 20,
+        };
+        0x50f0u64 << 48
+            | signs << 48
+            | cmp << 43
+            | src << 39
+            | am << 36
+            | b
+            | PT
+            | a << 8
+            | pa << 3
+            | pb
+    };
+    let (lt, ge) = (1, 18);
+    let words = [
+        mov32i(1, 0x80ff_7f81),
+        mov32i(2, 0xfffe_0003),
+        // (-1) * (-2) + 0xfffe0003
+        vmad(4, 1, BYTE2, Ok(2), SHORT1, 2, 0b11),
+        // 0x81 * 0x1234 + 0xfffe0003, wrapping
+        vmad(5, 1, BYTE0, Err(0x1234), 0, 2, 0b00),
+        // 0x80ff7f81 * -5 + 0xfffe0003, wrapping
+        vmad(6, 1, WORD, Err(0xfffb), 0, 2, 0b10),
+        mov32i(8, 0xfffe_0005),
+        mov32i(9, 0x0007_2c37),
+        mov32i(10, 0x7b00_827e),
+        isetp_eq(0, 4, 8),
+        isetp_eq(1, 5, 9),
+        isetp_eq(2, 6, 10),
+        // -128 < 3, signed as b is
+        vsetp(0, 7, 1, BYTE3, Ok(2), SHORT0, lt, 0, 0b11),
+        // 0xffffff80 < 3 unsigned is false; the second result is its negation
+        vsetp(7, 1, 1, BYTE3, Ok(2), SHORT0, lt, 1, 0b01),
+        // 0xfffe >= 0x1034, whose bits 8 and 9, the selector, are clear
+        vsetp(2, 7, 2, SHORT1, Err(0x1034), 0, ge, 2, 0b00),
+        // -128 < 0: selector 1 of the immediate is past its 16 bits; selector 0 is -768
+        vsetp(3, 7, 1, BYTE3, Err(0xfd00), 0, lt, 7, 0b11),
+        mov32i(0, 0),
+        mov32i(1, 0),
+        mov32i(2, 0),
+        mov32i(3, 0),
+        mov32i_if(0, 0, 0x3f80_0000),
+        mov32i_if(1, 1, 0x3f80_0000),
+        mov32i_if(2, 2, 0x3f80_0000),
+        mov32i_if(3, 3, 0x3f80_0000),
+        0xe300_0000_0007_000f, // exit
+    ];
+    for (at, word) in [(2, words[2]), (11, words[11]), (14, words[14])] {
+        assert!(
+            matches!(isa::decode(word).op, Op::Vmad { .. } | Op::Vsetp { .. }),
+            "word {at} is {:?}",
+            isa::decode(word).op
+        );
+    }
+    let split = |w: u64| (w as u32, (w >> 32) as u32);
+    let nop = (0x00070f00, 0x50b00000);
+    let shader = move || {
+        words
+            .chunks(3)
+            .flat_map(|slots| {
+                let slot = |i: usize| slots.get(i).map_or(nop, |&w| split(w));
+                block((0xffe1ffef, 0x001f8000), slot(0), slot(1), slot(2))
+            })
+            .collect::<Vec<u8>>()
+    };
+    let set_up = |h: &mut Harness| {
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+    };
+    agrees_shading(|| Harness::with_fragment_shader(shader()), |_| {}, set_up);
+    let mut h = Harness::with_fragment_shader(shader());
+    set_up(&mut h);
+    h.draw_with(&mut Software).expect("the draw");
+    let covered: Vec<u32> = h.target().into_iter().filter(|&p| p != 0).collect();
+    assert!(!covered.is_empty(), "the triangle covers pixels");
+    assert!(
+        covered.iter().all(|&p| p == 0xffff_ffff),
+        "every word came out as expected: {covered:x?}"
+    );
+}
+
 /// A funnel shift keeps the same word, clamps and fills the same way on both renderers.
 #[test]
 fn a_funnel_shift_gives_the_same_words_on_both_renderers() {

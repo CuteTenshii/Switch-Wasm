@@ -412,6 +412,49 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
             pred: lop_pred(insn, 36),
         };
     }
+    // vmad, 0x5f00/0xff00, as Eden reads it: no `.cc`, saturation, scale or negation.
+    if insn >> 56 == 0x5f {
+        if field(insn, 47, 1) != 0 || field(insn, 51, 5) != 0 {
+            return un;
+        }
+        let (a, b) = video_operands(insn, false);
+        return Op::Vmad {
+            dst: reg(insn, 0, 8),
+            a,
+            b,
+            c: reg(insn, 39, 8),
+        };
+    }
+    // vsetp, 0x50f0/0xfff8. Eden reads the compare from five bits that cover the boolean
+    // operation's two, so only `.AND` has a compare it knows.
+    if insn & 0xfff8_0000_0000_0000 == 0x50f0_0000_0000_0000 {
+        let cmp = match field(insn, 43, 5) {
+            0 => ICmp::Never,
+            1 => ICmp::Lt,
+            2 => ICmp::Eq,
+            3 => ICmp::Le,
+            16 => ICmp::Gt,
+            17 => ICmp::Ne,
+            18 => ICmp::Ge,
+            19 => ICmp::Always,
+            _ => return un,
+        };
+        let (a, b) = video_operands(insn, true);
+        // An immediate's selector past its one half extracts past the word.
+        if b.sel > 1 && matches!(b.src, Operand::Imm(_)) {
+            return un;
+        }
+        return Op::Vsetp {
+            p0: reg(insn, 3, 3),
+            p1: reg(insn, 0, 3),
+            a,
+            b,
+            cmp,
+            signed: b.signed,
+            bop: BoolOp::And,
+            src: src_pred(insn, 39, 42),
+        };
+    }
     // vmnmx, 0x3a00/0xfe00.
     if insn & 0xfe00_0000_0000_0000 == 0x3a00_0000_0000_0000 {
         const WORD: u64 = 3;
@@ -857,4 +900,42 @@ fn decode_xmad(insn: u64, form: XmadForm) -> Op {
         psl: form.psl,
         mrg: form.mrg,
     }
+}
+
+/// A video instruction's `a` and `b` with Eden's fields, whose selectors overlap their widths.
+/// An immediate `b` is a 16-bit half; `vsetp` keeps the selector bits inside it, `vmad` drops them.
+fn video_operands(insn: u64, imm_keeps_sel: bool) -> (VideoOperand, VideoOperand) {
+    // `VideoWidth`: byte, unknown (read as a byte), short and word.
+    let bits = |width: u64| match width {
+        0 | 1 => 8,
+        2 => 16,
+        _ => 32,
+    };
+    let a = VideoOperand {
+        src: Operand::Reg(reg(insn, 8, 8)),
+        bits: bits(field(insn, 37, 2)),
+        sel: field(insn, 36, 2) as u8,
+        signed: field(insn, 48, 1) != 0,
+    };
+    let signed = field(insn, 49, 1) != 0;
+    let b = if field(insn, 50, 1) == 0 {
+        VideoOperand {
+            src: Operand::Imm(field(insn, 20, 16) as u32),
+            bits: 16,
+            sel: if imm_keeps_sel {
+                field(insn, 28, 2) as u8
+            } else {
+                0
+            },
+            signed,
+        }
+    } else {
+        VideoOperand {
+            src: Operand::Reg(reg(insn, 20, 8)),
+            bits: bits(field(insn, 29, 2)),
+            sel: field(insn, 28, 2) as u8,
+            signed,
+        }
+    };
+    (a, b)
 }

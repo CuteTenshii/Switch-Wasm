@@ -690,6 +690,7 @@ pub(super) fn writes_pred(op: &Op, p: u8) -> bool {
         Op::Fsetp { p0, p1, .. }
         | Op::Hsetp2 { p0, p1, .. }
         | Op::Isetp { p0, p1, .. }
+        | Op::Vsetp { p0, p1, .. }
         | Op::Psetp { p0, p1, .. }
         | Op::Csetp { p0, p1, .. } => p0 == p || p1 == p,
         Op::Lop { pred, .. } | Op::Lop3 { pred, .. } => pred.is_some_and(|(out, _)| out == p),
@@ -729,6 +730,7 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
         | Op::Iadd3 { dst, .. }
         | Op::Imnmx { dst, .. }
         | Op::Vmnmx { dst, .. }
+        | Op::Vmad { dst, .. }
         | Op::Imul { dst, .. }
         | Op::Xmad { dst, .. }
         | Op::Iscadd { dst, .. }

@@ -131,6 +131,14 @@ pub(super) fn reads(op: &Op) -> Vec<u8> {
             v
         }
         Op::Vmnmx { a, b, c, .. } => vec![a, b, c],
+        Op::Vmad { a, b, c, .. } => [operand_reg(a.src), operand_reg(b.src), Some(c)]
+            .into_iter()
+            .flatten()
+            .collect(),
+        Op::Vsetp { a, b, .. } => [operand_reg(a.src), operand_reg(b.src)]
+            .into_iter()
+            .flatten()
+            .collect(),
         Op::Fcmp { a, b, test, .. } => {
             let mut v = vec![a];
             v.extend(operand_reg(b));

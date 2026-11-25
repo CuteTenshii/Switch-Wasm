@@ -246,6 +246,25 @@ pub enum Op {
         /// Whether the second operation compares signed.
         then_signed: bool,
     },
+    /// `vmad dst, a, b, c`: `a * b + c` of the operands' selected parts, wrapping.
+    Vmad {
+        dst: u8,
+        a: VideoOperand,
+        b: VideoOperand,
+        c: u8,
+    },
+    /// `vsetp p0, p1, a, b, src`: [`Op::Isetp`] of the operands' selected parts.
+    Vsetp {
+        p0: u8,
+        p1: u8,
+        a: VideoOperand,
+        b: VideoOperand,
+        cmp: ICmp,
+        /// `b`'s sign, which the compare follows.
+        signed: bool,
+        bop: BoolOp,
+        src: Pred,
+    },
     Iscadd {
         dst: u8,
         a: u8,

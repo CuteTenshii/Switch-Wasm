@@ -45,6 +45,35 @@ pub enum Operand {
     Imm(u32),
 }
 
+/// One operand of a video instruction: a byte, a half or the whole of a register or a 16-bit
+/// immediate, as Eden's `ExtractVideoOperandValue` reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoOperand {
+    /// A register or an immediate.
+    pub src: Operand,
+    /// 8, 16 or 32.
+    pub bits: u8,
+    /// Which byte or half; a word ignores it.
+    pub sel: u8,
+    pub signed: bool,
+}
+
+impl VideoOperand {
+    /// The selected part of `raw`, sign- or zero-extended to 32 bits.
+    pub fn extract(self, raw: u32) -> u32 {
+        if self.bits >= 32 {
+            return raw;
+        }
+        let shift = 32 - u32::from(self.bits);
+        let at = (raw >> (u32::from(self.sel) * u32::from(self.bits))) << shift;
+        if self.signed {
+            ((at as i32) >> shift) as u32
+        } else {
+            at >> shift
+        }
+    }
+}
+
 /// A guard or source predicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pred {

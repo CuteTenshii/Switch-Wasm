@@ -1186,6 +1186,119 @@ fn p2r_and_cset_decode_their_fields() {
     );
 }
 
+/// Eden's video operand fields overlap: a selector's high bit is its width's low bit.
+#[test]
+fn vmad_and_vsetp_decode_their_video_operands() {
+    let video = |src, bits, sel, signed| VideoOperand {
+        src,
+        bits,
+        sel,
+        signed,
+    };
+    // vmad r4, r1.b2 (signed), r2.h1 (signed), r3: widths "unknown" and short.
+    let vmad = asm(
+        0x5f00,
+        &[
+            (0, 8, 4),
+            (8, 8, 1),
+            (20, 8, 2),
+            (28, 3, 0b101),
+            (36, 3, 0b010),
+            (39, 8, 3),
+            (48, 2, 0b11),
+            (50, 1, 1),
+        ],
+    );
+    assert_eq!(
+        op(vmad),
+        Op::Vmad {
+            dst: 4,
+            a: video(Operand::Reg(1), 8, 2, true),
+            b: video(Operand::Reg(2), 16, 1, true),
+            c: 3,
+        }
+    );
+    // An immediate is a 16-bit half whose bits 8 and 9 vmad does not read as a selector.
+    let vmad_imm = asm(
+        0x5f00,
+        &[(0, 8, 5), (8, 8, 1), (20, 16, 0x1234), (39, 8, 3)],
+    );
+    assert!(matches!(
+        op(vmad_imm),
+        Op::Vmad { b, .. } if b == video(Operand::Imm(0x1234), 16, 0, false)
+    ));
+    // `.cc`, saturation, scale and either negation are not modelled.
+    for bit in [47, 51, 52, 53, 54, 55] {
+        assert!(
+            matches!(op(vmad | 1 << bit), Op::Unimplemented { .. }),
+            "bit {bit}"
+        );
+    }
+
+    // vsetp.ge.and p1, p2, r1.b3, r2.h0 (unsigned), !p3
+    let vsetp = asm(
+        0x50f0,
+        &[
+            (0, 3, 2),
+            (3, 3, 1),
+            (8, 8, 1),
+            (20, 8, 2),
+            (28, 3, 0b100),
+            (36, 3, 0b011),
+            (39, 3, 3),
+            (42, 1, 1),
+            (43, 5, 18),
+            (48, 1, 1),
+            (50, 1, 1),
+        ],
+    );
+    assert_eq!(
+        op(vsetp),
+        Op::Vsetp {
+            p0: 1,
+            p1: 2,
+            a: video(Operand::Reg(1), 8, 3, true),
+            b: video(Operand::Reg(2), 16, 0, false),
+            cmp: ICmp::Ge,
+            signed: false,
+            bop: BoolOp::And,
+            src: Pred {
+                reg: 3,
+                negate: true
+            },
+        }
+    );
+    // vsetp keeps an immediate's selector bits, and one past its half is not a value.
+    let vsetp_imm = |imm: u64| asm(0x50f0, &[(8, 8, 1), (20, 16, imm), (43, 5, 1)]);
+    assert!(matches!(
+        op(vsetp_imm(0x0100)),
+        Op::Vsetp { b, .. } if b == video(Operand::Imm(0x0100), 16, 1, false)
+    ));
+    assert!(matches!(op(vsetp_imm(0x0200)), Op::Unimplemented { .. }));
+    // `.OR` and `.XOR` move the five compare bits off every compare Eden names.
+    for bop in [1u64, 2] {
+        assert!(matches!(op(vsetp | bop << 45), Op::Unimplemented { .. }));
+    }
+}
+
+#[test]
+fn a_video_operand_extends_the_part_it_selects() {
+    let video = |bits, sel, signed| VideoOperand {
+        src: Operand::Reg(0),
+        bits,
+        sel,
+        signed,
+    };
+    let raw = 0x80ff_7f81;
+    assert_eq!(video(8, 0, false).extract(raw), 0x81);
+    assert_eq!(video(8, 0, true).extract(raw), 0xffff_ff81);
+    assert_eq!(video(8, 1, true).extract(raw), 0x7f);
+    assert_eq!(video(8, 3, true).extract(raw), 0xffff_ff80);
+    assert_eq!(video(16, 1, false).extract(raw), 0x80ff);
+    assert_eq!(video(16, 0, true).extract(raw), 0x7f81);
+    assert_eq!(video(32, 2, true).extract(raw), raw);
+}
+
 /// Echoes of Wisdom's lit shader masks two light masks against an immediate so.
 #[test]
 fn lop3_decodes_the_third_operand_of_its_immediate_form() {
