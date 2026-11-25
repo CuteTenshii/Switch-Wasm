@@ -935,6 +935,19 @@ impl Memory {
         pages * PAGE_SIZE as u64
     }
 
+    /// Whether the guest can read all of `start..end`: each page is backed or in the soft region.
+    pub fn owns_range(&self, start: u64, end: u64) -> bool {
+        if start > end || end > ADDRESS_SPACE_SIZE {
+            return false;
+        }
+        let (soft_start, soft_end) = self.meta().soft;
+        let backed = |from: u64, to: u64| from >= to || self.mapped_bytes_in(from, to) == to - from;
+        if soft_start >= soft_end {
+            return backed(start, end);
+        }
+        backed(start, end.min(soft_start)) && backed(start.max(soft_end), end)
+    }
+
     pub fn max_mapped_bytes(&self) -> u64 {
         self.meta().max_mapped_pages as u64 * PAGE_SIZE as u64
     }

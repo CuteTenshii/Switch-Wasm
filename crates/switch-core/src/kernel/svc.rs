@@ -583,13 +583,14 @@ impl Cpu {
                 const RESULT_INVALID_CURRENT_MEMORY: u64 = 1 | (106 << 9);
                 let addr = self.read_zr(1);
                 let size = self.read_zr(2);
-                // The block takes the place of pages the guest already has, so checking that
-                // they exist bounds the host allocation by the guest's memory cap.
-                let backed = size <= self.mem.mapped_bytes()
-                    && addr
-                        .checked_add(size)
-                        .is_some_and(|end| self.mem.mapped_bytes_in(addr, end) == size);
-                if !backed {
+                // Untouched heap is the guest's too; the block backs every page of the range,
+                // so it must fit under the memory cap once it replaces what is backed there.
+                let owned = addr.checked_add(size).is_some_and(|end| {
+                    self.mem.owns_range(addr, end)
+                        && self.mem.mapped_bytes() - self.mem.mapped_bytes_in(addr, end) + size
+                            <= self.mem.max_mapped_bytes()
+                });
+                if !owned {
                     self.write_zr(0, RESULT_INVALID_CURRENT_MEMORY);
                     return Ok(());
                 }
@@ -1513,6 +1514,44 @@ mod tests {
             cpu.horizon_syscall(0x15).unwrap();
             assert_eq!(cpu.read_zr(0), 1 | (106 << 9), "size {size:#x}");
         }
+        assert!(cpu.transfer_memories.is_empty());
+        assert_eq!(cpu.mem.mapped_bytes(), before);
+    }
+
+    /// Echoes of Wisdom passes the untouched end of its heap, which reads as zero.
+    #[test]
+    fn a_transfer_memory_over_untouched_heap_is_made() {
+        const ADDR: u64 = 0x0900_0000;
+        let mut cpu = Cpu::new();
+        cpu.mem.soft_map_zero(ADDR, ADDR + 0x10_0000);
+        cpu.mem.map_zero(ADDR, 0x1000).unwrap();
+        cpu.mem.write_u32(ADDR + 4, 7).unwrap();
+        cpu.write_zr(1, ADDR);
+        cpu.write_zr(2, 0x4000);
+        cpu.horizon_syscall(0x15).unwrap();
+        assert_eq!(cpu.read_zr(0), 0);
+        let memory = cpu.transfer_memories[&cpu.read_zr(1)].clone();
+        assert_eq!(
+            memory.read_u32(4).unwrap(),
+            7,
+            "the backed page was not kept"
+        );
+        assert_eq!(memory.read_u32(0x3000).unwrap(), 0);
+        assert_eq!(cpu.mem.mapped_bytes_in(ADDR, ADDR + 0x4000), 0x4000);
+    }
+
+    #[test]
+    fn a_transfer_memory_past_the_memory_cap_is_refused() {
+        const ADDR: u64 = 0x0900_0000;
+        let mut cpu = Cpu::new();
+        cpu.mem.soft_map_zero(ADDR, ADDR + 0x10_0000);
+        cpu.mem.map_zero(ADDR, 0x1000).unwrap();
+        let before = cpu.mem.mapped_bytes();
+        cpu.mem.set_max_mapped_bytes(before + 0x2000);
+        cpu.write_zr(1, ADDR);
+        cpu.write_zr(2, 0x4000);
+        cpu.horizon_syscall(0x15).unwrap();
+        assert_eq!(cpu.read_zr(0), 1 | (106 << 9));
         assert!(cpu.transfer_memories.is_empty());
         assert_eq!(cpu.mem.mapped_bytes(), before);
     }
