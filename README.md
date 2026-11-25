@@ -19,6 +19,13 @@ rustup toolchain install nightly --profile minimal --component rust-src --target
 
 It also needs a `wasm-bindgen` CLI matching the version in `Cargo.lock`.
 
+There are two builds:
+
+- `make wasm` builds only the emulator core, in the faster-compiling dev profile. Use it while working on the code with `bun run dev`.
+- `make assets` (what plain `make` runs) builds the core in the release profile, with full optimisation and LTO, then bundles the site into `dist/`. This is what ships, and the only build to measure performance on.
+
+The dev server always uses the dev core and `dist/` the release one, so rebuild the one you're running.
+
 ## Serve
 
 ```sh
