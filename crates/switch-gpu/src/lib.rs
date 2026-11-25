@@ -906,6 +906,12 @@ pub struct Gpu {
     pub compute_dispatched: u64,
     /// Draws recorded into the pass the draw before them opened.
     pub passes_joined: u64,
+    /// Draws that opened a pass of their own, by why they could not join the open one; a
+    /// closed pass names the line that ended it.
+    pub pass_splits: std::collections::HashMap<String, u64>,
+    pass_closed_at: Option<&'static std::panic::Location<'static>>,
+    /// Copies of held surfaces made or brought up to date, by the shape sampled.
+    pub held_copy_shapes: std::collections::HashMap<String, u64>,
     /// Draws of a second or later instance, and how many of those widened the draw call
     /// before them instead of making their own.
     pub later_instances: u64,
@@ -932,6 +938,9 @@ pub struct Gpu {
     device_times: Option<timing::DeviceTimes>,
     timing_asked: switch_core::gpu::renderer::DeviceTiming,
 }
+
+/// Reasons a draw opened a pass of its own that the report lists, most frequent first.
+const PASS_SPLITS_SHOWN: usize = 8;
 
 /// Bounds a run over endless fresh textures; a normal working set is far smaller.
 const TEXTURE_CACHE_BYTES: u64 = 256 << 20;
@@ -975,6 +984,11 @@ impl Drop for Gpu {
             self.buffers_uploaded,
             self.buffers_reused,
         );
+        let mut splits: Vec<(&String, &u64)> = self.pass_splits.iter().collect();
+        splits.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+        for (why, n) in splits.into_iter().take(PASS_SPLITS_SHOWN) {
+            eprintln!("[gpu]   {n} draws opened a pass: {why}");
+        }
         eprintln!(
             "[gpu] {} shader translations served from cache, {} not",
             self.shader_hits, self.shader_misses,
@@ -1549,6 +1563,20 @@ impl Renderer for Gpu {
             .field("heldCopiesUpdated", self.held_copies_updated)
             .field("croppedBinds", self.cropped_binds)
             .field("passesJoined", self.passes_joined)
+            .object("heldCopyShapes", |o| {
+                let mut shapes: Vec<(&String, &u64)> = self.held_copy_shapes.iter().collect();
+                shapes.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+                for (shape, n) in shapes.into_iter().take(PASS_SPLITS_SHOWN) {
+                    o.field(shape, *n);
+                }
+            })
+            .object("passSplits", |o| {
+                let mut splits: Vec<(&String, &u64)> = self.pass_splits.iter().collect();
+                splits.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+                for (why, n) in splits.into_iter().take(PASS_SPLITS_SHOWN) {
+                    o.field(why, *n);
+                }
+            })
             .field("passCallsSkipped", self.pass_calls_skipped)
             .field("laterInstances", self.later_instances)
             .field("instancesMerged", self.instances_merged)

@@ -57,6 +57,11 @@ export interface GpuReport {
   bindUncachedShadow?: number;
   bindUncachedTexture?: number;
   bindUncachedGlobal?: number;
+  // Draws in the pass before them, and why the others opened one of their own, most frequent first.
+  passesJoined?: number;
+  passSplits?: Record<string, number>;
+  // Copies of held surfaces made or brought up to date, by the shape a draw sampled.
+  heldCopyShapes?: Record<string, number>;
   // Presents that asked for every held surface back, by what asked.
   syncNoScanout?: number;
   syncOverBytes?: number;

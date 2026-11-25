@@ -1043,12 +1043,14 @@ impl Gpu {
                 return Err(why);
             }
             self.held_copies_updated += 1;
+            self.count_held_copy("layers updated", upload, view);
             if let Some(copy) = self.space.held_copies.get_mut(&key) {
                 copy.sources = sources;
             }
             return Ok(texture);
         }
         self.held_copies_made += 1;
+        self.count_held_copy("made", upload, view);
         // `held_layers` lets these through only as the single layer of a 2D image.
         let packed_words = match held {
             [(0, HeldLayer::Bytes(surface))] if widening == Widen::PackedDepth => Some(surface),
@@ -1117,6 +1119,19 @@ impl Gpu {
             self.scratch.push(Scratch::Texture(stale.texture));
         }
         Ok(texture)
+    }
+
+    fn count_held_copy(
+        &mut self,
+        what: &str,
+        upload: &switch_core::gpu::upload::TextureUpload,
+        view: wgpu::TextureViewDimension,
+    ) {
+        let shape = format!(
+            "{what}: {}x{}x{} {:?} as {view:?}",
+            upload.width, upload.height, upload.layers, upload.format
+        );
+        *self.held_copy_shapes.entry(shape).or_default() += 1;
     }
 
     /// Fill `held`'s layers of `texture` from their surfaces, after the draws recorded so far.

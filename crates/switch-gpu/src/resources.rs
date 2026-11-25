@@ -475,6 +475,7 @@ impl Gpu {
 
     /// Submit the draws recorded so far. A queue submit costs over a millisecond in a browser,
     /// so draws share one; anything else that submits, or destroys what they use, goes first.
+    #[track_caller]
     pub(super) fn submit_batch(&mut self) {
         self.end_pass();
         self.flush_constants();
@@ -489,6 +490,7 @@ impl Gpu {
 
     /// The batch's encoder with no pass open, for the backend's own copies and passes between
     /// draws, which then run in order with them. Hand it back with [`Gpu::restore_batch`].
+    #[track_caller]
     pub(super) fn take_batch(&mut self) -> wgpu::CommandEncoder {
         self.end_pass();
         self.batch.take().unwrap_or_else(|| {
@@ -504,6 +506,7 @@ impl Gpu {
     }
 
     /// Submit an encoder after the draws recorded before it.
+    #[track_caller]
     pub(super) fn submit_with_batch(&mut self, mut encoder: wgpu::CommandEncoder) {
         self.end_pass();
         self.flush_constants();

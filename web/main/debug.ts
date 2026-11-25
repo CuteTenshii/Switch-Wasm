@@ -306,6 +306,16 @@ async function updateRenderDebug(): Promise<void> {
     + `${fmtCount(g.bindUncachedHeld ?? 0)} held, ${fmtCount(g.bindUncachedShadow ?? 0)} shadow, `
     + `${fmtCount(g.bindUncachedTexture ?? 0)} texture, ${fmtCount(g.bindUncachedGlobal ?? 0)} global)`
     : '-';
+  const splits = Object.entries(g.passSplits ?? {});
+  const opened = splits.reduce((sum, [, n]) => sum + n, 0);
+  $('render-pass-splits').textContent = opened
+    ? `${fmtCount(opened)}, ${fmtCount(g.passesJoined ?? 0)} joined the pass before: `
+    + splits.map(([why, n]) => `${fmtCount(n)} ${why}`).join(', ')
+    : '-';
+  const shapes = Object.entries(g.heldCopyShapes ?? {});
+  $('render-held-copies').textContent = shapes.length
+    ? shapes.map(([shape, n]) => `${fmtCount(n)} ${shape}`).join(', ')
+    : '-';
   const r = g.read;
   for (const kind of ['textures', 'vertex', 'constants', 'index'] as const) {
     $(`render-read-${kind}`).textContent = formatBytes(r?.[kind] ?? 0);

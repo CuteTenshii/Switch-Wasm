@@ -547,20 +547,47 @@ impl Gpu {
             .collect();
         // A pass is one usage scope, and an image stored to is in no other use within its own.
         let stores = !p.images.is_empty();
-        let joins = !patched
-            && !stores
-            && scratch.is_none()
-            && !self.draws_alone()
-            && self.pass.as_ref().is_some_and(|open| {
-                open.colour == colour_target
-                    && open.extra_colours == extra_colours
-                    && open.depth == depth_target
-                    && !held_globals.iter().any(|(buffer, writes)| {
+        let split = if self.draws_alone() {
+            Some("timed per draw".to_string())
+        } else if patched {
+            Some("copies into its buffers".into())
+        } else if stores {
+            Some("stores to an image".into())
+        } else if scratch.is_some() {
+            Some("renders to a copy of its target".into())
+        } else {
+            match &self.pass {
+                None => Some(match self.pass_closed_at {
+                    Some(at) => format!(
+                        "pass ended at {}:{}",
+                        at.file().rsplit('/').next().unwrap_or(""),
+                        at.line()
+                    ),
+                    None => "no pass yet".into(),
+                }),
+                Some(open)
+                    if open.colour != colour_target
+                        || open.extra_colours != extra_colours
+                        || open.depth != depth_target =>
+                {
+                    Some("other targets".into())
+                }
+                Some(open)
+                    if held_globals.iter().any(|(buffer, writes)| {
                         open.globals
                             .iter()
                             .any(|(bound, was)| bound == buffer && was != writes)
-                    })
-            });
+                    }) =>
+                {
+                    Some("a global bound both ways".into())
+                }
+                Some(_) => None,
+            }
+        };
+        let joins = split.is_none();
+        if let Some(why) = split {
+            *self.pass_splits.entry(why).or_default() += 1;
+        }
         if joins {
             self.passes_joined += 1;
             if let Some(open) = self.pass.as_mut() {
@@ -900,7 +927,11 @@ impl Gpu {
     }
 
     /// End the render pass draws share, so the encoder can record something else.
+    #[track_caller]
     pub(super) fn end_pass(&mut self) {
+        if self.pass.is_some() {
+            self.pass_closed_at = Some(std::panic::Location::caller());
+        }
         self.emit_pending();
         self.pass = None;
     }
