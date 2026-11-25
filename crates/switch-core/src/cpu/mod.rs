@@ -107,6 +107,9 @@ pub struct Cpu {
     /// Where real time has reached on the clock, once a host paces it.
     /// See [`Cpu::pace_to_real_time`].
     pub(crate) real_cycles: Option<u64>,
+    /// Times [`Cpu::pace_to_real_time`] jumped the clock forward, and the cycles it skipped.
+    pub(crate) pace_jumps: u64,
+    pub(crate) pace_skipped: u64,
     /// Ring buffer of the last `RECENT_LEN` straight-line runs `(first pc, count)`, dumped on fault.
     pub(crate) recent: [(u32, u32); RECENT_LEN],
     pub(crate) recent_len: usize,
@@ -528,6 +531,8 @@ impl Cpu {
             core: 0,
             handback: None,
             real_cycles: None,
+            pace_jumps: 0,
+            pace_skipped: 0,
             recall: Default::default(),
             clock_at: std::sync::Arc::as_ptr(&clock),
             clock,

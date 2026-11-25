@@ -19,6 +19,19 @@ pub(crate) const TIME_SLICE: u64 = 20_000;
 /// How far ahead of real time a paced clock has the host wait: 50 ms.
 const MAX_AHEAD_CYCLES: u64 = 1_020_000_000 / 20;
 
+/// What [`Cpu::pacing`] reports, in cycles of the guest clock.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pacing {
+    /// Cycles per second of that clock.
+    pub clock_hz: u32,
+    /// Times the clock was behind real time and jumped forward.
+    pub jumps: u64,
+    /// Cycles those jumps skipped: time the title never got to run in.
+    pub skipped_cycles: u64,
+    /// How far the clock is ahead of real time now, which the host waits out.
+    pub ahead_cycles: u64,
+}
+
 /// Default thread priority (also what most retail manifests declare); 0 is most urgent, 63 least.
 pub const DEFAULT_THREAD_PRIORITY: u8 = 44;
 
@@ -173,6 +186,8 @@ impl Cpu {
     pub fn pace_to_real_time(&mut self, elapsed: u64) -> u64 {
         let mut real = self.real_cycles.unwrap_or(self.cycles) + elapsed;
         if self.cycles < real {
+            self.pace_jumps += 1;
+            self.pace_skipped += real - self.cycles;
             self.cycles = real;
             self.publish_clock();
         }
@@ -180,6 +195,18 @@ impl Cpu {
         real = real.max(self.cycles.saturating_sub(MAX_AHEAD_CYCLES));
         self.real_cycles = Some(real);
         self.cycles - real
+    }
+
+    /// How [`Cpu::pace_to_real_time`] has had to move the clock so far.
+    pub fn pacing(&self) -> Pacing {
+        Pacing {
+            clock_hz: crate::services::power::CLOCK_RATES_HZ[0],
+            jumps: self.pace_jumps,
+            skipped_cycles: self.pace_skipped,
+            ahead_cycles: self
+                .real_cycles
+                .map_or(0, |real| self.cycles.saturating_sub(real)),
+        }
     }
 
     /// Switch away after blocking. If nothing can run, idle or wake everything.
@@ -400,6 +427,21 @@ mod tests {
         cpu.cycles += 700;
         assert_eq!(cpu.pace_to_real_time(200), 500, "ahead by what ran past it");
         assert_eq!(cpu.cycles, 2_200, "a clock never runs backwards");
+    }
+
+    #[test]
+    fn pacing_counts_the_jumps_and_what_they_skipped() {
+        let mut cpu = Cpu::new();
+        cpu.cycles = 1_000;
+        cpu.pace_to_real_time(0);
+        cpu.pace_to_real_time(300);
+        cpu.cycles += 100;
+        cpu.pace_to_real_time(250);
+        cpu.cycles += 400;
+        cpu.pace_to_real_time(100);
+        let pacing = cpu.pacing();
+        assert_eq!((pacing.jumps, pacing.skipped_cycles), (2, 450));
+        assert_eq!(pacing.ahead_cycles, 300, "what ran past real time");
     }
 
     #[test]
