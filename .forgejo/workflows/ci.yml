@@ -65,7 +65,7 @@ jobs:
       - name: Cache Rust build
         uses: https://github.com/Swatinem/rust-cache@v2
         with:
-          key: check
+          key: lint
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -97,7 +97,7 @@ jobs:
       - name: Cache Rust build
         uses: https://github.com/Swatinem/rust-cache@v2
         with:
-          key: check
+          key: test
 
       - name: Run tests
         run: cargo test --workspace
