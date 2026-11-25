@@ -1092,6 +1092,33 @@ fn lop3_decodes_its_constant_bank_form() {
     );
 }
 
+/// Echoes of Wisdom's lit shader masks two light masks against an immediate so.
+#[test]
+fn lop3_decodes_the_third_operand_of_its_immediate_form() {
+    // lop3.lut r34, r35, 0x1234, r36, 0x80
+    let word = asm(
+        0x3c00,
+        &[
+            (0, 8, 34),
+            (8, 8, 35),
+            (20, 19, 0x1234),
+            (39, 8, 36),
+            (48, 8, 0x80),
+        ],
+    );
+    assert_eq!(
+        op(word),
+        Op::Lop3 {
+            dst: 34,
+            a: 35,
+            b: Operand::Imm(0x1234),
+            c: Operand::Reg(36),
+            lut: 0x80,
+            pred: None,
+        }
+    );
+}
+
 #[test]
 fn iscadd32i_decodes_its_scale_and_carry_out() {
     // iscadd32i r4, r1, 0x1234, 3

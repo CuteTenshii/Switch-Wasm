@@ -400,7 +400,7 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
             dst: reg(insn, 0, 8),
             a: reg(insn, 8, 8),
             b: Operand::Imm(imm20(insn)),
-            c: Operand::Reg(RZ),
+            c: Operand::Reg(reg(insn, 39, 8)),
             lut: field(insn, 48, 8) as u8,
             pred: None,
         };
