@@ -140,8 +140,14 @@ fn seed_fragment(
     inv_w: [f32; 3],
     weights: [f32; 3],
     (x, y, window_height): (u32, u32, Option<u32>),
+    front: bool,
 ) {
     inv.reset();
+    // All ones on a front face, as the hardware's `a[0x3fc]` reads; Eden's `FrontFace`.
+    inv.attr_in.set(
+        FRONT_FACING,
+        f32::from_bits(if front { u32::MAX } else { 0 }),
+    );
     // `a[0x70]` and `a[0x74]`: the pixel's centre in window coordinates.
     inv.attr_in.set(FRAG_COORD_X, x as f32 + 0.5);
     let y = y as f32 + 0.5;
@@ -205,6 +211,7 @@ fn fragment_colors(inv: &Invocation, program: &Compiled, outputs: u32) -> Option
 /// Where a fragment's window coordinates are read from.
 const FRAG_COORD_X: u16 = 0x70;
 const FRAG_COORD_Y: u16 = 0x74;
+const FRONT_FACING: u16 = 0x3fc;
 
 /// Shade one covered pixel.
 #[allow(clippy::too_many_arguments)]
@@ -215,6 +222,7 @@ pub(super) fn shade_fragment(
     inv_w: [f32; 3],
     weights: [f32; 3],
     (x, y): (u32, u32),
+    front: bool,
     env: &Env,
     outputs: u32,
 ) -> Result<Option<Colors>> {
@@ -225,6 +233,7 @@ pub(super) fn shade_fragment(
         inv_w,
         weights,
         (x, y, env.special.window_height),
+        front,
     );
     inv.execute(program, env)?;
     Ok(fragment_colors(inv, program, outputs))
@@ -250,13 +259,14 @@ pub(super) fn shade_quad(
     inv_w: [f32; 3],
     weights: [[f32; 3]; QUAD],
     (x, y): (u32, u32),
+    front: bool,
     env: &mut Env,
     outputs: u32,
 ) -> Result<[Option<Colors>; QUAD]> {
     for (lane, invocation) in lanes.iter_mut().enumerate() {
         let (px, py) = quad_pixel(x, y, lane);
         let at = (px, py, env.special.window_height);
-        seed_fragment(invocation, program, verts, inv_w, weights[lane], at);
+        seed_fragment(invocation, program, verts, inv_w, weights[lane], at, front);
         invocation.begin();
     }
     let mut running = [true; QUAD];

@@ -1301,6 +1301,88 @@ fn a_fragments_lane_registers_name_its_place_in_its_quad_on_both_renderers() {
     );
 }
 
+/// `a[0x3fc]` tells a fragment which way its triangle faces, the same on both renderers.
+/// Echoes of Wisdom flips its normals by it, so a zero there darkened every lit wall.
+#[test]
+fn a_fragment_reads_its_facing_the_same_on_both_renderers() {
+    use switch_core::gpu::shader::isa;
+    use switch_core::gpu::shader::Op;
+    use switch_core::gpu::testing::block;
+    const PT: u64 = 7 << 16;
+    let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
+    let mov32i_if = |guard: u64, dst: u64, imm: u32| {
+        0x0100_0000_0000_0000 | (u64::from(imm) << 20) | guard << 16 | dst
+    };
+    // ipa.pass r<dst>, a[0x3fc]
+    let ipa_facing = |dst: u64| 0xe000_0000_0000_ff00 | 0x3fc << 28 | 0xff << 20 | PT | dst;
+    let isetp_eq = |p0: u64, a: u64, b: u64| {
+        0x5b60u64 << 48 | 2 << 49 | 7 << 39 | b << 20 | PT | a << 8 | p0 << 3 | 7
+    };
+    assert!(matches!(
+        isa::decode(ipa_facing(4)).op,
+        Op::Ipa {
+            dst: 4,
+            offset: 0x3fc,
+            mul: None,
+            ..
+        }
+    ));
+    const ONE: u32 = 0x3f80_0000;
+    let words = [
+        ipa_facing(4),
+        mov32i(5, u32::MAX),
+        isetp_eq(0, 4, 5),
+        mov32i(0, 0),
+        mov32i(1, 0),
+        mov32i(2, 0),
+        mov32i(3, ONE),
+        mov32i_if(0, 0, ONE),
+        0xe300_0000_0007_000f, // exit
+    ];
+    let split = |w: u64| (w as u32, (w >> 32) as u32);
+    let nop = (0x00070f00, 0x50b00000);
+    let shader = move || {
+        words
+            .chunks(3)
+            .flat_map(|slots| {
+                let slot = |i: usize| slots.get(i).map_or(nop, |&w| split(w));
+                block((0xffe1ffef, 0x001f8000), slot(0), slot(1), slot(2))
+            })
+            .collect::<Vec<u8>>()
+    };
+    let corners = [
+        [-1.0, 1.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0],
+        [-1.0, -1.0, 0.0, 1.0],
+    ];
+    let winding = |order: [usize; 3]| {
+        move |h: &mut Harness| {
+            for (slot, &corner) in order.iter().enumerate() {
+                h.write_vertex(slot as u32, corners[corner], [0.0, 0.0, 0.0, 1.0]);
+            }
+        }
+    };
+    let mut reds = Vec::new();
+    for order in [[0, 1, 2], [0, 2, 1]] {
+        for web_limits in [false, true] {
+            agrees_shading(
+                || Harness::with_fragment_shader(shader()),
+                move |gpu| gpu.set_web_limits(web_limits),
+                winding(order),
+            );
+        }
+        let mut h = Harness::with_fragment_shader(shader());
+        winding(order)(&mut h);
+        h.draw_with(&mut Software).expect("the draw");
+        let covered: std::collections::BTreeSet<u32> =
+            h.target().into_iter().filter(|&p| p != 0).collect();
+        assert_eq!(covered.len(), 1, "one facing per triangle: {covered:x?}");
+        reds.push(covered.into_iter().next().unwrap() & 0xff);
+    }
+    reds.sort_unstable();
+    assert_eq!(reds, [0, 0xff], "the two windings face opposite ways");
+}
+
 /// A funnel shift keeps the same word, clamps and fills the same way on both renderers.
 #[test]
 fn a_funnel_shift_gives_the_same_words_on_both_renderers() {

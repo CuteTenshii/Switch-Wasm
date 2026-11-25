@@ -3,8 +3,8 @@
 use super::layout::{
     attribute_scalar, unpack_1010102, Coverage, Crop, Fold, Global, Layout, Stage, StorageNumeric,
     TextureBinding, Update, WordImage, WordPack, ATOMS, ATTRIBUTE_WORDS, CONSTANTS_BINDING,
-    CONSTANT_BANKS, GENERIC_BASE, GENERIC_STRIDE, GLOBAL_BINDING, IDENTITY_SWIZZLE, INSTANCE_ID,
-    POSITION, TEXTURE_BINDING, VERTEX_ID,
+    CONSTANT_BANKS, FRONT_FACING, GENERIC_BASE, GENERIC_STRIDE, GLOBAL_BINDING, IDENTITY_SWIZZLE,
+    INSTANCE_ID, POSITION, TEXTURE_BINDING, VERTEX_ID,
 };
 use super::{Translation, Unsupported};
 use crate::gpu::pipeline::AttributeBase;
@@ -1174,7 +1174,10 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
     if layout.coverage.as_ref().is_some_and(|c| c.per_sample_pass) {
         out.push_str("override pass_sample: u32 = 0u;\n\n");
     }
-    out.push_str("struct FragmentInput {\n  @builtin(position) position: vec4<f32>,\n");
+    out.push_str(
+        "struct FragmentInput {\n  @builtin(position) position: vec4<f32>,\n  \
+         @builtin(front_facing) front: bool,\n",
+    );
     for (location, slot) in layout.varyings.iter().enumerate() {
         out.push_str(&format!(
             "  @location({location}) @interpolate(linear{}) vary{slot}: vec4<f32>,\n",
@@ -1226,6 +1229,11 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
         .coverage
         .as_ref()
         .map_or((1, 1), |c| (c.samples_x, c.samples_y));
+    // `a[0x3fc]`: all ones on a front face, as the rasterizer seeds it.
+    out.push_str(&format!(
+        "  attr_in[{}u] = bitcast<f32>(select(0u, 0xffffffffu, input.front));\n",
+        FRONT_FACING / 4
+    ));
     out.push_str(&format!(
         "  attr_in[{}u] = floor(input.position.x / {samples_x}.0) + 0.5;\n",
         POSITION / 4

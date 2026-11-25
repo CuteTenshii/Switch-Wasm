@@ -22,16 +22,18 @@ pub(super) fn culls(cull: CullState, v: [ScreenVertex; 3]) -> bool {
     if !cull.enabled {
         return false;
     }
+    match front_facing(cull, v) {
+        None => true,
+        Some(true) => cull.cull_front,
+        Some(false) => cull.cull_back,
+    }
+}
+
+/// Whether the triangle faces front by `cull`'s winding, judged as [`culls`] judges it;
+/// `None` when it has no area.
+pub(super) fn front_facing(cull: CullState, v: [ScreenVertex; 3]) -> Option<bool> {
     let area = (v[1].x - v[0].x) * (v[2].y - v[0].y) - (v[1].y - v[0].y) * (v[2].x - v[0].x);
-    if area == 0.0 {
-        return true;
-    }
-    let front = (area < 0.0) == cull.front_ccw;
-    if front {
-        cull.cull_front
-    } else {
-        cull.cull_back
-    }
+    (area != 0.0).then_some((area < 0.0) == cull.front_ccw)
 }
 
 /// Read the `i`th index of an indexed draw out of the bound index buffer.
@@ -582,6 +584,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 tally.culled += 1;
                 continue;
             }
+            let front = front_facing(cull, screen).unwrap_or(true);
 
             let Some(tri) = TriangleSetup::new(screen[0], screen[1], screen[2]) else {
                 tally.degenerate += 1;
@@ -621,6 +624,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                                     inv_w,
                                     weights,
                                     (x, y),
+                                    front,
                                     env,
                                     outputs,
                                 )
@@ -688,6 +692,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                                 inv_w,
                                 weights,
                                 (x, y),
+                                front,
                                 env,
                                 outputs,
                             )

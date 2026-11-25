@@ -284,6 +284,8 @@ pub(super) const GENERIC_STRIDE: usize = 0x10;
 const GENERIC_SLOTS: usize = 32;
 /// Clip position. Its `w` is also the fragment shader's `1/w` input.
 pub(super) const POSITION: usize = 0x70;
+/// `FrontFace`: all ones when the fragment's triangle faces front.
+pub(super) const FRONT_FACING: usize = 0x3fc;
 /// `InstanceId` then `VertexId`.
 pub(super) const INSTANCE_ID: usize = 0x2f8;
 pub(super) const VERTEX_ID: usize = 0x2fc;
