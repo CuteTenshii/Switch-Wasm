@@ -220,6 +220,51 @@ pub(super) fn decode_tex(insn: u64, bindless: bool) -> Op {
     }
 }
 
+/// `txd` and `txd.b`, the sample with explicit derivatives, as Eden reads them. Every image is
+/// sampled at level 0, so the derivatives choose nothing and it is a `tex`.
+pub(super) fn decode_txd(insn: u64, bindless: bool) -> Op {
+    let un = Op::Unimplemented { raw: insn };
+    // `.LC`; `.AOFFI`, whose offset sits at bit 16 of the register after the coordinates; and a
+    // sparse predicate other than `PT`.
+    if field(insn, 50, 1) != 0 || field(insn, 35, 1) != 0 || field(insn, 51, 3) != 7 {
+        return un;
+    }
+    let dst = reg(insn, 0, 8);
+    let bits = field(insn, 31, 4);
+    if bits == 0 || dst == RZ {
+        return un;
+    }
+    let mut first = reg(insn, 8, 8);
+    let handle_reg = bindless.then(|| {
+        let handle = first;
+        first = first.wrapping_add(1);
+        handle
+    });
+    // The layer sits after the coordinates, in the low half of its register.
+    let (dim, layer) = match field(insn, 28, 3) {
+        0 => (TexDim::T1d, None),
+        2 => (TexDim::T2d, None),
+        3 => (TexDim::T2dArray, Some(first.wrapping_add(2))),
+        _ => return un,
+    };
+    Op::Tex {
+        dst,
+        coords: [first, first.wrapping_add(1), first.wrapping_add(2)],
+        layer,
+        dref: None,
+        offset: None,
+        lod: None,
+        handle: if bindless {
+            0
+        } else {
+            field(insn, 36, 13) as u16
+        },
+        handle_reg,
+        dim,
+        mask: [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0],
+    }
+}
+
 /// The four-bit channel mask a texture instruction keeps at `[31, 35)`.
 fn texture_mask(insn: u64) -> [bool; 4] {
     let bits = field(insn, 31, 4);

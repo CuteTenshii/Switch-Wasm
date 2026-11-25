@@ -670,6 +670,12 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
     if insn >> 56 == 0xdf && field(insn, 54, 1) == 0 {
         return decode_tld4s(insn);
     }
+    // txd and txd.b: 0xde00 and 0xde40 over 0xffc0.
+    match insn >> 54 {
+        0b11_0111_1000 => return decode_txd(insn, false),
+        0b11_0111_1001 => return decode_txd(insn, true),
+        _ => {}
+    }
     // tld4.b: the bindless gather, 0xdec0/0xffc0.
     if insn >> 54 == 0b11_0111_1011 {
         return decode_tld4(insn, true);

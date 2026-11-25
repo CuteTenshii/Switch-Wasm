@@ -1018,6 +1018,53 @@ fn a_tld_takes_its_coordinates_from_its_type_and_its_meta_registers_in_order() {
     ));
 }
 
+/// A `txd` samples level 0 like every other sample, so it decodes to the `tex` that reads the
+/// same registers; its derivatives in r12 on are never read.
+#[test]
+fn a_txd_is_the_tex_of_its_coordinates() {
+    // txd r0, r4, r12, handle 10, rgba, the predicate PT.
+    const BASE: u64 = 0xde << 56 | 7 << 51 | 10 << 36 | 0xf << 31 | 12 << 20 | 4 << 8;
+    let tex = |dim, coords, layer, handle, handle_reg| Op::Tex {
+        dst: 0,
+        coords,
+        layer,
+        dref: None,
+        offset: None,
+        lod: None,
+        handle,
+        handle_reg,
+        dim,
+        mask: [true; 4],
+    };
+    assert_eq!(
+        decode(BASE | 2 << 28).op,
+        tex(TexDim::T2d, [4, 5, 6], None, 10, None)
+    );
+    assert_eq!(decode(BASE).op, tex(TexDim::T1d, [4, 5, 6], None, 10, None));
+    assert_eq!(
+        decode(BASE | 3 << 28).op,
+        tex(TexDim::T2dArray, [4, 5, 6], Some(6), 10, None)
+    );
+    // txd.b reads its handle from the first coordinate register.
+    assert_eq!(
+        decode(BASE | 1 << 54 | 3 << 28).op,
+        tex(TexDim::T2dArray, [5, 6, 7], Some(7), 0, Some(4))
+    );
+    // A 1D array, a volume, a clamp, an offset and a sparse predicate are not sampled.
+    for unsupported in [
+        BASE | 1 << 28,
+        BASE | 4 << 28,
+        BASE | 2 << 28 | 1 << 50,
+        BASE | 2 << 28 | 1 << 35,
+        BASE & !(7 << 51) | 2 << 28,
+    ] {
+        assert!(
+            matches!(decode(unsupported).op, Op::Unimplemented { .. }),
+            "{unsupported:#x}"
+        );
+    }
+}
+
 /// Eden throws on a register pair that starts on an odd register, so the decoder refuses it.
 #[test]
 fn a_tlds_pair_on_an_odd_register_is_unimplemented() {
