@@ -11,6 +11,7 @@ Section headings are paths under `crates/switch-core/src/`; a heading that start
 ## `services/audout.rs`
 
 - A buffer is released once the CPU has run for as long as its samples take at the device's rate, queued behind whatever is still playing (`free_at`). Samples copy to the host on arrival; the *tag* waits, and the buffer event fires on the clock. A silent device restarts from now, so a submission gap is a gap, not a debt.
+- **The buffer event fires once per finished buffer and is not auto-clear**: `nn::os` takes a wake only if its `svcResetSignal` finds the signal set, so a wait that cleared it made the one wake look stolen. Just Dance 2019 and 2022 then never collected a buffer: no sound, and a freeze at 0 fps.
 - **Do not answer the buffer-event wait with a bare success**: `nn::audio`'s mixer takes the event as proof a buffer is waiting and reads its queue head unchecked.
 - `audio_tick` is the audio counterpart of the display tick in `svcWaitSynchronization`: it returns a deadline so a waiter can sleep knowing when the device will wake it, and folds in the renderer's frame clock (`audren_tick`).
 - `AppendAudioOutBuffer` validates `data_offset + data_size <= buffer_size`: the Mii editor submits descriptors whose data points inside the `AudioOutBuffer` struct itself (buzzing). The buffer is still queued and returned.

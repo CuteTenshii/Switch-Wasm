@@ -114,6 +114,12 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
         0,
         "the played buffer did not fire"
     );
+    // `nn::os` takes a wake only if its reset finds the signal; Just Dance 2019 waited forever.
+    assert_eq!(
+        reset_signal(&mut cpu, event),
+        0,
+        "the wait cleared the signal before the reset could take it"
+    );
     ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "no tag released");
     assert_eq!(cpu.mem.read_u64(u64::from(TAGS)).unwrap(), TAG);

@@ -148,7 +148,9 @@ impl Cpu {
 
                 let handle = self.alloc_handle();
                 self.record_handle(handle, "audout:iaudioout");
-                let event = self.alloc_event("audout:buffer", true);
+                // Cleared by the guest's `svcResetSignal`, never by the wait: `nn::os` takes a
+                // wake only if that reset finds the signal, and the event fires once per buffer.
+                let event = self.alloc_event("audout:buffer", false);
                 self.process_mut().audio_outs.insert(
                     handle,
                     AudioOut {
@@ -584,7 +586,7 @@ mod tests {
     #[test]
     fn a_finished_buffer_fires_its_event_once() {
         let mut cpu = request(false, 0, &[]);
-        let event = cpu.alloc_event("audout:buffer", true);
+        let event = cpu.alloc_event("audout:buffer", false);
         cpu.process_mut().audio_outs.insert(
             9,
             super::AudioOut {
