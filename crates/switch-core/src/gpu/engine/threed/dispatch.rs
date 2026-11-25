@@ -10,7 +10,8 @@ use super::{
     MME_INSTRUCTION_RAM_POINTER, MME_START_ADDRESS_RAM_LOAD, MME_START_ADDRESS_RAM_POINTER,
     PRIMITIVE_TOPOLOGY_CONTROL, REPORT_SEMAPHORE, REPORT_SEMAPHORE_OFFSET,
     REPORT_SEMAPHORE_PAYLOAD, SET_PRIMITIVE_TOPOLOGY, SHADOW_RAM_CONTROL, SYNCPT_ACTION,
-    VERTEX_BEGIN_GL, VERTEX_BEGIN_INSTANCE_NEXT, VERTEX_END_GL, VIEWPORT_SCALE_OFFSET,
+    TEXTURE_BARRIERS, VERTEX_BEGIN_GL, VERTEX_BEGIN_INSTANCE_NEXT, VERTEX_END_GL,
+    VIEWPORT_SCALE_OFFSET,
 };
 use crate::gpu::engine::{field, Registers, REGISTER_COUNT};
 use crate::gpu::exec::ExecCtx;
@@ -41,7 +42,14 @@ impl Engine3D {
             constbuf_cursor: 0,
             bound_constbufs: [[None; CONSTBUF_BANKS]; BIND_SLOTS],
             activity: Default::default(),
+            texture_barriers: 0,
         }
+    }
+
+    /// How many texture barriers the guest has written. Until the next one, a draw sampling a
+    /// surface it also renders to may see that surface as it was at the last one.
+    pub fn texture_barriers(&self) -> u64 {
+        self.texture_barriers
     }
 
     /// Handle one method write; `last_call` ends a method group and runs a pending macro.
@@ -87,6 +95,7 @@ impl Engine3D {
             VERTEX_END_GL => {}
             // Shared with KEPLER_INLINE_TO_MEMORY_B; macro writes arrive here, not via the channel.
             INLINE_FIRST..=INLINE_LAST => self.inline.write(method, arg, ctx)?,
+            _ if TEXTURE_BARRIERS.contains(&method) => self.texture_barriers += 1,
             _ => {
                 ctx.stats.inert_methods += 1;
                 if ctx.trace {

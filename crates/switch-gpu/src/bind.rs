@@ -561,7 +561,13 @@ impl Gpu {
             surface
         } else if !held.is_empty() {
             reason = Some(0);
-            self.texture_over_held(upload, view_dimension, &held, &writes, compare)?
+            let target = |addr: &u64| self.space.held.get(addr).map(|held| &held.texture);
+            let feedback = held.iter().any(|(_, layer)| {
+                drawn
+                    .iter()
+                    .any(|addr| target(addr) == Some(layer.surface()))
+            });
+            self.texture_over_held(upload, view_dimension, &held, &writes, compare, feedback)?
         } else if compare {
             reason = Some(1);
             self.shadow_texture(upload)?
@@ -957,7 +963,9 @@ impl Gpu {
     /// texture, guest memory is not read and the copy is kept until a source is written: a
     /// title samples one shadow map in hundreds of draws. A kept copy whose sources were only
     /// written or added to takes just those layers: Breath of the Wild draws an array layer by
-    /// layer, sampling it after every draw.
+    /// layer, sampling it after every draw. A `feedback` draw, which renders to a surface it
+    /// samples, is promised what earlier draws rendered only past a texture barrier, so until
+    /// one it samples the kept copy as it is rather than ending the pass to update it.
     pub(super) fn texture_over_held(
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
@@ -965,6 +973,7 @@ impl Gpu {
         held: &[(u32, HeldLayer)],
         writes: &[u64],
         compare: bool,
+        feedback: bool,
     ) -> std::result::Result<wgpu::Texture, String> {
         let sixteen = |surface: &HeldLayer| {
             matches!(surface, HeldLayer::Shadow(t)
@@ -1024,6 +1033,18 @@ impl Gpu {
                 self.held_copies_reused += 1;
                 return Ok(copy.texture.clone());
             }
+            let same_surfaces = copy.sources.len() == sources.len()
+                && copy
+                    .sources
+                    .iter()
+                    .zip(&sources)
+                    .all(|((was_at, was, _), (at, now, _))| was_at == at && was == now);
+            if same_guest && feedback && same_surfaces && copy.epoch == self.texture_epoch() {
+                let texture = copy.texture.clone();
+                self.held_copies_kept += 1;
+                self.count_held_copy("kept until a barrier", upload, view);
+                return Ok(texture);
+            }
             if same_guest && by_layer {
                 update = stale_layers(&copy.sources, &sources, compare)
                     .map(|layers| (copy.texture.clone(), layers));
@@ -1044,8 +1065,10 @@ impl Gpu {
             }
             self.held_copies_updated += 1;
             self.count_held_copy("layers updated", upload, view);
+            let epoch = self.texture_epoch();
             if let Some(copy) = self.space.held_copies.get_mut(&key) {
                 copy.sources = sources;
+                copy.epoch = epoch;
             }
             return Ok(texture);
         }
@@ -1113,12 +1136,19 @@ impl Gpu {
             texture: texture.clone(),
             sources,
             guest,
+            epoch: self.texture_epoch(),
         };
         if let Some(stale) = self.space.held_copies.insert(key, copy) {
             // A draw recorded before this one may still sample it.
             self.scratch.push(Scratch::Texture(stale.texture));
         }
         Ok(texture)
+    }
+
+    /// Advanced by every texture barrier the guest writes and every frame presented; a kept copy
+    /// a draw renders to waits for either. A new frame bounds it for titles that write none.
+    pub(super) fn texture_epoch(&self) -> (u64, u64) {
+        (self.texture_barriers, self.frames_presented)
     }
 
     fn count_held_copy(

@@ -134,6 +134,24 @@ fn setup_depth_target(engine: &mut Engine3D, base: u64, format: u32) {
     engine.regs.set(SCREEN_SCISSOR_VERTICAL, 1 << 16);
 }
 
+/// Method numbers from NVIDIA's `clb197.h`, in words.
+#[test]
+fn only_the_texture_barrier_methods_count_as_barriers() {
+    let mut h = Harness::new(0x1000);
+    let mut engine = Engine3D::new();
+    let mut ctx = h.ctx();
+    // `WAIT_FOR_IDLE` and `INVALIDATE_SHADER_CACHES_NO_WFI` leave the texture cache alone.
+    for method in [0x044, 0x369] {
+        engine.write(method, 0, true, &mut ctx).unwrap();
+    }
+    assert_eq!(engine.texture_barriers(), 0);
+    // `PIXEL_SHADER_BARRIER`, `INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI`, `INVALIDATE_TEXTURE_DATA_CACHE`.
+    for method in [0x378, 0x4A2, 0x4CE] {
+        engine.write(method, 0, true, &mut ctx).unwrap();
+    }
+    assert_eq!(engine.texture_barriers(), 3);
+}
+
 #[test]
 fn every_pixel_the_engine_produces_goes_through_the_bound_renderer() {
     let mut h = Harness::new(0x1000);

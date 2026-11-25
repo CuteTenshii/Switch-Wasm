@@ -721,6 +721,8 @@ struct HeldCopy {
     /// The guest bytes the held layers were copied over, unless they cover the texture. The
     /// texture cache hands out the same bytes until a guest write evicts them.
     guest: Option<std::sync::Arc<[u8]>>,
+    /// [`Gpu::texture_epoch`] when its layers were last copied.
+    epoch: (u64, u64),
 }
 
 /// Past this many, every kept copy is dropped: a title's set of sampled held surfaces is small.
@@ -900,6 +902,13 @@ pub struct Gpu {
     pub held_copies_reused: u64,
     /// Kept copies brought up to date by copying in only the layers that changed.
     pub held_copies_updated: u64,
+    /// Kept copies a draw that renders to their surfaces sampled as they were, since the guest
+    /// has written no texture barrier since they were copied.
+    pub held_copies_kept: u64,
+    /// [`Engine3D::texture_barriers`] at the draw being recorded.
+    texture_barriers: u64,
+    /// Frames submitted or scanned out.
+    frames_presented: u64,
     /// Bindings that sampled a padded held surface in place. See [`wgsl::Crop`].
     pub cropped_binds: u64,
     /// Compute launches run on the device, and why others went to the software dispatch.
@@ -1280,6 +1289,7 @@ impl Renderer for Gpu {
             return self.software.draw(engine, ctx);
         }
         self.evict_written(ctx);
+        self.texture_barriers = engine.texture_barriers();
         let mut route = None;
         let attempt = match self.prepare(engine, &*ctx) {
             Ok(prepared) => {
@@ -1478,6 +1488,7 @@ impl Renderer for Gpu {
 
     fn submit_frame(&mut self, ctx: &mut ExecCtx, scanout: Option<u64>) -> Result<Submit> {
         self.enter_space(ctx.as_id);
+        self.frames_presented += 1;
         self.submit_frame_inner(ctx, scanout)
     }
 
@@ -1492,6 +1503,7 @@ impl Renderer for Gpu {
 
     fn scan_out(&mut self, ctx: &mut ExecCtx, shot: &ScanOut) -> Result<bool> {
         self.enter_space(ctx.as_id);
+        self.frames_presented += 1;
         if self.screen.is_none() || self.give_up() || self.software_frame {
             return Ok(false);
         }
@@ -1561,6 +1573,7 @@ impl Renderer for Gpu {
             .field("heldCopiesMade", self.held_copies_made)
             .field("heldCopiesReused", self.held_copies_reused)
             .field("heldCopiesUpdated", self.held_copies_updated)
+            .field("heldCopiesKept", self.held_copies_kept)
             .field("croppedBinds", self.cropped_binds)
             .field("passesJoined", self.passes_joined)
             .object("heldCopyShapes", |o| {

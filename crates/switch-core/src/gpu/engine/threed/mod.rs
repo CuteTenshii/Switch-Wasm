@@ -23,6 +23,10 @@ const MME_START_ADDRESS_RAM_LOAD: u32 = 0x048;
 /// replaced by the recorded value; see [`ShadowRam`].
 const SHADOW_RAM_CONTROL: u32 = 0x049;
 const SYNCPT_ACTION: u32 = 0x0B2;
+/// The methods after which a draw is promised what earlier draws rendered when it samples it:
+/// `PIXEL_SHADER_BARRIER`, `INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI` and
+/// `INVALIDATE_TEXTURE_DATA_CACHE`.
+const TEXTURE_BARRIERS: [u32; 3] = [0x378, 0x4A2, 0x4CE];
 const RENDER_TARGET_BASE: u32 = 0x200;
 const RENDER_TARGET_STRIDE: u32 = 0x10;
 const VIEWPORT_TRANSFORM_BASE: u32 = 0x280;
@@ -416,6 +420,8 @@ pub struct Engine3D {
     bound_constbufs: [[Option<(u64, u32)>; CONSTBUF_BANKS]; BIND_SLOTS],
     /// Draws and clears by target: see [`crate::gpu::activity`].
     pub activity: crate::gpu::activity::GpuActivity,
+    /// Texture barriers written so far; see [`Engine3D::texture_barriers`].
+    texture_barriers: u64,
 }
 
 impl Default for Engine3D {

@@ -2941,6 +2941,113 @@ fn scratch_counts_every_level_of_a_compressed_texture() {
     );
 }
 
+/// A draw that renders to the surface it samples keeps sampling its copy as it was until the
+/// guest writes a texture barrier or a frame is presented; any other draw takes the update.
+#[test]
+fn a_draw_sampling_its_own_target_updates_the_copy_only_past_a_barrier() {
+    use crate::HeldLayer;
+    use switch_core::gpu::engine::threed::ShaderStage;
+    use switch_core::gpu::pipeline::Format;
+    use switch_core::gpu::surface::Layout;
+    use switch_core::gpu::texture::{Sampler, SwizzleSource, TextureSlot, Wrap};
+    use switch_core::gpu::upload::{TextureKey, TextureUpload};
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    const SIDE: u32 = 4;
+    let format = Format::Rgba8Unorm;
+    let upload = TextureUpload {
+        stage: ShaderStage::Fragment,
+        slot: TextureSlot::Bound(0),
+        handle: 0,
+        format,
+        width: SIDE,
+        height: SIDE,
+        layers: 1,
+        row_bytes: SIDE * 4,
+        rows: SIDE,
+        bytes: std::sync::Arc::from(vec![0u8; (SIDE * SIDE * 4) as usize]),
+        key: TextureKey {
+            addr: 0x1_0000,
+            width: SIDE,
+            height: SIDE,
+            layers: 1,
+            layer_stride: SIDE * SIDE * 4,
+            row_bytes: SIDE * 4,
+            rows: SIDE,
+            block_depth_gobs: 1,
+            layout: Layout::Pitch { pitch: SIDE * 4 },
+            format,
+            srgb: false,
+        },
+        source_len: u64::from(SIDE * SIDE * 4),
+        swizzle: [
+            SwizzleSource::R,
+            SwizzleSource::G,
+            SwizzleSource::B,
+            SwizzleSource::A,
+        ],
+        sampler: Sampler {
+            wrap_u: Wrap::ClampToEdge,
+            wrap_v: Wrap::ClampToEdge,
+            wrap_w: Wrap::ClampToEdge,
+            mag_linear: false,
+            min_linear: false,
+            compare: None,
+        },
+        shrink: 0,
+    };
+    let surface = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("held target"),
+        size: wgpu::Extent3d {
+            width: SIDE,
+            height: SIDE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let held = [(0, HeldLayer::Colour(surface))];
+    let view = wgpu::TextureViewDimension::D2;
+    let copy = gpu
+        .texture_over_held(&upload, view, &held, &[1], false, true)
+        .expect("the first copy");
+
+    // Drawn again with no barrier since: the copy stays as it was.
+    let kept = gpu
+        .texture_over_held(&upload, view, &held, &[2], false, true)
+        .expect("the kept copy");
+    assert!(kept == copy, "a new copy was made");
+    assert_eq!((gpu.held_copies_kept, gpu.held_copies_updated), (1, 0));
+
+    // A draw that does not render to it sees every draw before it.
+    gpu.texture_over_held(&upload, view, &held, &[2], false, false)
+        .expect("the update");
+    assert_eq!((gpu.held_copies_kept, gpu.held_copies_updated), (1, 1));
+
+    // Past a barrier, so does one that does.
+    gpu.texture_barriers += 1;
+    gpu.texture_over_held(&upload, view, &held, &[3], false, true)
+        .expect("the update past a barrier");
+    assert_eq!((gpu.held_copies_kept, gpu.held_copies_updated), (1, 2));
+    gpu.texture_over_held(&upload, view, &held, &[4], false, true)
+        .expect("the copy kept again");
+    assert_eq!((gpu.held_copies_kept, gpu.held_copies_updated), (2, 2));
+
+    // And past a presented frame.
+    gpu.frames_presented += 1;
+    gpu.texture_over_held(&upload, view, &held, &[5], false, true)
+        .expect("the update past a frame");
+    assert_eq!((gpu.held_copies_kept, gpu.held_copies_updated), (2, 3));
+}
+
 /// A kept copy of a held array, one of whose layers was drawn again, takes only that layer, after
 /// the work recorded before it, which still reads the layer as it was.
 #[test]
@@ -3172,7 +3279,7 @@ fn a_kept_copy_of_a_held_array_takes_only_the_layer_written_since() {
     ];
     let view = wgpu::TextureViewDimension::D2Array;
     let copy = gpu
-        .texture_over_held(&upload, view, &held, &[1, 1], false)
+        .texture_over_held(&upload, view, &held, &[1, 1], false, false)
         .expect("the first copy");
     let made = gpu.held_copies_made;
 
@@ -3187,7 +3294,7 @@ fn a_kept_copy_of_a_held_array_takes_only_the_layer_written_since() {
     encoder.copy_texture_to_texture(redraw.as_image_copy(), drawn.as_image_copy(), extent);
     gpu.restore_batch(encoder);
     let again = gpu
-        .texture_over_held(&upload, view, &held, &[1, 2], false)
+        .texture_over_held(&upload, view, &held, &[1, 2], false, false)
         .expect("the update");
     assert!(again == copy, "a new copy was made for one written layer");
     assert_eq!(gpu.held_copies_made, made);
@@ -3221,7 +3328,7 @@ fn a_kept_copy_of_a_held_array_takes_only_the_layer_written_since() {
 
     // The same sources again are the same copy, untouched.
     let reused = gpu.held_copies_reused;
-    gpu.texture_over_held(&upload, view, &held, &[1, 2], false)
+    gpu.texture_over_held(&upload, view, &held, &[1, 2], false, false)
         .expect("the reuse");
     assert_eq!(gpu.held_copies_reused, reused + 1);
 }
