@@ -3,6 +3,7 @@
 mod cpu;
 
 use cpu::*;
+use switch_core::cpu::{AudioRendererActivity, AudioVoiceActivity};
 
 #[test]
 fn audout_plays_the_buffers_the_guest_hands_it() {
@@ -747,6 +748,59 @@ fn audren_frame_event_fires_on_the_clock() {
     );
 }
 
+/// A renderer that plays one 240-sample PCM16 buffer, `end_of_stream` as given, for three
+/// frames: the buffer lasts one, so the voice runs out and stays out.
+fn underruns_after_one_buffer_and_two_empty_frames(end_of_stream: bool) -> AudioRendererActivity {
+    const IN: u32 = 0x3_0000;
+    const OUT: u32 = 0x4_0000;
+    const PCM: u32 = 0x5_0000;
+    const FRAMES: u32 = 240;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    let renderer = audren_stereo(&mut cpu);
+    let mut update = AudrenUpdate::new(1, 1, 1);
+    update.voice(0, PCM_INT16, 1, PCM, FRAMES * 2, FRAMES);
+    update.data[update.voices_at + 0x60 + 0x19] = u8::from(end_of_stream);
+    update.route(0, 0, 1.0);
+    update.route(0, 1, 1.0);
+    update.mix(2);
+    update.sink(&[0, 1]);
+    cpu.cycles += AUDREN_FRAME_CYCLES * 3;
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+    cpu.audio_activity().renderers.remove(0)
+}
+
+#[test]
+fn audren_counts_a_voice_running_out_once_per_run_out() {
+    let renderer = underruns_after_one_buffer_and_two_empty_frames(false);
+    assert_eq!(
+        renderer.underruns, 1,
+        "starved frames counted, not run-outs"
+    );
+    assert_eq!(
+        renderer.voice_list,
+        [AudioVoiceActivity {
+            id: 0,
+            format: "PCM16",
+            sample_rate: 48_000,
+            pitch: 1.0,
+            channels: 1,
+            volume: 1.0,
+            playing: true,
+            queued_buffers: 0,
+            underruns: 1,
+        }]
+    );
+}
+
+#[test]
+fn audren_does_not_count_a_stream_that_ends_as_running_out() {
+    let renderer = underruns_after_one_buffer_and_two_empty_frames(true);
+    assert_eq!(renderer.underruns, 0);
+}
+
 /// QuerySystemEvent on a fresh stereo renderer: (cpu, frame event).
 fn renderer_with_frame_event() -> (Cpu, u32) {
     let mut cpu = cpu_at(0x1000);
@@ -818,6 +872,26 @@ fn audren_mixes_one_frame_per_wake_when_the_clock_jumps() {
     update.send(&mut cpu, renderer, IN, OUT, 0x2000);
     let mixed = cpu.audio_activity().renderers.remove(0);
     assert_eq!(mixed.rendered_frames, 1, "one wake, one frame");
+    assert_eq!(
+        mixed.underruns, 0,
+        "the queued buffer outlasted the frames mixed"
+    );
+}
+
+#[test]
+fn audren_reports_the_frame_wakes_it_fired_and_dropped() {
+    let (mut cpu, event) = renderer_with_frame_event();
+    cpu.cycles += AUDREN_FRAME_CYCLES * 3;
+    let on_time = take_frame_wakes(&mut cpu, event);
+    cpu.cycles += AUDREN_FRAME_CYCLES * 100;
+    let caught_up = take_frame_wakes(&mut cpu, event);
+    let renderer = cpu.audio_activity().renderers.remove(0);
+    assert_eq!(renderer.frame_wakes, on_time + caught_up);
+    assert_eq!(
+        renderer.frame_wakes_dropped + caught_up,
+        100,
+        "every frame come due is either woken for or dropped"
+    );
 }
 
 #[test]

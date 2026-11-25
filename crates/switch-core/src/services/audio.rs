@@ -114,6 +114,31 @@ pub struct AudioRendererActivity {
     pub voices_playing: u32,
     /// 0 when no playable sink is configured.
     pub sink_channels: u32,
+    /// Every voice's [`AudioVoiceActivity::underruns`], summed.
+    pub underruns: u64,
+    /// Frame events fired: a title that mixes one frame per wake mixes this many frames.
+    pub frame_wakes: u64,
+    /// Frames owed a wake and dropped because the renderer fell too far behind.
+    pub frame_wakes_dropped: u64,
+    /// The voices the title has in use, by id.
+    pub voice_list: Vec<AudioVoiceActivity>,
+}
+
+/// One voice of a renderer, as its last update set it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioVoiceActivity {
+    pub id: u32,
+    pub format: &'static str,
+    pub sample_rate: u32,
+    pub pitch: f32,
+    pub channels: u32,
+    pub volume: f32,
+    pub playing: bool,
+    /// Wave buffers queued and not yet played.
+    pub queued_buffers: u32,
+    /// Times it ran out of samples while playing, short of a buffer that ends its stream;
+    /// counted since the slot was first used.
+    pub underruns: u64,
 }
 
 impl Cpu {
@@ -181,6 +206,26 @@ impl Cpu {
                     .filter(|voice| voice.in_use && voice.playing && voice.remaining > 0)
                     .count() as u32,
                 sink_channels: renderer.sink.as_ref().map_or(0, |sink| sink.channels),
+                underruns: renderer.voices.iter().map(|voice| voice.underruns).sum(),
+                frame_wakes: renderer.frame_wakes,
+                frame_wakes_dropped: renderer.frame_wakes_dropped,
+                voice_list: renderer
+                    .voices
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, voice)| voice.in_use)
+                    .map(|(id, voice)| AudioVoiceActivity {
+                        id: id as u32,
+                        format: super::audren::sample_format_name(voice.format),
+                        sample_rate: voice.sample_rate,
+                        pitch: voice.pitch,
+                        channels: voice.channel_count,
+                        volume: voice.volume,
+                        playing: voice.playing,
+                        queued_buffers: voice.remaining,
+                        underruns: voice.underruns,
+                    })
+                    .collect(),
             })
             .collect();
         renderers.sort_by_key(|renderer| renderer.handle);

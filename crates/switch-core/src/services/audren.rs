@@ -106,8 +106,9 @@ pub(crate) struct AudioRenderer {
     /// Frames come due whose event has not fired yet, because the guest had not taken the
     /// last one: titles mix one frame per wake, so each owed frame is owed a wake of its own.
     pub frame_events_owed: u64,
-    /// Frame events fired.
+    /// Frame events fired, and frames owed a wake that were dropped as too far behind.
     pub frame_wakes: u64,
+    pub frame_wakes_dropped: u64,
     /// `frame_wakes` when the mix last ran: a title woken per frame gets one frame per wake.
     pub mixed_at_wake: u64,
     /// The cycle the mix has been rendered up to.
@@ -264,6 +265,13 @@ pub(crate) struct Voice {
     pub played_samples: u64,
     pub wavebufs_consumed: u32,
     pub drops: u32,
+    /// Times the voice ran out of samples mid-frame while playing, for the debug panel.
+    /// Kept across restarts: the panel reads it as a rate.
+    pub underruns: u64,
+    /// Out of samples since the last underrun, so one run-out counts once.
+    pub starved: bool,
+    /// The last finished buffer ended its stream, so running out is the sound ending.
+    pub stream_ended: bool,
 }
 
 impl Default for Voice {
@@ -293,6 +301,9 @@ impl Default for Voice {
             played_samples: 0,
             wavebufs_consumed: 0,
             drops: 0,
+            underruns: 0,
+            starved: false,
+            stream_ended: false,
         }
     }
 }
@@ -312,6 +323,8 @@ impl Voice {
         self.played_samples = 0;
         self.wavebufs_consumed = 0;
         self.drops = 0;
+        self.starved = false;
+        self.stream_ended = false;
     }
 }
 
@@ -426,6 +439,7 @@ impl Cpu {
                         next_frame_at: now.wrapping_add(FRAME_CYCLES),
                         frame_events_owed: 0,
                         frame_wakes: 0,
+                        frame_wakes_dropped: 0,
                         mixed_at_wake: 0,
                         rendered_through: now,
                         elapsed_frames: 0,
@@ -625,6 +639,7 @@ impl Cpu {
                 let owed = renderer.frame_events_owed + due;
                 if owed > MAX_CATCHUP_FRAMES {
                     // Too far behind to catch up, as `audren_render` drops its backlog.
+                    renderer.frame_wakes_dropped += owed - MAX_CATCHUP_FRAMES;
                     renderer.frame_events_owed = MAX_CATCHUP_FRAMES;
                     renderer.next_frame_at = now.wrapping_add(FRAME_CYCLES);
                 } else {
@@ -1308,6 +1323,10 @@ fn render_voice(
             if !pull_source(mem, voice) {
                 // Ran dry: interpolate toward zero, keeping `primed` so `prev` still plays.
                 voice.cur = [0.0; MAX_VOICE_CHANNELS];
+                if !voice.starved && !voice.stream_ended {
+                    voice.underruns += 1;
+                }
+                voice.starved = true;
             }
         }
     }
@@ -1406,6 +1425,7 @@ fn finish_wavebuf(voice: &mut Voice, wavebuf: WaveBuf) {
     voice.wavebufs_consumed = voice.wavebufs_consumed.wrapping_add(1);
     voice.offset = 0;
     voice.adpcm.next = None;
+    voice.stream_ended = wavebuf.end_of_stream;
     if wavebuf.end_of_stream {
         voice.remaining = 0;
     }
@@ -1449,7 +1469,22 @@ fn pull_source(mem: &Memory, voice: &mut Voice) -> bool {
         }
         voice.offset += 1;
         voice.played_samples = voice.played_samples.wrapping_add(1);
+        voice.starved = false;
+        voice.stream_ended = false;
         return true;
+    }
+}
+
+/// A voice's sample format as the debug panel names it.
+pub(crate) fn sample_format_name(format: u8) -> &'static str {
+    match format {
+        PCM_INT8 => "PCM8",
+        PCM_INT16 => "PCM16",
+        PCM_INT24 => "PCM24",
+        PCM_INT32 => "PCM32",
+        PCM_FLOAT => "float",
+        PCM_ADPCM => "ADPCM",
+        _ => "unknown",
     }
 }
 
