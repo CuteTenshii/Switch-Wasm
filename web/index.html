@@ -648,7 +648,7 @@
         <span class="section-title">switch-relay</span>
       </summary>
       <div class="section-body">
-        <p class="tiny">Run switch-relay on this computer to give the console Internet access, and LAN access with <code>--allow-private</code>.</p>
+        <p class="tiny">Run switch-relay on this computer to give the console Internet access. LAN access and its other settings are under Relay settings.</p>
         <div class="panel-tools">
           <a id="net-download" class="btn small" href="https://git.tenshii.moe/Tenshii/Switch-Wasm/releases/latest"
              target="_blank" rel="noopener">Download switch-relay</a>
@@ -670,6 +670,39 @@
         </div>
         <p class="muted tiny" id="net-note" hidden></p>
         <p class="muted tiny" id="net-link"></p>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary class="section-head">
+        <span class="section-title">Relay settings</span>
+        <info-tip text="Read from the relay at the address above, and saved in its switch-relay.toml. A change that lets the console reach more, or trusts another page, waits until you allow it in a window switch-relay opens on its own computer."></info-tip>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny relay-status" id="relay-note" role="status" aria-live="polite">Shown once the relay is connected: turn on Internet above.</p>
+        <form id="relay-form" class="relay-form" hidden>
+          <label class="check"><input type="checkbox" id="relay-private"><span>Let the console reach this computer and the local network <span class="relay-lock" id="relay-private-lock" hidden>(set by <code>--allow-private</code>)</span></span></label>
+          <label class="check"><input type="checkbox" id="relay-inbound"><span>Let other computers connect to the console <span class="relay-lock" id="relay-inbound-lock" hidden>(set by <code>--allow-inbound</code>)</span></span></label>
+          <div class="relay-port">
+            <label class="field" for="relay-port"><span class="field-label">Port</span><input id="relay-port"
+              type="number" class="num" min="1" max="65535" step="1" required></label>
+            <span class="relay-lock" id="relay-port-lock" hidden>(set by <code>--port</code>)</span>
+            <p class="muted tiny" id="relay-port-note" hidden></p>
+          </div>
+          <fieldset class="relay-origins">
+            <legend class="tiny">Trusted pages</legend>
+            <ul class="relay-origin-list" id="relay-origins"></ul>
+            <div class="panel-tools">
+              <label class="field" for="relay-origin"><span class="field-label">Page</span><input id="relay-origin"
+                type="url" class="addr" spellcheck="false" autocomplete="off" placeholder="https://example.org"></label>
+              <button id="relay-add" class="btn small" type="button">Trust</button>
+            </div>
+          </fieldset>
+          <div class="panel-tools">
+            <button id="relay-save" class="btn small" type="submit" disabled>Save</button>
+            <button id="relay-revert" class="btn small" type="button" disabled>Undo changes</button>
+          </div>
+        </form>
       </div>
     </details>
 

@@ -68,6 +68,10 @@ declare module '@core/switch_wasm.js' {
   export function switch_net_disconnect(): void;
   export function switch_net_connections_json(): string;
   export function switch_net_status_json(): string;
+  // Throws when no relay that has settings is connected.
+  export function switch_net_set_settings(
+    port: number, allowPrivate: boolean, allowInbound: boolean, origins: string[],
+  ): void;
   export function switch_run(maxSteps: number): number;
   export function switch_pace(elapsed: number): number;
   export function switch_halted(): boolean;

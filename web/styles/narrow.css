@@ -15,6 +15,9 @@
     animation-name: sheet-in;
   }
   .debug-group { min-height: 44px; }
+  .relay-form .btn,
+  .relay-form .check { min-height: 44px; }
+  .relay-form .check { align-items: center; }
 
   @keyframes sheet-in {
     from {

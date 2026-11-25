@@ -266,3 +266,67 @@
   font-family: var(--mono);
   font-size: var(--text-xs);
 }
+
+.relay-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.relay-form .check { align-items: flex-start; }
+.relay-form .check input[type="checkbox"] { margin-top: 1px; }
+.check:has(input:disabled) {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+.check input[type="checkbox"]:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+.relay-lock {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.relay-port {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+.relay-port p { flex-basis: 100%; }
+.relay-origins {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+.relay-origins legend {
+  padding: 0;
+  margin-bottom: 6px;
+  color: var(--muted);
+}
+.relay-origin-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+.relay-origin {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+.relay-origin-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+.relay-status:empty { display: none; }
+.relay-status.is-error { color: var(--red); }

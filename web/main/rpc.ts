@@ -41,6 +41,12 @@ export function onNetState(handler: NonNullable<typeof netState>): void {
   netState = handler;
 }
 
+let netSettings: ((json: string) => void) | null = null;
+
+export function onNetSettings(handler: NonNullable<typeof netSettings>): void {
+  netSettings = handler;
+}
+
 let nandProgress: ((done: number, total: number) => void) | null = null;
 
 export function onNandProgress(handler: NonNullable<typeof nandProgress>): void {
@@ -139,6 +145,9 @@ export function initWorker(): void {
         break;
       case 'net_state':
         netState?.(d.state);
+        break;
+      case 'net_settings':
+        netSettings?.(d.json);
         break;
       case 'nand_progress':
         nandProgress?.(d.done, d.total);

@@ -311,6 +311,8 @@ export interface Commands {
   netConnections(): string;
   // The relay socket's state and the frames that crossed it: `{socket, out, in}`.
   netStatus(): string;
+  // Ask the connected relay to change its settings; the answers come as `net_settings`.
+  setRelaySettings(port: number, allowPrivate: boolean, allowInbound: boolean, origins: string[]): void;
 
   // An ELF or an NRO, told apart by its magic; the worker reads the file itself.
   loadProgram(file: File): number;
@@ -471,5 +473,7 @@ export type WorkerMessage =
   | { type: 'storage_read_only' }
   // The link to the relay changed: `unreachable` is a socket that failed or closed.
   | { type: 'net_state'; state: NetState }
+  // The relay's settings or an answer about changing them, as JSON (`net/settings.rs`).
+  | { type: 'net_settings'; json: string }
   | { id: number; ok: true; result: unknown }
   | { id: number; ok: false; error: string };

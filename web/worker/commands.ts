@@ -14,7 +14,8 @@ import {
   switch_launch, switch_load_keys, switch_load_program,
   switch_load_sd, switch_memory_json, switch_nand_content, switch_nand_identify, switch_nand_launch,
   switch_net_connect,
-  switch_net_connections_json, switch_net_disconnect, switch_net_status_json, switch_next_load,
+  switch_net_connections_json, switch_net_disconnect, switch_net_set_settings, switch_net_status_json,
+  switch_next_load,
   switch_open_nca,
   switch_inspect_nca, switch_open_container, switch_peek_icon, switch_peek_title, switch_reg_dump, switch_restore_nand, switch_restore_storage, switch_run,
   switch_set_battery, switch_set_jit, switch_set_operation_mode, switch_set_touch, switch_threads_json,
@@ -48,6 +49,7 @@ export const CMD = {
   disconnectNetwork: switch_net_disconnect,
   netConnections: switch_net_connections_json,
   netStatus: switch_net_status_json,
+  setRelaySettings: switch_net_set_settings,
 
   // The core reads the file itself, so the page never holds a copy.
   loadProgram: switch_load_program,

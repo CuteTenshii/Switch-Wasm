@@ -1,18 +1,20 @@
 //! The WebSocket to the relay. Its callbacks only queue; `exchange` moves the queue
 //! into the core once per slice.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
 use js_sys::{ArrayBuffer, Uint8Array};
 use switch_core::cpu::Cpu;
+use switch_relay_proto::{ClientFrame, ServerFrame, OLDEST_VERSION, SETTINGS_SINCE, VERSION};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{BinaryType, MessageEvent, WebSocket};
 
 use super::client::Client;
+use super::settings;
 use super::watchdog::Watchdog;
 use crate::post::post;
 
@@ -26,6 +28,8 @@ struct Inbox {
 struct Link {
     socket: WebSocket,
     inbox: Rc<RefCell<Inbox>>,
+    /// The relay's version, once its `HELLO` came.
+    version: Rc<Cell<Option<u8>>>,
     /// Frames for a socket that has not opened yet.
     pending: Vec<Vec<u8>>,
     watchdog: Watchdog,
@@ -55,19 +59,31 @@ pub fn switch_net_connect(url: &str) -> Result<(), JsValue> {
     let socket = WebSocket::new(url)?;
     socket.set_binary_type(BinaryType::Arraybuffer);
     let inbox = Rc::new(RefCell::new(Inbox::default()));
+    let version = Rc::new(Cell::new(None));
 
     let on_message = {
-        let inbox = inbox.clone();
+        let (inbox, version, socket) = (inbox.clone(), version.clone(), socket.clone());
         Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
             let Ok(event) = event.dyn_into::<MessageEvent>() else {
                 return;
             };
-            if let Ok(buffer) = event.data().dyn_into::<ArrayBuffer>() {
-                inbox
-                    .borrow_mut()
-                    .frames
-                    .push_back(Uint8Array::new(&buffer).to_vec());
+            let Ok(buffer) = event.data().dyn_into::<ArrayBuffer>() else {
+                return;
+            };
+            let raw = Uint8Array::new(&buffer).to_vec();
+            if ServerFrame::is_link_frame(&raw) {
+                if let Ok(frame) = ServerFrame::decode(&raw) {
+                    if let Some(json) = settings::report(&frame) {
+                        post("net_settings", &[("json", json.into())]);
+                        return;
+                    }
+                    if let ServerFrame::Hello { version: v, .. } = frame {
+                        hello(&socket, v);
+                        version.set(Some(v));
+                    }
+                }
             }
+            inbox.borrow_mut().frames.push_back(raw);
         })
     };
     let on_open = Closure::<dyn FnMut(JsValue)>::new(|_: JsValue| {
@@ -100,12 +116,53 @@ pub fn switch_net_connect(url: &str) -> Result<(), JsValue> {
         state.link = Some(Link {
             socket,
             inbox,
+            version,
             pending: Vec::new(),
             watchdog: Watchdog::default(),
             _callbacks: [on_message, on_open, on_close],
         });
     });
     Ok(())
+}
+
+/// Ask a relay that has settings for them, at once rather than in the game loop, so the page
+/// shows them with no title running. One too old to understand is left alone: an unknown op
+/// would end the link.
+fn hello(socket: &WebSocket, version: u8) {
+    if !(OLDEST_VERSION..=VERSION).contains(&version) {
+        return;
+    }
+    if version >= SETTINGS_SINCE {
+        send(socket, &ClientFrame::GetSettings.encode());
+    } else {
+        post("net_settings", &[("json", settings::too_old().into())]);
+    }
+}
+
+/// Ask the relay to change its settings to these; the answer reaches the page as
+/// `net_settings` messages. Fails when no relay that has settings is connected.
+#[wasm_bindgen]
+pub fn switch_net_set_settings(
+    port: u16,
+    allow_private: bool,
+    allow_inbound: bool,
+    origins: Vec<String>,
+) -> Result<(), JsValue> {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let link = state
+            .link
+            .as_ref()
+            .filter(|link| link.socket.ready_state() == WebSocket::OPEN)
+            .filter(|link| link.version.get().is_some_and(|v| v >= SETTINGS_SINCE))
+            .ok_or_else(|| JsValue::from_str("no relay that has settings is connected"))?;
+        let frame = settings::change(port, allow_private, allow_inbound, origins);
+        if send(&link.socket, &frame) {
+            Ok(())
+        } else {
+            Err(JsValue::from_str("the relay socket refused the frame"))
+        }
+    })
 }
 
 /// The socket's state and how many frames have crossed it, as

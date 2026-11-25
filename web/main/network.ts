@@ -32,6 +32,12 @@ const table = $<HTMLElement>('net-table');
 const link = $('net-link');
 const rows = $('net-rows');
 let state: NetState = 'off';
+const linkWatchers: ((state: NetState) => void)[] = [];
+
+/** Call `handler` with each state the link to the relay goes through. */
+export function onRelayLink(handler: (state: NetState) => void): void {
+  linkWatchers.push(handler);
+}
 
 urlInput.value = localStorage.getItem(URL_KEY) ?? DEFAULT_URL;
 $('net-download').prepend(icon(Download));
@@ -100,6 +106,7 @@ onNetState((next) => {
   render();
   say(next === 'unreachable' ? `No relay answered at ${urlInput.value}. Download and start switch-relay, then turn this on.` : '');
   if (next === 'open') log('Online through the relay.');
+  for (const watch of linkWatchers) watch(next);
   void refresh();
 });
 
