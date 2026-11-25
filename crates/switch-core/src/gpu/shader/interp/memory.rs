@@ -316,12 +316,21 @@ impl Invocation {
         env: &Env,
         pending: &mut Vec<(usize, u8, u32)>,
     ) -> ShaderResult<()> {
-        let Op::Txq { lod, handle, .. } = op else {
+        let Op::Txq {
+            lod,
+            handle,
+            handle_reg,
+            ..
+        } = op
+        else {
             unreachable!("run_txq called with {op:?}");
         };
-        let handle = env
-            .consts
-            .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?;
+        let handle = match handle_reg {
+            Some(reg) => self.reg(reg),
+            None => env
+                .consts
+                .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?,
+        };
         let [width, height, depth, levels] = env.textures.dimensions(handle)?;
         let level = self.reg(lod);
         let at = |size: u32| size.checked_shr(level).unwrap_or(0).max(1);

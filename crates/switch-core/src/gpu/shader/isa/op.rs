@@ -689,6 +689,8 @@ pub enum Op {
         dst: u8,
         lod: u8,
         handle: u16,
+        /// `txq.b`: the handle is in this register, and `lod` in the next.
+        handle_reg: Option<u8>,
         mask: [bool; 4],
     },
     /// `tmml` or `tmml.b` asking only for the mip level a sample would read, as unsigned 8.8

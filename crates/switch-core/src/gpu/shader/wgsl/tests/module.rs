@@ -1477,6 +1477,40 @@ fn a_size_query_alone_and_a_zeroed_offset_translate() {
     assert_eq!(translate(&zeroed).unwrap().texture_offsets, vec![(0, 0, 0)]);
 }
 
+/// A `txq.b` asks for the size of the texture its traced handle names.
+#[test]
+fn a_bindless_size_query_queries_the_traced_texture() {
+    // `txq.b $r0 $r2 dimension 0x3`, the handle in r2 and the level in r3.
+    let txq = crate::gpu::shader::isa::decode(0xdf50008180470200).op;
+    let p = program(&[
+        (
+            Op::Ldc {
+                dst: 2,
+                bank: 3,
+                offset: 0x10,
+                idx: RZ,
+                size: MemSize::B32,
+            },
+            ALWAYS,
+        ),
+        (txq, ALWAYS),
+        (Op::Exit, ALWAYS),
+    ]);
+    let translated = translate(&p).unwrap();
+    let slot = TextureSlot::Bindless {
+        bank: 3,
+        offset: 0x10,
+    };
+    assert_eq!(translated.textures, vec![(slot, TexDim::T2d, false)]);
+    assert!(
+        translated
+            .source
+            .contains(&format!("texDims({}u, r3)", slot.key())),
+        "{}",
+        translated.source
+    );
+}
+
 #[test]
 fn a_module_is_complete_enough_to_stand_on_its_own() {
     // All four `HOST_INTERFACE` hooks are defined in the module.

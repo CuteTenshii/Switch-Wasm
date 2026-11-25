@@ -239,8 +239,19 @@ impl Emitter<'_> {
                 }
             }
             Op::Tmml { dst } => self.set_r(dst, "0u"),
-            Op::Txq { lod, handle, .. } => {
-                self.query_texture(at, TextureSlot::Bound(handle), lod);
+            Op::Txq {
+                lod,
+                handle,
+                handle_reg,
+                ..
+            } => {
+                let slot = match handle_reg {
+                    None => TextureSlot::Bound(handle),
+                    Some(reg) => self
+                        .bindless_slot(at, reg)
+                        .ok_or(Unsupported::UntracedHandle { at })?,
+                };
+                self.query_texture(at, slot, lod);
             }
             Op::Tld4 {
                 coords,

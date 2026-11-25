@@ -1844,6 +1844,7 @@ pub fn image_size_program() -> Vec<u64> {
                 dst: 0,
                 lod: 8,
                 handle: 8,
+                handle_reg: None,
                 mask: [true, true, false, false],
             },
         ),

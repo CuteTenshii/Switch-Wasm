@@ -1873,6 +1873,44 @@ fn a_tld_fetches_the_texel_the_rasterizer_fetches() {
     }
 }
 
+/// `txq.b` reports the same size on both renderers for the texture its handle register names,
+/// at the level its next register names. The shader draws `1 / size` so the size shows.
+#[test]
+fn a_bindless_size_query_reports_the_size_the_rasterizer_reports() {
+    type SetUp = fn(&mut Harness);
+    // i2f.f32.u32 and mufu.rcp of r0 and r1, the width and height.
+    let i2f =
+        |reg: u64| testing::encode(0x5cb8, &[(0, 8, reg), (20, 8, reg), (8, 2, 2), (10, 2, 2)]);
+    let rcp = |reg: u64| 0x5080_0000_0047_0000 | reg << 8 | reg;
+    let ops = [
+        0xef94_0030_0107_ff04, // ld b32 $r4 c3[0x10], the handle
+        0xdf50_0081_8047_0400, // txq.b $r0 $r4 dimension 0x3
+        i2f(0),
+        i2f(1),
+        rcp(0),
+        rcp(1),
+    ];
+    let levels: [(u32, SetUp, u32); 2] = [
+        (0, Harness::bindless_texture, 0xff00_2020),
+        (1, Harness::bindless_mipmapped_texture, 0xff00_4040),
+    ];
+    for (level, image, colour) in levels {
+        let set_up = move |h: &mut Harness| {
+            image(h);
+            colour_triangle(h, [[0.0; 4]; 3]);
+        };
+        let set = [(5, level), (2, 0), (3, 1.0f32.to_bits())];
+        let new = || Harness::with_fragment_shader(testing::alu_fragment_shader(&set, &ops));
+        let mut h = new();
+        set_up(&mut h);
+        h.draw_with(&mut Software).expect("the draw");
+        let drawn: std::collections::BTreeSet<u32> = h.target().into_iter().collect();
+        assert_eq!(drawn, [0, colour].into(), "level {level}");
+
+        agrees_shading(new, |_| {}, set_up);
+    }
+}
+
 /// `tld4` forms beyond the plain gather: a shadow gather, a gather with an offset per texel and a
 /// cube gather read what the rasterizer reads.
 #[test]

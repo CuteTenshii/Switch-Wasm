@@ -215,7 +215,9 @@ pub(super) fn reads(op: &Op) -> Vec<u8> {
             v.extend([layer, lod, offset, handle_reg].into_iter().flatten());
             v
         }
-        Op::Txq { lod, .. } => vec![lod],
+        Op::Txq {
+            lod, handle_reg, ..
+        } => [Some(lod), handle_reg].into_iter().flatten().collect(),
         Op::Tld4s {
             coords,
             offset,

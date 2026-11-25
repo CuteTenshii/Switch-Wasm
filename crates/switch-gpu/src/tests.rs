@@ -548,6 +548,7 @@ fn a_smaller_level_reads_in_the_guests_texels() {
             dst: 0,
             lod: RZ,
             handle: 10,
+            handle_reg: None,
             mask: [true, true, false, false],
         },
     ];

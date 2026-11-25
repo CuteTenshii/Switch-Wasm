@@ -428,6 +428,17 @@ fn decodes_a_txq_and_a_tld4() {
             dst: 0,
             lod: 8,
             handle: 8,
+            handle_reg: None,
+            mask: [true, true, false, false],
+        }
+    );
+    assert_eq!(
+        decode(0xdf50008180470800).op,
+        Op::Txq {
+            dst: 0,
+            lod: 9,
+            handle: 0,
+            handle_reg: Some(8),
             mask: [true, true, false, false],
         }
     );

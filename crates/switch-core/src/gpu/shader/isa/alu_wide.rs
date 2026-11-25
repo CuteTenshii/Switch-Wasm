@@ -656,9 +656,11 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
     if insn & 0xfff8_0000_0000_0000 == 0xdeb8_0000_0000_0000 {
         return decode_tex(insn, true);
     }
-    // txq: a bound texture's size, 0xdf48/0xfff8.
-    if insn & 0xfff8_0000_0000_0000 == 0xdf48_0000_0000_0000 {
-        return decode_txq(insn);
+    // txq and txq.b: a texture's size, 0xdf48 and 0xdf50 over 0xfff8.
+    match insn >> 51 {
+        0x1be9 => return decode_txq(insn, false),
+        0x1bea => return decode_txq(insn, true),
+        _ => {}
     }
     // tmml and tmml.b: 0xdf58 and 0xdf60, over 0xfff8.
     if matches!(insn >> 51, 0x1beb | 0x1bec) {

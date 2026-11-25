@@ -1034,6 +1034,29 @@ fn txq_reports_the_size_at_the_level_it_is_asked_about() {
     }
 }
 
+/// `txq.b` reads its handle from its register and the level from the next one.
+#[test]
+fn a_bindless_txq_reports_the_size_of_the_handle_its_register_holds() {
+    struct Sized;
+    impl TextureSource for Sized {
+        fn sample(&self, handle: u32, _u: f32, _v: f32, _l: u32) -> ShaderResult<[f32; 4]> {
+            Err(fault(format!("no sample of {handle:#x} here")))
+        }
+        fn dimensions(&self, handle: u32) -> ShaderResult<[u32; 4]> {
+            assert_eq!(handle, 0x5678, "the handle r8 holds");
+            Ok([64, 32, 1, 7])
+        }
+    }
+    // `txq.b $r0 $r8 dimension 0x3`
+    let txq = isa::decode(0xdf50008180470800).op;
+    let mut inv = Invocation::new();
+    inv.set_reg(8, 0x5678);
+    inv.set_reg(9, 1);
+    inv.execute(&prog(&[txq, Op::Exit]), &Env::new(&no_consts(), &Sized))
+        .unwrap();
+    assert_eq!([inv.reg(0), inv.reg(1)], [32, 16]);
+}
+
 /// A bindless `tex.b` samples the handle in its register.
 #[test]
 fn a_bindless_tex_samples_the_handle_its_register_holds() {

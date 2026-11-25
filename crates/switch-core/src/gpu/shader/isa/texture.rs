@@ -226,18 +226,24 @@ fn texture_mask(insn: u64) -> [bool; 4] {
     [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0]
 }
 
-/// `txq`.
-pub(super) fn decode_txq(insn: u64) -> Op {
+/// `txq` and `txq.b`.
+pub(super) fn decode_txq(insn: u64, bindless: bool) -> Op {
     const DIMENSION: u64 = 1;
     let dst = reg(insn, 0, 8);
     let mask = texture_mask(insn);
     if dst == RZ || field(insn, 22, 3) != DIMENSION || mask == [false; 4] {
         return Op::Unimplemented { raw: insn };
     }
+    let src = reg(insn, 8, 8);
     Op::Txq {
         dst,
-        lod: reg(insn, 8, 8),
-        handle: field(insn, 36, 13) as u16,
+        lod: if bindless { src.wrapping_add(1) } else { src },
+        handle: if bindless {
+            0
+        } else {
+            field(insn, 36, 13) as u16
+        },
+        handle_reg: bindless.then_some(src),
         mask,
     }
 }
