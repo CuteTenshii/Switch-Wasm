@@ -151,7 +151,10 @@ impl Gpu {
     pub(crate) fn open_parts(
     ) -> std::result::Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue), String>
     {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        // GL's driver alone costs ~40 MB and a slower open; `WGPU_BACKEND=gl` still reaches it.
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::PRIMARY;
+        let instance = wgpu::Instance::new(descriptor.with_env());
         let adapter =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
                 .map_err(|e| format!("no adapter: {e}"))?;
