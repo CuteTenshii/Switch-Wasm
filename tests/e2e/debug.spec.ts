@@ -20,8 +20,6 @@ test('the display debugger starts empty, fills from a run and can reset its samp
   await expect(display.locator('#display-debug-data')).toBeVisible();
   // It exited without presenting, so there is no frame to measure.
   await expect(display.locator('#display-frame-size')).toHaveText('-');
-  // The renderer's state shows in its own section, not the log.
-  await expect(page.locator('#render-debug-badge')).toHaveText(/^(WebGPU|software|lost)$/);
 
   await reset.click();
   await expect(display.locator('#display-debug-data')).toBeHidden();

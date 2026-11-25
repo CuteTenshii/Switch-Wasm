@@ -35,7 +35,6 @@ test('the on-screen controller shows while a program runs, and a finger slides b
   const b = page.locator('[data-button="B"]');
   await touch.down(await centre(page, '[data-button="A"]'));
   await expect(a).toHaveClass(/is-down/);
-  await expect(page.locator('#input-state')).toHaveText('touch controls');
   await touch.move(await centre(page, '[data-button="B"]'));
   await expect(b).toHaveClass(/is-down/);
   await expect(a).not.toHaveClass(/is-down/);

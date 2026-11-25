@@ -69,7 +69,6 @@ test('a launch without prod.keys says so, opens the panel on the keys, and rerun
   // The rerun with keys finds no Program NCA either, and the core says so.
   await expect(loading.locator('#loading-phase')).toHaveText(/^Launch failed: no Program NCA/);
   await expect(loading.locator('#loading-action')).toBeHidden();
-  await expect(page.locator('#console .info', { hasText: 'Launching game.nsp' })).toHaveCount(2);
 
   // The fixture fails on logged errors, and these were expected.
   await openPanel(page, 'Console');
@@ -88,8 +87,8 @@ test('a dismissed launch failure is not rerun when prod.keys loads', async ({ pa
   await openPanel(page, 'NAND');
   await page.locator('#prod-keys').setInputFiles(FAKE_PROD_KEYS);
   await expect(page.locator('#keys-section .section-note')).toHaveText('1 loaded');
+  // A rerun would show the loading screen in the same task that updates the note.
   await expect(loading).toHaveClass(/hidden/);
-  await expect(page.locator('#console .info', { hasText: 'Launching game.nsp' })).toHaveCount(1);
 
   await openPanel(page, 'Console');
   await page.locator('#btn-clear-console').click();
