@@ -444,6 +444,7 @@ impl Gpu {
         bound: &[Bound],
         ctx: &mut ExecCtx,
     ) -> std::result::Result<(), String> {
+        let shaders = (recipe.key.vs, recipe.key.fs);
         // Held across the frame.
         let colour_target = match p.color {
             Some(color) => {
@@ -549,6 +550,7 @@ impl Gpu {
         let joins = !patched
             && !stores
             && scratch.is_none()
+            && !self.draws_alone()
             && self.pass.as_ref().is_some_and(|open| {
                 open.colour == colour_target
                     && open.extra_colours == extra_colours
@@ -612,6 +614,13 @@ impl Gpu {
                         })
                     })
                     .collect();
+            let timed = self.time_pass(|| {
+                let targets = colour_target
+                    .iter()
+                    .chain(extra_colours.iter().flatten())
+                    .chain(&depth_target);
+                format!("draws {}", crate::timing::attachments(targets))
+            });
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("draws"),
                 color_attachments: &colour,
@@ -625,7 +634,7 @@ impl Gpu {
                         stencil_ops: None,
                     }
                 }),
-                timestamp_writes: None,
+                timestamp_writes: self.render_timestamps(timed),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -640,8 +649,13 @@ impl Gpu {
                 globals: held_globals,
                 set: crate::PassState::default(),
                 pending: None,
+                timed,
             });
         }
+        let timed = self.pass.as_ref().and_then(|open| open.timed);
+        self.note_shaders(timed, || {
+            format!("vs {:016x} fs {:016x}", shaders.0, shaders.1)
+        });
         {
             // In pixels, except on the expanded route where the attachment is in texels.
             let (sx, sy) = match p.render {

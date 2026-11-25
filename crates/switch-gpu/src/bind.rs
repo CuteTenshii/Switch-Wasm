@@ -1377,6 +1377,7 @@ impl Gpu {
                 entries: &entries,
             });
             let target = layer_view(into);
+            let timed = self.time_pass(|| "packed depth".into());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("packed depth"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1389,7 +1390,7 @@ impl Gpu {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: self.render_timestamps(timed),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1488,6 +1489,7 @@ impl Gpu {
                 label: Some("held depth as colour"),
             });
         {
+            let timed = self.time_pass(|| "held depth as colour".into());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("held depth as colour"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1500,7 +1502,7 @@ impl Gpu {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: self.render_timestamps(timed),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });

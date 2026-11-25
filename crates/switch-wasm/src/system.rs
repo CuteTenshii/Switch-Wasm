@@ -3,6 +3,7 @@
 use wasm_bindgen::prelude::wasm_bindgen;
 
 use switch_core::cpu::OperationMode;
+use switch_core::gpu::renderer::DeviceTiming;
 
 use crate::log::{push, PageLevel};
 use crate::session;
@@ -29,6 +30,18 @@ pub fn switch_set_operation_mode(docked: bool) {
 #[wasm_bindgen]
 pub fn switch_force_software(on: bool) {
     session().cpu.nv.gpu.force_software(on);
+}
+
+/// Measure how long the device takes over each pass (`"passes"`), each draw in a pass of its
+/// own (`"draws"`), or nothing (anything else), for the GPU report.
+#[wasm_bindgen]
+pub fn switch_set_device_timing(mode: &str) {
+    let timing = match mode {
+        "passes" => DeviceTiming::Passes,
+        "draws" => DeviceTiming::Draws,
+        _ => DeviceTiming::Off,
+    };
+    session().cpu.nv.gpu.set_device_timing(timing);
 }
 
 /// Set the battery level `psm` reports.

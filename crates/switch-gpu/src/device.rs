@@ -139,6 +139,8 @@ impl Gpu {
             gpu_texture_bytes: 0,
             texture_pages_to_watch: Vec::new(),
             only: None,
+            device_times: None,
+            timing_asked: switch_core::gpu::renderer::DeviceTiming::Off,
         }
     }
 

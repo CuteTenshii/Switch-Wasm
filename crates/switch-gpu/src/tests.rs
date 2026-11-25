@@ -2681,6 +2681,53 @@ fn an_indexed_constant_read_past_its_bank_is_zero() {
     );
 }
 
+/// Timed per pass, two draws into one target share a pass and a row; timed per draw, each
+/// draw is a pass of its own, named by its shaders.
+#[test]
+fn device_time_counts_passes_or_draws() {
+    use switch_core::gpu::renderer::{DeviceTiming, Renderer};
+    use switch_core::gpu::testing::Harness;
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    if !gpu
+        .device_features
+        .contains(wgpu::Features::TIMESTAMP_QUERY)
+    {
+        eprintln!("[gpu] skipped: the adapter has no timestamp queries");
+        return;
+    }
+    for (timing, passes) in [(DeviceTiming::Passes, 1), (DeviceTiming::Draws, 2)] {
+        gpu.set_device_timing(timing);
+        let mut h = Harness::new();
+        h.triangle([0.0; 4]);
+        h.draw_with(&mut gpu).unwrap();
+        h.draw_with(&mut gpu).unwrap();
+        assert!(gpu.reasons.is_empty(), "fell back: {:?}", gpu.reasons);
+        h.flush_with(&mut gpu);
+        gpu.submit_batch();
+        gpu.wait_for_times();
+
+        let (rows, untimed) = gpu.device_time_rows();
+        let draws: Vec<_> = rows
+            .iter()
+            .filter(|(what, _)| what.starts_with("draws "))
+            .collect();
+        assert_eq!(untimed, 0, "{timing:?}");
+        assert_eq!(draws.len(), 1, "{timing:?}: {rows:?}");
+        let (what, total) = draws[0];
+        assert_eq!(total.passes, passes, "{timing:?}: {what}");
+        assert!(
+            what.contains(": vs ") && what.contains(" fs "),
+            "{timing:?}: {what}"
+        );
+        assert!(total.max_ns <= total.ns, "{timing:?}: {total:?}");
+    }
+    gpu.set_device_timing(DeviceTiming::Off);
+    assert!(gpu.device_time_rows().0.is_empty());
+}
+
 /// Past the vertex buffer limit, an array a compute launch wrote keeps a buffer of its own
 /// for the copy and the others are folded.
 #[test]

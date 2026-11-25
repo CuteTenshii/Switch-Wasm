@@ -129,6 +129,8 @@ pub struct Gpu {
     pub channels: HashMap<u32, Channel>,
     /// The session's one backend, lent to whichever channel is executing.
     renderer: Box<dyn renderer::Renderer>,
+    /// Handed to each renderer installed, so a replaced device keeps measuring.
+    device_timing: renderer::DeviceTiming,
     /// The channel the backend was last lent to, whose address space a flush uses.
     last_channel: Option<u32>,
     pub stats: GpuStats,
@@ -164,6 +166,7 @@ impl Gpu {
             address_spaces: HashMap::new(),
             channels: HashMap::new(),
             renderer: Box::new(renderer::Software),
+            device_timing: renderer::DeviceTiming::Off,
             last_channel: None,
             stats: GpuStats::default(),
             framebuffer: Framebuffer::default(),
@@ -323,11 +326,18 @@ impl Gpu {
     /// Replaces the default [`renderer::Software`].
     pub fn set_renderer(&mut self, renderer: Box<dyn renderer::Renderer>) {
         self.renderer = renderer;
+        self.renderer.set_device_timing(self.device_timing);
     }
 
     /// See [`renderer::Renderer::force_software`].
     pub fn force_software(&mut self, on: bool) {
         self.renderer.force_software(on);
+    }
+
+    /// See [`renderer::Renderer::set_device_timing`].
+    pub fn set_device_timing(&mut self, timing: renderer::DeviceTiming) {
+        self.device_timing = timing;
+        self.renderer.set_device_timing(timing);
     }
 
     /// See [`renderer::Renderer::report`].

@@ -314,6 +314,7 @@ impl Gpu {
         let view = to.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.take_batch();
         {
+            let timed = self.time_pass(|| "depth crop".into());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("depth crop"),
                 color_attachments: &[],
@@ -325,7 +326,7 @@ impl Gpu {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: self.render_timestamps(timed),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -576,6 +577,7 @@ impl Gpu {
                 label: Some("depth upload"),
             });
         {
+            let timed = self.time_pass(|| "depth upload".into());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("depth upload"),
                 color_attachments: &[],
@@ -587,7 +589,7 @@ impl Gpu {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: self.render_timestamps(timed),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });

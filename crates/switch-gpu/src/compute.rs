@@ -407,9 +407,11 @@ impl Gpu {
             bound.copy_in(&mut encoder);
         }
         {
+            let timed = self.time_pass(|| "compute".into());
+            self.note_shaders(timed, || format!("cs {module_key:016x}"));
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("compute"),
-                timestamp_writes: None,
+                timestamp_writes: self.compute_timestamps(timed),
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &group, &[]);

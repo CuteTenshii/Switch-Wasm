@@ -159,6 +159,11 @@ pub trait Renderer: std::fmt::Debug {
         let _ = on;
     }
 
+    /// Measure how long the device takes over each pass, or each draw, for [`Renderer::report`].
+    fn set_device_timing(&mut self, timing: DeviceTiming) {
+        let _ = timing;
+    }
+
     /// What this backend has been doing, as the fields of a JSON object.
     fn report(&self, out: &mut crate::json::Object) {
         let _ = out;
@@ -173,6 +178,18 @@ pub trait Renderer: std::fmt::Debug {
     fn lost(&self) -> Option<&str> {
         None
     }
+}
+
+/// What [`Renderer::set_device_timing`] measures the device's time by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeviceTiming {
+    #[default]
+    Off,
+    /// Each pass, as the backend groups draws into them.
+    Passes,
+    /// Each draw in a pass of its own, which names the shaders a slow pass hides but undoes
+    /// the grouping, so the totals are higher than in a normal run.
+    Draws,
 }
 
 /// Where a presented frame stands after [`Renderer::submit_frame`].

@@ -51,7 +51,8 @@ impl Gpu {
         let module = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(what),
+                // The hash names the module in device time and in `browser_boot.mjs --dump-wgsl`.
+                label: Some(&format!("{what} {key:016x}")),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             });
         self.modules.insert(key, module.clone());
@@ -475,9 +476,11 @@ impl Gpu {
     pub(super) fn submit_batch(&mut self) {
         self.end_pass();
         self.flush_constants();
-        if let Some(batch) = self.batch.take() {
+        if let Some(mut batch) = self.batch.take() {
             self.batched_draws = 0;
+            let times = self.resolve_times(&mut batch);
             timed!(self, encode, self.queue.submit([batch.finish()]));
+            self.map_times(times);
             self.restart_constants();
         }
     }
@@ -499,17 +502,19 @@ impl Gpu {
     }
 
     /// Submit an encoder after the draws recorded before it.
-    pub(super) fn submit_with_batch(&mut self, encoder: wgpu::CommandEncoder) {
+    pub(super) fn submit_with_batch(&mut self, mut encoder: wgpu::CommandEncoder) {
         self.end_pass();
         self.flush_constants();
         let batch = self.batch.take().map(|batch| batch.finish());
         self.batched_draws = 0;
+        let times = self.resolve_times(&mut encoder);
         timed!(
             self,
             encode,
             self.queue
                 .submit(batch.into_iter().chain([encoder.finish()]))
         );
+        self.map_times(times);
         self.restart_constants();
     }
 

@@ -63,6 +63,7 @@ declare module '@core/switch_wasm.js' {
   export function switch_set_battery(percent: number, charging: boolean): void;
   export function switch_set_operation_mode(docked: boolean): void;
   export function switch_force_software(on: boolean): void;
+  export function switch_set_device_timing(mode: string): void;
   // Throws when `url` is not a WebSocket address.
   export function switch_net_connect(url: string): void;
   export function switch_net_disconnect(): void;
@@ -131,6 +132,7 @@ declare module '@core/switch_wasm.js' {
   export function switch_jit_stats_json(): string;
   export function switch_gpu_report_json(): string;
   export function switch_memory_json(): string;
+  export function switch_audio_json(): string;
   export function switch_threads_json(): string;
   // `input.rs`, `keyboard.rs`, `users.rs`
   export function switch_set_touch(points: Uint32Array): void;

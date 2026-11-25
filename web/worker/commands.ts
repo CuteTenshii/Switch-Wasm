@@ -18,7 +18,7 @@ import {
   switch_next_load,
   switch_open_nca,
   switch_inspect_nca, switch_open_container, switch_peek_icon, switch_peek_title, switch_reg_dump, switch_restore_nand, switch_restore_storage, switch_run,
-  switch_set_battery, switch_set_jit, switch_set_operation_mode, switch_set_touch, switch_threads_json,
+  switch_set_battery, switch_set_device_timing, switch_set_jit, switch_set_operation_mode, switch_set_touch, switch_threads_json,
   switch_set_trace, switch_set_trace_channels, switch_store_profile_edits, switch_thread_dump,
   switch_user_stage, switch_users_commit,
 } from '@core/switch_wasm.js';
@@ -45,6 +45,7 @@ export const CMD = {
   setBattery: switch_set_battery,
   setOperationMode: switch_set_operation_mode,
   forceSoftware: switch_force_software,
+  setDeviceTiming: switch_set_device_timing,
   connectNetwork: switch_net_connect,
   disconnectNetwork: switch_net_disconnect,
   netConnections: switch_net_connections_json,

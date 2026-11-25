@@ -1,7 +1,9 @@
 // The debug panel: instruction tracing, register dumps, and the translator and
 // renderer readouts.
 
-import type { GpuReport, ThreadActivity, ThreadReading } from '../shared/protocol';
+import type {
+  DeviceTime, DeviceTimingMode, GpuReport, ThreadActivity, ThreadReading,
+} from '../shared/protocol';
 import {
   displayMetrics, resetDisplayMetrics, type DisplayMetrics, type DisplayTiming,
 } from './display-metrics';
@@ -166,6 +168,38 @@ $<HTMLInputElement>('render-force-software').addEventListener('change', (event) 
   void call('forceSoftware', (event.target as HTMLInputElement).checked);
 });
 
+$<HTMLSelectElement>('render-device-time').addEventListener('change', (event) => {
+  void call('setDeviceTiming', (event.target as HTMLSelectElement).value as DeviceTimingMode);
+});
+
+function showDeviceTime(time: DeviceTime | undefined): void {
+  $('render-device-time-block').hidden = !time;
+  if (!time) return;
+  const rows = time.rows ?? [];
+  $('render-device-time-table').hidden = !rows.length;
+  let summary: string;
+  if (time.mode === 'unsupported') {
+    summary = 'This GPU has no timestamp queries, so its time cannot be measured.';
+  } else if (!time.passes) {
+    summary = 'No timed pass has come back from the GPU yet.';
+  } else {
+    const untimed = time.untimed ? `, ${fmtCount(time.untimed)} untimed` : '';
+    summary = `${(time.ms ?? 0).toFixed(1)} ms on the GPU in ${fmtCount(time.passes)} passes `
+      + `over ${time.seconds ?? 0} s${untimed}`;
+  }
+  $('render-device-time-summary').textContent = summary;
+  $('render-device-time-rows').replaceChildren(...rows.map((row) => {
+    const tr = el('tr');
+    tr.append(
+      el('td', null, row.ms.toFixed(1)),
+      el('td', null, row.maxMs.toFixed(1)),
+      el('td', null, fmtCount(row.passes)),
+      el('td', null, row.what),
+    );
+    return tr;
+  }));
+}
+
 const RENDER_PHASES = ['translate', 'upload', 'modules', 'bind', 'pipeline', 'encode', 'flush'] as const;
 
 // Who draws, in a word for the badge and a sentence for the section.
@@ -280,6 +314,7 @@ async function updateRenderDebug(): Promise<void> {
     $(`render-${phase}-frame`).textContent = total === undefined ? '-' : (total / frames).toFixed(1);
     $(`render-${phase}-total`).textContent = total === undefined ? '-' : String(total);
   }
+  showDeviceTime(g.deviceTime);
 }
 
 // Rendered, so its panel, tab, group and section are all open.

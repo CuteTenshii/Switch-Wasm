@@ -164,6 +164,7 @@ impl Gpu {
                 })
                 .into_iter()
                 .collect();
+            let timed = self.time_pass(|| "clear".into());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear"),
                 color_attachments: &attachments,
@@ -180,7 +181,7 @@ impl Gpu {
                         stencil_ops: None,
                     }
                 }),
-                timestamp_writes: None,
+                timestamp_writes: self.render_timestamps(timed),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });

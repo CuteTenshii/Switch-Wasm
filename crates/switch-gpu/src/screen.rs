@@ -292,6 +292,7 @@ impl Gpu {
                 label: Some("scan-out"),
             });
         {
+            let timed = self.time_pass(|| "scan-out".into());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scan-out"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -304,7 +305,7 @@ impl Gpu {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: self.render_timestamps(timed),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });

@@ -419,6 +419,15 @@
       <div class="section-body">
         <p class="tiny" id="render-status" hidden></p>
         <label class="check"><input type="checkbox" id="render-force-software"><span>Draw on the CPU</span></label>
+        <div class="debug-option">
+          <label for="render-device-time">Time on the GPU</label>
+          <select id="render-device-time" class="select"
+            title="Per draw gives every draw a pass of its own, which names the shaders a slow pass runs but makes the frame slower than usual.">
+            <option value="off" selected>Off</option>
+            <option value="passes">Per pass</option>
+            <option value="draws">Per draw</option>
+          </select>
+        </div>
         <div id="render-debug-data" hidden>
           <dl class="debug-totals">
             <div><dt>GPU adapter</dt><dd id="render-adapter">-</dd></div>
@@ -440,7 +449,7 @@
             <div><dt>Indices</dt><dd id="render-read-index">0 B</dd></div>
           </dl>
           <table class="debug-timings">
-            <caption>Device time, milliseconds</caption>
+            <caption>Worker time per stage, milliseconds</caption>
             <thead><tr><th scope="col">Stage</th><th scope="col">Per frame</th>
               <th scope="col">Total</th></tr></thead>
             <tbody>
@@ -460,6 +469,14 @@
                 <td id="render-flush-total">-</td></tr>
             </tbody>
           </table>
+          <div id="render-device-time-block" hidden>
+            <p class="muted tiny debug-caption" id="render-device-time-summary"></p>
+            <table class="debug-timings device-time" id="render-device-time-table" hidden>
+              <thead><tr><th scope="col">Total ms</th><th scope="col">Longest</th>
+                <th scope="col">Passes</th><th scope="col">Pass and the shaders it ran</th></tr></thead>
+              <tbody id="render-device-time-rows"></tbody>
+            </table>
+          </div>
         </div>
         <div id="render-reasons-block" hidden>
           <p class="muted tiny">Fell back because</p>

@@ -330,3 +330,20 @@
 }
 .relay-status:empty { display: none; }
 .relay-status.is-error { color: var(--red); }
+
+.debug-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 10px;
+  font-size: var(--text-xs);
+}
+/* Rows name shaders by their 16-digit hashes, so the last column wraps. */
+.debug-timings.device-time th:first-child { width: 4.5rem; }
+.debug-timings.device-time th:last-child,
+.debug-timings.device-time td:last-child {
+  width: 55%;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

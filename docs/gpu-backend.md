@@ -85,6 +85,13 @@ Section headings are paths under `crates/switch-gpu/src/`; a heading that starts
 - Depth row bytes are the device format's: `Z24S8` is 4 bytes in memory and 4 bytes of `f32` on the device; `ZF32_X24S8` is 8 and 4.
 - A companion surface is resolved back into the held surface before the readback, so guest memory only sees the expanded form; its grid is stored because the register file has moved on by flush time.
 
+## `timing.rs`
+
+- Time on the GPU is a debug option (`Renderer::set_device_timing`, "Time on the GPU" in the Rendering section), off by default because it adds a query resolve and a readback to every submit. Every render and compute pass writes a timestamp as it starts and ends; each submit resolves them at the end of its last command buffer and maps them like a readback, so nothing waits. A row is a pass's kind and attachments, then the shaders its draws ran by WGSL hash, the hash every module is labelled with.
+- A browser writes timestamps only at pass boundaries, so per draw (`DeviceTiming::Draws`) gives each draw a pass of its own (`Gpu::draws_alone`): every row names one shader pair, and the totals include the passes this adds.
+- The query slots start over at each submit. That holds only because each pass recorded on an encoder of its own (blit, scan-out, depth upload, held depth as colour) is submitted right after it; one left waiting past another submit would read a later pass's timestamps.
+- `gpu::Gpu` keeps the mode and hands it to every renderer it installs, so a replaced device keeps measuring.
+
 ## `builtin.rs`
 
 - Depth uploads and shadow maps go through a fullscreen draw writing `frag_depth` from an `r32float` texture (`LOAD_DEPTH_WGSL`, one layer at a time), because a copy cannot write `depth32float`. `depth16unorm` could be copied but takes the same draw path so the two formats cannot diverge. A padded held `ZF32` or `Z16` shadow map layer is drawn by the same pass straight from the held depth texture, since a depth copy takes whole subresources; Breath of the Wild samples a three-layer 720x720 `Z16` shadow map out of surfaces held at 736x720. A shadow map whose layers are all `Z16` surfaces held at its size is copied into a `depth16unorm` map; when only some are, those are drawn by the same pass into the `depth32float` map the others are uploaded into, which holds 16-bit depths exactly (Tears of the Kingdom's cascades).

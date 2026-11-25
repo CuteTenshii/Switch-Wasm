@@ -91,6 +91,22 @@ export interface GpuReport {
     flushWait?: number;
     flushLand?: number;
   };
+  // Present while device time is on; `unsupported` when the device has no timestamp queries.
+  deviceTime?: DeviceTime;
+}
+
+export type DeviceTimingMode = 'off' | 'passes' | 'draws';
+
+// Time the device took over passes since device time was turned on, slowest rows first.
+export interface DeviceTime {
+  mode: 'passes' | 'draws' | 'unsupported';
+  seconds?: number;
+  ms?: number;
+  passes?: number;
+  // Passes left untimed: the queries or readbacks were full, or a map failed.
+  untimed?: number;
+  // A row is a pass's kind and attachments, and the shaders its draws ran, by WGSL hash.
+  rows?: { what: string; passes: number; ms: number; maxMs: number }[];
 }
 
 // One guest thread as the last activity report found it.
@@ -309,6 +325,8 @@ export interface Commands {
   setOperationMode(docked: boolean): void;
   // Draw every frame on the CPU rasterizer, or hand the frames back to the device.
   forceSoftware(on: boolean): void;
+  // Measure the device's time per pass or per draw, for `GpuReport.deviceTime`.
+  setDeviceTiming(mode: DeviceTimingMode): void;
   // Give the guest a network through the relay at `url`, or take it away.
   connectNetwork(url: string): void;
   disconnectNetwork(): void;

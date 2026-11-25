@@ -8,7 +8,10 @@
 // `--relay=ws://…` turns the Network tab on through that relay before the title starts, and
 // reports the tab's socket and connections at the end.
 // `--docked` starts the console docked; `--dock-at=N` toggles it that long after the title starts.
-// `--dump-wgsl` writes every shader the worker hands the browser into a directory.
+// `--dump-wgsl` writes every shader the worker hands the browser into a directory, each named by
+// its creation order and its label, which holds the WGSL hash the Rendering section names it by.
+// `--gpu-time=passes|draws[@seconds]` turns on the Rendering section's time on the GPU from that
+// long after the title starts, with Chromium's timestamps unrounded; the report ends with its table.
 // `--stream` prints console lines matching a regular expression as they appear; `--stream=.` is all.
 // `--dist=dir` serves another site build instead of `dist`, to compare two builds.
 // `--trace=file@seconds:length` records a Chromium trace of the GPU process from that long after the
@@ -48,7 +51,7 @@ import { hookSource, parseSpec, readTextures, writeTextures } from './texture_du
 const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--keys=prod.keys] [--title-keys=title.keys]
   [--firmware=dir] [--update=update.nsp] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--docked] [--dock-at=N] [--software-at=N] [--software-after=B]
   [--relay=ws://127.0.0.1:18787] [--port=N] [--dist=dir]
-  [--firefox] [--gpu-objects] [--dump-wgsl=dir] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length] [--trace-cpu]
+  [--firefox] [--gpu-objects] [--dump-wgsl=dir] [--gpu-time=passes|draws[@seconds]] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length] [--trace-cpu]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
   [--jit-stats] [--press=key@seconds[:every],...] [--script=file|steps]`;
 
@@ -105,6 +108,9 @@ if (gpuObjects && (dumpWgsl || dumpTexture || noWebGpu)) {
   fail('--gpu-objects: not with --dump-wgsl, --dump-texture or --no-webgpu');
 }
 const GPU_OBJECTS_EVERY_MS = 10_000;
+const gpuTime = /^(passes|draws)(?:@(\d+(?:\.\d+)?))?$/.exec(flag('gpu-time') ?? '');
+if (flag('gpu-time') && !gpuTime) fail('--gpu-time: expected passes|draws[@seconds]');
+if (gpuTime && noWebGpu) fail('--gpu-time: not with --no-webgpu');
 const presses = (flag('press') ?? '').split(',').filter(Boolean).map((spec) => {
   const match = /^(.+)@(\d+(?:\.\d+)?)(?::(\d+(?:\.\d+)?))?$/.exec(spec);
   if (!match) fail(`--press=${spec}: expected key@seconds[:every]`);
@@ -143,7 +149,11 @@ const say = (text) => {
 
 const browser = useFirefox
   ? await launchFirefox()
-  : await launchChromium({ webGpu: !noWebGpu, args: browserArgs });
+  // Unrounded timestamps, which Chromium otherwise rounds to 100 µs.
+  : await launchChromium({
+      webGpu: !noWebGpu,
+      args: gpuTime ? [...browserArgs, '--enable-webgpu-developer-features'] : browserArgs,
+    });
 try {
   const page = await browser.newPage();
   // Chromium has no switch that takes WebGPU away, so the property goes before any
@@ -165,7 +175,7 @@ try {
         self.dumpsWgsl = true;
         const create = GPUDevice.prototype.createShaderModule;
         GPUDevice.prototype.createShaderModule = function (descriptor) {
-          console.log('${WGSL_MARK}' + descriptor.code);
+          console.log('${WGSL_MARK}' + (descriptor.label ?? '') + '\\n' + descriptor.code);
           return create.call(this, descriptor);
         };
           }\n` + await response.text();
@@ -199,7 +209,9 @@ try {
       if (text.startsWith(GPU_OBJECTS_MARK)) {
         say(`gpu objects: ${text.slice(GPU_OBJECTS_MARK.length)}`);
       } else if (dumpWgsl && text.startsWith(WGSL_MARK)) {
-        writeFileSync(join(dumpWgsl, `${shadersDumped++}.wgsl`), text.slice(WGSL_MARK.length));
+        const [label, ...code] = text.slice(WGSL_MARK.length).split('\n');
+        const name = [shadersDumped++, ...label.split(/\W+/).filter(Boolean)].join('-');
+        writeFileSync(join(dumpWgsl, `${name}.wgsl`), code.join('\n'));
       } else {
         note(`worker ${m.type()}: ${text}`);
       }
@@ -374,6 +386,14 @@ try {
     });
   };
   const forcing = softwareAt === undefined ? null : repeat(Number(softwareAt), 0, useSoftware);
+  const timingGpu = gpuTime && repeat(Number(gpuTime[2] ?? 0), 0, () => {
+    say(`${elapsed()}s: timing the GPU per ${gpuTime[1] === 'draws' ? 'draw' : 'pass'}`);
+    return page.evaluate((mode) => {
+      const select = document.getElementById('render-device-time');
+      select.value = mode;
+      select.dispatchEvent(new Event('change'));
+    }, gpuTime[1]);
+  });
   const tapping = presses.map(({ key, next, every }) => repeat(next, every, () => tap(key)));
   const shooting = screenshot && screenshotEvery
     ? repeat(screenshotEvery, screenshotEvery, (at) =>
@@ -505,7 +525,7 @@ try {
     }
   }
 
-  await Promise.allSettled([...tapping, docking, forcing, shooting, scripting, tracing]);
+  await Promise.allSettled([...tapping, docking, forcing, timingGpu, shooting, scripting, tracing]);
   if (screenshot && !crashed) {
     await page.locator('#screen').screenshot({ path: screenshot });
     say(`saved the screen to ${screenshot}`);
@@ -533,6 +553,7 @@ try {
   let pageConsole = '(the page crashed, and its console went with it)';
   let rendering = '(not read)';
   let threads = '(not read)';
+  let audio = '(not read)';
   if (!crashed) {
     // Save's download holds every line; the view keeps only the newest.
     const saved = page.waitForEvent('download', { timeout: 60_000 });
@@ -560,10 +581,19 @@ try {
     } catch (error) {
       rendering = `(not read: ${String(error.message).split('\n')[0]})`;
     }
+    // Rates need two readings a second apart, so the group is read after a few.
+    try {
+      await press('[data-debug-group="audio"]');
+      await page.waitForTimeout(3000);
+      const sections = ['#audio-mixer-section', '#audio-clock-section', '#audio-output-section'];
+      audio = (await Promise.all(sections.map((section) => page.locator(section).innerText()))).join('\n');
+    } catch (error) {
+      audio = `(not read: ${String(error.message).split('\n')[0]})`;
+    }
   }
   const consoleSection = `=== the page's console ===\n${pageConsole}`;
   if (out) {
-    writeFileSync(out, `${lines.join('\n')}\n=== threads ===\n${threads}\n=== rendering ===\n${rendering}\n=== network ===\n${network}\n${consoleSection}\n`);
+    writeFileSync(out, `${lines.join('\n')}\n=== threads ===\n${threads}\n=== rendering ===\n${rendering}\n=== audio ===\n${audio}\n=== network ===\n${network}\n${consoleSection}\n`);
     console.log(`wrote ${out}`);
   } else {
     console.log(consoleSection);

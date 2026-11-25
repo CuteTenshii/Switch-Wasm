@@ -33,7 +33,9 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
         // Makes `rg11b10ufloat` renderable.
         | wgpu::Features::RG11B10UFLOAT_RENDERABLE
         // Blending into 32-bit float targets.
-        | wgpu::Features::FLOAT32_BLENDABLE;
+        | wgpu::Features::FLOAT32_BLENDABLE
+        // The debug panel's device time.
+        | wgpu::Features::TIMESTAMP_QUERY;
     // Raise the storage buffer limit to the adapter's: a shader may read more than the guaranteed
     // eight banks. Sampled textures too, past 16, and storage textures past 4; samplers stay at
     // 16, which is all a browser gives, so textures share them past that (`Gpu::share_samplers`)
@@ -66,6 +68,7 @@ mod builtin;
 mod convert;
 mod readback;
 mod stats;
+mod timing;
 
 pub use wgpu;
 
@@ -530,6 +533,8 @@ struct OpenPass {
     /// The last draw, held back so the next instance of it can widen it into one call. Only
     /// [`Gpu::end_pass`] closes a pass, and it records this first.
     pending: Option<DrawCall>,
+    /// Where its timestamps go, when it is timed.
+    timed: Option<u32>,
 }
 
 /// One draw call: vertices or indices, the base vertex of an indexed one, and its instances.
@@ -923,6 +928,9 @@ pub struct Gpu {
     texture_pages_to_watch: Vec<u32>,
     /// `--only <i>` or `<a>..<b>`: render only those draws of each frame here, for bisecting.
     only: Option<std::ops::Range<u32>>,
+    /// The debug panel's device time, and what it last asked for.
+    device_times: Option<timing::DeviceTimes>,
+    timing_asked: switch_core::gpu::renderer::DeviceTiming,
 }
 
 /// Bounds a run over endless fresh textures; a normal working set is far smaller.
@@ -1026,6 +1034,8 @@ impl Drop for Gpu {
             self.drop_space(space);
         }
         self.submit_batch();
+        self.wait_for_times();
+        self.print_times();
         self.release_scratch();
         if let Some(arena) = self.constant_arena.take() {
             arena.destroy();
@@ -1210,6 +1220,10 @@ impl Renderer for Gpu {
     fn force_software(&mut self, on: bool) {
         self.forced_software = on;
         self.software_frame = on;
+    }
+
+    fn set_device_timing(&mut self, timing: switch_core::gpu::renderer::DeviceTiming) {
+        self.set_timing(timing);
     }
 
     fn dispatch(
@@ -1580,5 +1594,6 @@ impl Renderer for Gpu {
                     .field("flushLand", ms(t.flush_land));
             });
         }
+        self.report_times(out);
     }
 }
