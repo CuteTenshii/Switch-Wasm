@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use switch_relay::config::{self, Approval, Config, Overrides};
-use switch_relay::policy::{Unknown, TRUSTED_ORIGINS};
+use switch_relay::policy::TRUSTED_ORIGINS;
 use switch_relay::Timeouts;
 use tokio::net::TcpListener;
 
@@ -73,11 +73,6 @@ async fn main() -> ExitCode {
         }
     };
     let terminal = std::io::stdin().is_terminal();
-    let unknown = if terminal {
-        Unknown::Ask
-    } else {
-        Unknown::Deny
-    };
     eprintln!("switch-relay listening on ws://127.0.0.1:{port}");
     eprintln!("trusted: {}", TRUSTED_ORIGINS.join(", "));
     match &path {
@@ -85,7 +80,7 @@ async fn main() -> ExitCode {
         None => eprintln!("no config directory: settings changes last until the relay exits"),
     }
     let approval = Approval::Ask { terminal };
-    let config = Config::new(settings, overrides, unknown, approval, path, port);
+    let config = Config::new(settings, overrides, approval, approval, path, port);
     let config = Arc::new(config);
     if let Some(listener) = listener_v6 {
         tokio::spawn(switch_relay::serve(

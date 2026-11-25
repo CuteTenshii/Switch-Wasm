@@ -3,13 +3,15 @@
 use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use switch_relay_proto::{Settings as Report, SettingsChange, SettingsRefusal as Refusal};
 use tokio::sync::Mutex;
 
-use crate::policy::{Policy, Unknown};
-use crate::{dialog, terminal};
+use crate::dialog::{self, Shown};
+use crate::policy::Policy;
+use crate::terminal;
 
 /// The port the relay listens on when nothing says otherwise.
 pub const DEFAULT_PORT: u16 = 18787;
@@ -157,29 +159,40 @@ fn origins(list: &[String]) -> Result<Vec<String>, String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Approval {
     /// A window on the relay's desktop; with none, the terminal when there is one.
-    Ask {
-        terminal: bool,
-    },
+    Ask { terminal: bool },
     /// Yes without asking. For tests.
     Allow,
+    /// No without asking, as where there is nobody to ask.
     Deny,
 }
 
+/// How long a question waits for its answer before it counts as no.
+pub const QUESTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Past [`QUESTION_TIMEOUT`], for a window that did not close when told to: the relay stops
+/// waiting while it stays up.
+const WINDOW_GRACE: Duration = Duration::from_secs(5);
+
 impl Approval {
-    async fn ask(self, text: String) -> bool {
+    /// The answer to `text`; `None` when nobody gave one in time.
+    pub async fn ask(self, text: String) -> Option<bool> {
         match self {
-            Approval::Allow => true,
-            Approval::Deny => false,
+            Approval::Allow => Some(true),
+            Approval::Deny => Some(false),
             Approval::Ask { terminal } => {
                 let question = text.clone();
-                let shown = tokio::task::spawn_blocking(move || dialog::ask(&question))
-                    .await
-                    .ok()
-                    .flatten();
+                let window =
+                    tokio::task::spawn_blocking(move || dialog::ask(&question, QUESTION_TIMEOUT));
+                let shown =
+                    match tokio::time::timeout(QUESTION_TIMEOUT + WINDOW_GRACE, window).await {
+                        Ok(joined) => joined.ok().flatten(),
+                        Err(_) => Some(Shown::TimedOut),
+                    };
                 match shown {
-                    Some(answer) => answer,
-                    None if terminal => terminal::ask(&text).await,
-                    None => false,
+                    Some(Shown::Answered(answer)) => Some(answer),
+                    Some(Shown::TimedOut) => None,
+                    None if terminal => terminal::ask(&text, QUESTION_TIMEOUT).await,
+                    None => Some(false),
                 }
             }
         }
@@ -203,7 +216,7 @@ impl Config {
     pub fn new(
         settings: Settings,
         overrides: Overrides,
-        unknown: Unknown,
+        unknown: Approval,
         approval: Approval,
         path: Option<PathBuf>,
         listening: u16,
@@ -310,7 +323,7 @@ impl Config {
             asking();
             let list: String = opening.iter().map(|line| format!("\n  - {line}")).collect();
             let question = format!("{from} wants switch-relay to:\n{list}\n\nAllow this?");
-            if !self.approval.ask(question).await {
+            if self.approval.ask(question).await != Some(true) {
                 eprintln!("refused a settings change from {from}");
                 return Err(Refusal::Denied);
             }
@@ -401,7 +414,7 @@ mod tests {
         Config::new(
             Settings::default(),
             overrides,
-            Unknown::Deny,
+            Approval::Deny,
             approval,
             path,
             DEFAULT_PORT,
@@ -448,7 +461,7 @@ mod tests {
                 ..Settings::default()
             },
             Overrides::default(),
-            Unknown::Deny,
+            Approval::Deny,
             Approval::Deny,
             None,
             DEFAULT_PORT,

@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use switch_relay::config::{Approval, Config, Overrides, Settings};
-use switch_relay::policy::Unknown;
 use switch_relay::Timeouts;
 use switch_relay_proto::{
     ClientFrame, Failure, Peer, ServerFrame, Settings as RelaySettings, SettingsChange,
@@ -56,7 +55,7 @@ async fn relay_config(overrides: Overrides, approval: Approval, timeouts: Timeou
     let config = Config::new(
         settings,
         overrides,
-        Unknown::Deny,
+        Approval::Deny,
         approval,
         None,
         address.port(),

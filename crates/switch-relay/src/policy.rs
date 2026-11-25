@@ -2,30 +2,59 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
-use tokio::sync::Mutex;
+use tokio::sync::watch;
 
-use crate::terminal;
+use crate::config::Approval;
 
 /// Origins that may use the relay without being asked: the deployed emulator and its dev server.
 pub const TRUSTED_ORIGINS: [&str; 2] = ["http://localhost:8000", "https://tenshii.moe"];
 
-/// What to do with an origin that is not trusted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Unknown {
-    /// Ask on the terminal, once per origin until the relay exits.
-    Ask,
-    Deny,
-}
+/// Most connections from the origin being asked about that wait for the answer together.
+pub const MAX_WAITING: usize = 16;
 
 pub struct Policy {
     /// The built-in origins and those given on the command line, which no page can remove.
     fixed: Vec<String>,
     open: RwLock<Open>,
-    unknown: Unknown,
-    /// Answers given to unknown origins. Held across the question, so one is asked at a time.
+    /// Who answers for an origin nobody trusted, once per origin until the relay exits.
+    unknown: Approval,
     decided: Mutex<HashMap<String, bool>>,
+    /// The one question open, if any.
+    asking: Mutex<Option<Question>>,
+}
+
+/// An origin being asked about, and the connections from it waiting for the answer.
+struct Question {
+    origin: String,
+    waiting: usize,
+    answer: watch::Receiver<Option<bool>>,
+}
+
+enum Turn {
+    Decided(bool),
+    /// Another connection from the origin is asking; this one hears its answer.
+    Wait(watch::Receiver<Option<bool>>),
+    /// This connection asks, and answers the others through the sender.
+    Ask(watch::Sender<Option<bool>>),
+}
+
+/// Ends the open question however its asker ends, so a dropped one leaves no question behind.
+struct Asked<'a> {
+    asking: &'a Mutex<Option<Question>>,
+    answer: watch::Sender<Option<bool>>,
+}
+
+impl Drop for Asked<'_> {
+    fn drop(&mut self) {
+        *self.asking.lock().unwrap() = None;
+        // Waiters that hear nothing take it as no.
+        self.answer.send_if_modified(|answer| {
+            answer.get_or_insert(false);
+            true
+        });
+    }
 }
 
 /// What a page may change while the relay runs.
@@ -38,7 +67,7 @@ struct Open {
 impl Policy {
     pub fn new(
         extra_origins: Vec<String>,
-        unknown: Unknown,
+        unknown: Approval,
         allow_private: bool,
         allow_inbound: bool,
     ) -> Policy {
@@ -57,6 +86,7 @@ impl Policy {
             }),
             unknown,
             decided: Mutex::new(HashMap::new()),
+            asking: Mutex::new(None),
         }
     }
 
@@ -75,6 +105,11 @@ impl Policy {
     }
 
     /// Whether a page with this `Origin` header may connect. A client with none is not a browser.
+    ///
+    /// One unknown origin is asked about at a time. While it is, more connections from it wait
+    /// for the same answer, up to [`MAX_WAITING`], and any other unknown origin is refused
+    /// without being remembered, so no page can pile connections up behind a question or queue
+    /// question after question. A question nobody answers is no, and is not remembered either.
     pub async fn origin_allowed(&self, origin: Option<&str>) -> bool {
         let Some(origin) = origin.map(str::to_ascii_lowercase) else {
             return false;
@@ -82,16 +117,51 @@ impl Policy {
         if self.fixed.contains(&origin) || self.open.read().unwrap().origins.contains(&origin) {
             return true;
         }
-        let mut decided = self.decided.lock().await;
-        if let Some(&answer) = decided.get(&origin) {
-            return answer;
-        }
-        let answer = match self.unknown {
-            Unknown::Ask => terminal::ask(&format!("Allow {origin} to use this relay?")).await,
-            Unknown::Deny => false,
+        let sender = match self.turn(&origin) {
+            Turn::Decided(answer) => return answer,
+            Turn::Wait(mut answer) => {
+                let heard = answer.wait_for(Option::is_some).await.map(|answer| *answer);
+                return heard.ok().flatten().unwrap_or(false);
+            }
+            Turn::Ask(sender) => sender,
         };
-        decided.insert(origin, answer);
+        let asked = Asked {
+            asking: &self.asking,
+            answer: sender,
+        };
+        let question = format!("Allow pages from {origin} to use this relay?");
+        let answer = self.unknown.ask(question).await;
+        if let Some(answer) = answer {
+            self.decided.lock().unwrap().insert(origin, answer);
+        }
+        let answer = answer.unwrap_or(false);
+        asked.answer.send_replace(Some(answer));
         answer
+    }
+
+    /// What a connection from `origin`, which nobody trusts outright, does next.
+    fn turn(&self, origin: &str) -> Turn {
+        // Taken first, so an answer cannot land between reading `decided` and opening a question.
+        let mut asking = self.asking.lock().unwrap();
+        if let Some(&answer) = self.decided.lock().unwrap().get(origin) {
+            return Turn::Decided(answer);
+        }
+        match asking.as_mut() {
+            Some(question) if question.origin == origin && question.waiting < MAX_WAITING => {
+                question.waiting += 1;
+                Turn::Wait(question.answer.clone())
+            }
+            Some(_) => Turn::Decided(false),
+            None => {
+                let (sender, receiver) = watch::channel(None);
+                *asking = Some(Question {
+                    origin: origin.to_owned(),
+                    waiting: 0,
+                    answer: receiver,
+                });
+                Turn::Ask(sender)
+            }
+        }
     }
 
     /// Whether guests may listen for connections and hear from hosts they never sent to.
@@ -172,12 +242,14 @@ fn is_public_v6(address: Ipv6Addr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     fn closed() -> Policy {
         Policy::new(
             vec!["https://Example.org".into()],
-            Unknown::Deny,
+            Approval::Deny,
             false,
             false,
         )
@@ -207,6 +279,63 @@ mod tests {
                 .await
         );
         assert!(!policy.origin_allowed(None).await);
+    }
+
+    /// Open a question about `origin` as a connection would, and keep it open.
+    fn ask_about(policy: &Policy, origin: &str) -> watch::Sender<Option<bool>> {
+        match policy.turn(origin) {
+            Turn::Ask(sender) => sender,
+            _ => panic!("{origin} should be asked about"),
+        }
+    }
+
+    #[tokio::test]
+    async fn while_one_origin_is_asked_about_others_are_refused_and_not_remembered() {
+        let policy = closed();
+        let open = ask_about(&policy, "https://a.example");
+        assert!(!policy.origin_allowed(Some("https://b.example")).await);
+
+        *policy.asking.lock().unwrap() = None;
+        drop(open);
+        assert!(
+            matches!(policy.turn("https://b.example"), Turn::Ask(_)),
+            "the refusal was remembered"
+        );
+    }
+
+    #[tokio::test]
+    async fn connections_from_the_origin_asked_about_share_its_answer_up_to_a_limit() {
+        let policy = Arc::new(closed());
+        let open = ask_about(&policy, "https://a.example");
+        let waiting: Vec<_> = (0..MAX_WAITING)
+            .map(|_| {
+                let policy = policy.clone();
+                tokio::spawn(async move { policy.origin_allowed(Some("https://a.example")).await })
+            })
+            .collect();
+        tokio::task::yield_now().await;
+        while policy.asking.lock().unwrap().as_ref().unwrap().waiting < MAX_WAITING {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !policy.origin_allowed(Some("https://a.example")).await,
+            "one past the limit waits"
+        );
+        open.send_replace(Some(true));
+        for waiter in waiting {
+            assert!(waiter.await.unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_is_remembered_and_frees_the_question() {
+        let policy = Policy::new(Vec::new(), Approval::Allow, false, false);
+        assert!(policy.origin_allowed(Some("https://a.example")).await);
+        assert!(policy.asking.lock().unwrap().is_none());
+        assert!(matches!(
+            policy.turn("https://a.example"),
+            Turn::Decided(true)
+        ));
     }
 
     #[test]
@@ -303,7 +432,7 @@ mod tests {
 
     #[test]
     fn private_addresses_can_be_allowed_on_request() {
-        let policy = Policy::new(Vec::new(), Unknown::Deny, true, false);
+        let policy = Policy::new(Vec::new(), Approval::Deny, true, false);
         assert!(policy.address_allowed(Ipv4Addr::LOCALHOST));
     }
 }

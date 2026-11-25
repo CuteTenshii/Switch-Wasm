@@ -87,7 +87,7 @@ A browser WebSocket cannot slow a sender down, so neither side may send more tha
 
 ## Keepalive
 
-A connection that has not finished the WebSocket upgrade within 10 seconds is closed. The question about an unknown origin comes after the upgrade, so this does not limit how long the relay waits for an answer.
+A connection that has not finished the WebSocket upgrade within 10 seconds is closed. The question about an unknown origin comes after the upgrade, so this does not limit how long the relay waits for an answer; the question's own timeout does (see [Relay policy](#relay-policy)).
 
 The relay sends a WebSocket Ping every 15 seconds. A page that sends nothing for 45 seconds, not even the Pong a browser returns on its own, is gone: the relay drops the WebSocket without a close frame and closes every stream it held.
 
@@ -100,7 +100,8 @@ A quiet stream on a page that still answers is left open, however long it stays 
 The relay is a proxy to anywhere its host can reach, and any web page can open a WebSocket to a loopback port, so the defaults are closed and need no configuration.
 
 - It listens on `127.0.0.1:18787`, and on `[::1]:18787` where the host has IPv6.
-- It trusts pages by `Origin`, which a browser always sends and a page cannot forge. `http://localhost:8000` and `https://tenshii.moe` are trusted. Any other origin is asked about on the relay's terminal, once per run; with no terminal it is refused. A client with no `Origin` is not a browser and is refused.
+- It trusts pages by `Origin`, which a browser always sends and a page cannot forge. `http://localhost:8000` and `https://tenshii.moe` are trusted. Any other origin is asked about the way a settings change is (see [Settings](#settings)), and the answer holds until the relay exits. A client with no `Origin` is not a browser and is refused.
+- One origin is asked about at a time. While it is, up to 16 more connections from it wait for the same answer; past that, and from any other unknown origin, connections are refused at once and nothing is remembered, so the origin is asked about on a later try. A question nobody answers within 60 seconds is no and is not remembered either.
 - An untrusted origin gets a WebSocket close with code 1008 before `HELLO`.
 - It refuses private, loopback, link-local, carrier-grade NAT, multicast and reserved destinations, IPv4 and IPv6 (`FAILED`, reason 4; a datagram to one is dropped). This is checked on the resolved address, not the name. An IPv6 address that carries an IPv4 one (IPv4-mapped, NAT64's `64:ff9b::/96`, 6to4) is judged by the IPv4 address.
 - Inbound traffic is off by default. A UDP socket only hears from hosts it has sent to, on any of their ports, as a NAT that filters by address does, and gets whatever host port is free. `LISTEN` is refused (reason 4).
@@ -126,7 +127,7 @@ A page reads and changes the settings over its link, outside any stream.
 
 - `GET_SETTINGS` is answered with `SETTINGS`: `listening`, the port the relay listens on now; `port`, the one it listens on from its next start; then `flags`, bit 0 allow private, bit 1 allow inbound, bit 2 saved (clear where there is no config directory, so changes last until the relay exits), and bits 3, 4 and 5 for the port, allow private and allow inbound set by a flag; then the origins the settings trust, and the origins trusted whatever they say (the built-in ones and `--allow-origin`).
 - `SET_SETTINGS` carries the whole settings as they should be. The relay answers with the new `SETTINGS`, or `SETTINGS_REFUSED`: denied (the user said no, or there was no way to ask), busy (another change waits for its answer), locked (it would undo a flag), invalid (a port of 0, more than 64 origins, or one that is not an origin), unsaved (the file could not be written).
-- A change that opens the relay up, that is turning on allow private or allow inbound, or trusting an origin it did not, is asked about first, and the relay sends `ASKING` before it asks. It asks in a window on its own desktop (`zenity`, else `kdialog`, on Linux and the BSDs; a dialog through `osascript` on macOS; a message box on Windows), which no page can answer. With no desktop or no such tool it asks on its terminal, and with no terminal either the answer is no. A change that only closes the relay down is made at once. Streams go on while a change waits.
+- A change that opens the relay up, that is turning on allow private or allow inbound, or trusting an origin it did not, is asked about first, and the relay sends `ASKING` before it asks. It asks in a window on its own desktop (`zenity`, else `kdialog`, on Linux and the BSDs; a dialog through `osascript` on macOS; a message box on Windows), which no page can answer. With no desktop or no such tool it asks on its terminal (`y` or `yes`, in any case, is yes), and with no terminal either the answer is no. A question left unanswered for 60 seconds is no: its window closes as if denied. A change that only closes the relay down is made at once. Streams go on while a change waits.
 - The file is written before the change takes effect, and a change that cannot be written is not made. Each page, connection, listener and datagram after it is judged by the new settings; a page already connected stays, and a UDP socket keeps the inbound setting it opened with.
 - A new port takes effect when the relay restarts.
 
