@@ -19,6 +19,7 @@ on:
       - "tsconfig*.json"
       - "*.config.ts"
       - "*.config.mjs"
+      - ".oxlintrc.json"
       - ".forgejo/workflows/ci.yml"
   pull_request:
     paths:
@@ -37,6 +38,7 @@ on:
       - "tsconfig*.json"
       - "*.config.ts"
       - "*.config.mjs"
+      - ".oxlintrc.json"
       - ".forgejo/workflows/ci.yml"
   workflow_dispatch:
 
@@ -76,8 +78,8 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      - name: ESlint
-        run: bun run eslint
+      - name: Lint TypeScript and tools
+        run: bun run lint
 
       - name: Lint CSS
         run: bun run stylelint

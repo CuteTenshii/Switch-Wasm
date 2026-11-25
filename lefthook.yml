@@ -11,10 +11,10 @@ pre-commit:
       run: cargo clippy --workspace --all-targets -- -D warnings
       fail_text: "Clippy errors: run `cargo clippy --workspace --all-targets`"
 
-    - name: ESLint
+    - name: Oxlint
       glob: "*.{ts,mjs}"
-      run: bun run eslint
-      fail_text: "ESLint errors: run `bunx eslint . --fix`"
+      run: bun run lint
+      fail_text: "Lint errors: run `bun run lint --fix`"
 
     - name: Stylelint
       glob: "*.css"

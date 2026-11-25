@@ -50,7 +50,7 @@ cargo test --workspace
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 bun run typecheck
-bun run eslint
+bun run lint
 bun run stylelint
 bun run test:unit
 bun run test:e2e
@@ -64,9 +64,9 @@ actual browser run, not just host tests.
 
 - `bun install` also installs the pre-commit hook in `lefthook.yml`: CI's
   rustfmt and clippy checks when Rust changed, the TypeScript typecheck and
-  ESLint when TypeScript did, and Stylelint when CSS did.
+  Oxlint when TypeScript did, and Stylelint when CSS did.
 - Vite does not type-check. Run `bun run typecheck` explicitly.
-- `bun run eslint` lints the TypeScript and tools; `bun run stylelint` lints the CSS.
+- `bun run lint` lints the TypeScript and tools with Oxlint, type-aware; `bun run stylelint` lints the CSS.
 - `bun run test:unit` runs the `bun test` unit tests in `tests/unit` for the
   `web` modules that need no page: zip, file detection, formatting and display
   metrics, and CRC-32. They need no wasm build.

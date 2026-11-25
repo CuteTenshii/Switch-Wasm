@@ -25,7 +25,7 @@ The `docs/` folder has one file per subsystem (CPU, JIT, kernel, services, GPU, 
 
 ## Before opening a pull request
 
-`bun install` installs a pre-commit hook that runs rustfmt and Clippy when Rust changed, the typecheck and ESLint when TypeScript did, and Stylelint when CSS did. A pre-push hook runs the host and unit tests. Don't skip either of them.
+`bun install` installs a pre-commit hook that runs rustfmt and Clippy when Rust changed, the typecheck and Oxlint when TypeScript did, and Stylelint when CSS did. A pre-push hook runs the host and unit tests. Don't skip either of them.
 
 The full set of checks:
 
@@ -34,7 +34,7 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 bun run typecheck
-bun run eslint
+bun run lint
 bun run stylelint
 bun run test:unit
 bun run test:e2e   # needs `make wasm` first
