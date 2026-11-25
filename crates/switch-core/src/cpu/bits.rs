@@ -3,7 +3,51 @@
 
 #[inline]
 pub(crate) fn elem_mask(bits: u32) -> u128 {
-    (1u128 << bits) - 1
+    shl128(1, bits) - 1
+}
+
+#[inline(always)]
+fn join(lo: u64, hi: u64) -> u128 {
+    u128::from(lo) | (u128::from(hi) << 64)
+}
+
+/// `v << s` by 64-bit halves: wasm32 has no 128-bit shift, and a variable one is a libcall.
+#[inline(always)]
+pub(crate) fn shl128(v: u128, s: u32) -> u128 {
+    debug_assert!(s < 128, "shift by {s}");
+    let s = s & 127;
+    let (lo, hi) = (v as u64, (v >> 64) as u64);
+    match s {
+        0 => v,
+        1..64 => join(lo << s, (hi << s) | (lo >> (64 - s))),
+        _ => join(0, lo << (s - 64)),
+    }
+}
+
+/// `v >> s` by 64-bit halves; see [`shl128`].
+#[inline(always)]
+pub(crate) fn shr128(v: u128, s: u32) -> u128 {
+    debug_assert!(s < 128, "shift by {s}");
+    let s = s & 127;
+    let (lo, hi) = (v as u64, (v >> 64) as u64);
+    match s {
+        0 => v,
+        1..64 => join((lo >> s) | (hi << (64 - s)), hi >> s),
+        _ => join(hi >> (s - 64), 0),
+    }
+}
+
+/// Arithmetic `v >> s` by 64-bit halves; see [`shl128`].
+#[inline(always)]
+pub(crate) fn sar128(v: i128, s: u32) -> i128 {
+    debug_assert!(s < 128, "shift by {s}");
+    let s = s & 127;
+    let (lo, hi) = (v as u64, (v >> 64) as i64);
+    (match s {
+        0 => v as u128,
+        1..64 => join((lo >> s) | ((hi as u64) << (64 - s)), (hi >> s) as u64),
+        _ => join((hi >> (s - 64)) as u64, (hi >> 63) as u64),
+    }) as i128
 }
 
 /// The `esize`-bit lane at `index`, split by 64-bit half so no 128-bit shift is emitted.
@@ -175,12 +219,12 @@ pub(crate) fn saturate_to(v: i128, bits: u32, unsigned: bool) -> u64 {
         let max = if bits == 64 {
             i128::from(u64::MAX)
         } else {
-            (1i128 << bits) - 1
+            shl128(1, bits) as i128 - 1
         };
         v.clamp(0, max) as u64
     } else {
-        let max = (1i128 << (bits - 1)) - 1;
-        v.clamp(-(1i128 << (bits - 1)), max) as u64 & (elem_mask(bits) as u64)
+        let min = -(shl128(1, bits - 1) as i128);
+        v.clamp(min, -min - 1) as u64 & (elem_mask(bits) as u64)
     }
 }
 
@@ -216,17 +260,17 @@ pub(crate) fn shift_by_reg(
                 );
             }
         } else {
-            value << sh
+            shl128(value as u128, sh) as i128
         }
     } else {
         // 127, not 128: the rounding constant would overflow.
         let sh = (-amount as u32).min(127);
         let rounded = if rounding {
-            value + (1i128 << (sh - 1))
+            value + shl128(1, sh - 1) as i128
         } else {
             value
         };
-        rounded >> sh
+        sar128(rounded, sh)
     };
     if saturating {
         saturate_to(shifted, bits, unsigned)
@@ -785,6 +829,26 @@ pub(crate) fn f64_to_f16(v: f64) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn half_split_shifts_match_native_128_bit_shifts() {
+        let values: [u128; 4] = [
+            1,
+            u128::MAX,
+            0x8000_0000_0000_0001_0123_4567_89AB_CDEF,
+            0x7FED_CBA9_8765_4321_8000_0000_0000_0000,
+        ];
+        for v in values {
+            for s in 0..128 {
+                assert_eq!(shl128(v, s), v << s, "{v:#x} << {s}");
+                assert_eq!(shr128(v, s), v >> s, "{v:#x} >> {s}");
+                assert_eq!(sar128(v as i128, s), (v as i128) >> s, "{v:#x} >> {s}");
+            }
+        }
+        for bits in 0..128 {
+            assert_eq!(elem_mask(bits), (1u128 << bits) - 1, "mask of {bits}");
+        }
+    }
 
     /// Arm's FPMax and FPMin fix the sign `f64::max`/`min` leave open for opposite zeros.
     #[test]

@@ -1,6 +1,7 @@
 //! ARMv8 crypto extension: AES, SHA-1, SHA-256 and PMULL. AES reuses
 //! [`crate::crypto`]'s column-major state.
 
+use super::bits::shl128;
 use super::Cpu;
 use crate::crypto::{
     inv_mix_columns, inv_shift_rows, inv_sub_bytes, mix_columns, shift_rows, sub_bytes,
@@ -88,7 +89,7 @@ pub(super) fn poly_mul(a: u64, b: u64, bits: u32) -> u128 {
     let mut out: u128 = 0;
     for i in 0..bits {
         if (b >> i) & 1 == 1 {
-            out ^= u128::from(a) << i;
+            out ^= shl128(u128::from(a), i);
         }
     }
     out

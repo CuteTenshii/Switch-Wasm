@@ -7,6 +7,7 @@ Section headings are paths under `crates/switch-core/src/cpu/`; a heading that s
 ## `bits.rs`
 
 - `lane`/`set_lane` split the 128-bit register into 64-bit halves: a runtime-distance `u128` shift compiles to a `__lshrti3` call on wasm that V8 cannot inline (about 1% of a browser frame). Every A64 lane is aligned to its width, so no lane straddles the halves.
+- Every other runtime-distance `u128`/`i128` shift in the A64 SIMD interpreter goes through `shl128`/`shr128`/`sar128`, the same split. Before, their libcalls were 2.9% of the CPU work in Just Dance 2017's browser boot, where cold blocks run SIMD in the interpreter. A shift of 0 or 64 picked by a flag can still be folded back into a libcall by LLVM, so FCVTL picks the half as a `u64` instead.
 - Variable shifts (SSHL etc.) take the low 8 bits of the amount sign-extended, not masked to the element width; masking made negative (right) shifts impossible below 64 bits.
 - Only scalar FP raises FPSR flags: IOC (converts, divides, square roots), DZC (divides) and IXC (float-to-integer converts). Other FPSR bits are guest-writable storage.
 

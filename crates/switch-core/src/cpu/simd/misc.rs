@@ -39,14 +39,14 @@ impl Cpu {
                 }
                 let lanes = if q { 128 / esize } else { 64 / esize };
                 let per_container = container / esize;
-                let mask = (1u128 << esize) - 1;
+                let mask = elem_mask(esize);
                 let a = self.vregs[rn as usize];
                 let mut out: u128 = 0;
                 for i in 0..lanes {
                     let group = i / per_container;
                     let within = i % per_container;
                     let src = group * per_container + (per_container - 1 - within);
-                    out |= ((a >> (esize * src)) & mask) << (esize * i);
+                    out |= shl128(shr128(a, esize * src) & mask, esize * i);
                 }
                 self.vregs[rd as usize] = out;
                 return Ok(true);
@@ -111,26 +111,26 @@ impl Cpu {
                 }
                 let dest_esize = esize * 2;
                 let lanes = if q { 128 / dest_esize } else { 64 / dest_esize };
-                let src_mask = (1u128 << esize) - 1;
-                let dest_mask = (1u128 << dest_esize) - 1;
+                let src_mask = elem_mask(esize);
+                let dest_mask = elem_mask(dest_esize);
                 let a = self.vregs[rn as usize];
                 let d = self.vregs[rd as usize];
                 let mut out: u128 = 0;
                 for i in 0..lanes {
-                    let lo = ((a >> (esize * 2 * i)) & src_mask) as u64;
-                    let hi = ((a >> (esize * (2 * i + 1))) & src_mask) as u64;
+                    let lo = (shr128(a, esize * 2 * i) & src_mask) as u64;
+                    let hi = (shr128(a, esize * (2 * i + 1)) & src_mask) as u64;
                     let sum = if signed {
                         (sext_u64(lo, esize) as i64).wrapping_add(sext_u64(hi, esize) as i64) as u64
                     } else {
                         lo.wrapping_add(hi)
                     };
                     let sum = if accumulate {
-                        let acc = ((d >> (dest_esize * i)) & dest_mask) as u64;
+                        let acc = (shr128(d, dest_esize * i) & dest_mask) as u64;
                         sum.wrapping_add(acc)
                     } else {
                         sum
                     };
-                    out |= (sum as u128 & dest_mask) << (dest_esize * i);
+                    out |= shl128(sum as u128 & dest_mask, dest_esize * i);
                 }
                 self.vregs[rd as usize] = out;
                 return Ok(true);
@@ -194,18 +194,14 @@ impl Cpu {
                 }
                 let dest_esize = esize * 2;
                 let lanes = 64 / esize;
-                let src_mask = (1u128 << esize) - 1;
+                let src_mask = elem_mask(esize);
                 let src = self.vregs[rn as usize];
-                let base = if q {
-                    u128::from(lanes) * u128::from(esize)
-                } else {
-                    0
-                };
+                let base = if q { lanes * esize } else { 0 };
                 let mut out: u128 = 0;
                 for i in 0..lanes {
-                    let shift = esize * i + base as u32;
-                    let v = (src >> shift) & src_mask;
-                    out |= (v << esize) << (dest_esize * i);
+                    let shift = esize * i + base;
+                    let v = shr128(src, shift) & src_mask;
+                    out |= shl128(shl128(v, esize), dest_esize * i);
                 }
                 self.vregs[rd as usize] = out;
                 return Ok(true);
@@ -216,18 +212,19 @@ impl Cpu {
                     return Ok(false);
                 }
                 let src = self.vregs[rn as usize];
-                let base = if q { 64 } else { 0 };
+                // Picked as a u64, or LLVM folds a 0-or-64 shift back into a 128-bit libcall.
+                let half = if q { (src >> 64) as u64 } else { src as u64 };
                 let mut out: u128 = 0;
                 if size == 0b00 {
                     for i in 0..4u32 {
-                        let h = ((src >> (base + 16 * i)) & 0xFFFF) as u16;
-                        out |= u128::from(f16_to_f32(h).to_bits()) << (32 * i);
+                        let h = (half >> (16 * i)) as u16;
+                        out |= shl128(u128::from(f16_to_f32(h).to_bits()), 32 * i);
                     }
                 } else {
                     for i in 0..2u32 {
-                        let bits = ((src >> (base + 32 * i)) & 0xFFFF_FFFF) as u32;
+                        let bits = (half >> (32 * i)) as u32;
                         let wide = f64::from(f32::from_bits(bits)).to_bits();
-                        out |= u128::from(wide) << (64 * i);
+                        out |= shl128(u128::from(wide), 64 * i);
                     }
                 }
                 self.vregs[rd as usize] = out;
@@ -242,15 +239,15 @@ impl Cpu {
                 if size == 0b00 {
                     // Via double so the half is rounded once.
                     for i in 0..4u32 {
-                        let bits = ((src >> (32 * i)) & 0xFFFF_FFFF) as u32;
+                        let bits = (shr128(src, 32 * i) & 0xFFFF_FFFF) as u32;
                         let h = f64_to_f16(f64::from(f32::from_bits(bits)));
-                        narrowed |= u128::from(h) << (16 * i);
+                        narrowed |= shl128(u128::from(h), 16 * i);
                     }
                 } else {
                     for i in 0..2u32 {
-                        let bits = (src >> (64 * i)) as u64;
+                        let bits = shr128(src, 64 * i) as u64;
                         let narrow = (f64::from_bits(bits) as f32).to_bits();
-                        narrowed |= u128::from(narrow) << (32 * i);
+                        narrowed |= shl128(u128::from(narrow), 32 * i);
                     }
                 }
                 self.vregs[rd as usize] = if q {

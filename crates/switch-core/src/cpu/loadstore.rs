@@ -279,7 +279,7 @@ impl Cpu {
                     let mask = elem_mask(esize);
                     let mut val = 0u128;
                     for lane in 0..lanes {
-                        val |= (u128::from(elem) & mask) << (esize * lane);
+                        val |= shl128(u128::from(elem) & mask, esize * lane);
                     }
                     // A 64-bit destination zeroes the register's top half.
                     self.vregs[reg as usize] = val;

@@ -27,11 +27,11 @@ impl Cpu {
                 if shift == 0 {
                     n
                 } else {
-                    (n >> shift) | (m << (128 - shift))
+                    shr128(n, shift) | shl128(m, 128 - shift)
                 }
             } else {
                 let low = elem_mask(64);
-                (((n & low) | ((m & low) << 64)) >> shift) & low
+                shr128((n & low) | ((m & low) << 64), shift) & low
             };
             return Ok(true);
         }
@@ -370,11 +370,11 @@ impl Cpu {
                             let b = sext_u64(b, esize) as i64 as i128;
                             let mut product = 2 * a * b;
                             if rounding {
-                                product += 1i128 << (esize - 1);
+                                product += shl128(1, esize - 1) as i128;
                             }
-                            let max = (1i128 << (esize - 1)) - 1;
-                            let min = -(1i128 << (esize - 1));
-                            ((product >> esize).clamp(min, max)) as u64
+                            let max = (shl128(1, esize - 1) as i128) - 1;
+                            let min = -(shl128(1, esize - 1) as i128);
+                            sar128(product, esize).clamp(min, max) as u64
                         });
                         return Ok(true);
                     }
@@ -476,8 +476,8 @@ impl Cpu {
             let index = imm5 >> (lsb + 1);
             let rd = (insn & 0x1F) as usize;
             let rn = ((insn >> 5) & 0x1F) as usize;
-            let mask = (1u128 << esize) - 1;
-            self.vregs[rd] = (self.vregs[rn] >> (index * esize)) & mask;
+            let mask = elem_mask(esize);
+            self.vregs[rd] = shr128(self.vregs[rn], index * esize) & mask;
             return Ok(true);
         }
 
@@ -530,12 +530,12 @@ impl Cpu {
             let esize = 8u32 << lsb;
             let dst_index = imm5 >> (lsb + 1);
             let src_index = ((insn >> 11) & 0xF) >> lsb;
-            let mask = (1u128 << esize) - 1;
-            let val = (self.vregs[rn as usize] >> (src_index * esize)) & mask;
+            let mask = elem_mask(esize);
+            let val = shr128(self.vregs[rn as usize], src_index * esize) & mask;
             let shift = dst_index * esize;
             let v = self.vregs[rd as usize];
             // INS leaves other lanes, including the top half, untouched.
-            self.vregs[rd as usize] = (v & !(mask << shift)) | (val << shift);
+            self.vregs[rd as usize] = (v & !shl128(mask, shift)) | shl128(val, shift);
             return Ok(true);
         }
 
@@ -549,20 +549,20 @@ impl Cpu {
                 let esize = 8u32 << lsb;
                 let index = imm5 >> (lsb + 1);
                 let shift = index * esize;
-                let mask = (1u128 << esize) - 1;
+                let mask = elem_mask(esize);
                 let v = self.vregs[rd as usize];
                 let val = (self.read_zr(rn) as u128) & mask;
-                self.vregs[rd as usize] = (v & !(mask << shift)) | (val << shift);
+                self.vregs[rd as usize] = (v & !shl128(mask, shift)) | shl128(val, shift);
                 Ok(true)
             }
             0b000011 if imm5 != 0 => {
                 // DUP (general): esize = 8 << ctz(imm5).
                 let esize = 8u32 << imm5.trailing_zeros();
                 let elements = if q == 1 { 128 / esize } else { 64 / esize };
-                let val = (self.read_zr(rn) as u128) & ((1u128 << esize) - 1);
+                let val = (self.read_zr(rn) as u128) & elem_mask(esize);
                 let mut v: u128 = 0;
                 for i in 0..elements {
-                    v |= val << (i * esize);
+                    v |= shl128(val, i * esize);
                 }
                 self.vregs[rd as usize] = v;
                 Ok(true)
@@ -576,11 +576,11 @@ impl Cpu {
                 let esize = 8u32 << lsb;
                 let index = imm5 >> (lsb + 1);
                 let elements = if q == 1 { 128 / esize } else { 64 / esize };
-                let mask = (1u128 << esize) - 1;
-                let val = (self.vregs[rn as usize] >> (index * esize)) & mask;
+                let mask = elem_mask(esize);
+                let val = shr128(self.vregs[rn as usize], index * esize) & mask;
                 let mut v: u128 = 0;
                 for i in 0..elements {
-                    v |= val << (i * esize);
+                    v |= shl128(val, i * esize);
                 }
                 self.vregs[rd as usize] = v;
                 Ok(true)
@@ -590,7 +590,7 @@ impl Cpu {
                 let esize = 8u32 << lsb;
                 let index = imm5 >> (lsb + 1);
                 let shift = index * esize;
-                let val = (self.vregs[rn as usize] >> shift) & ((1u128 << esize) - 1);
+                let val = shr128(self.vregs[rn as usize], shift) & elem_mask(esize);
                 self.write_zr(rd, val as u64);
                 Ok(true)
             }
@@ -600,7 +600,7 @@ impl Cpu {
                 let esize = 8u32 << lsb;
                 let index = imm5 >> (lsb + 1);
                 let shift = index * esize;
-                let val = (self.vregs[rn as usize] >> shift) & ((1u128 << esize) - 1);
+                let val = shr128(self.vregs[rn as usize], shift) & elem_mask(esize);
                 let val = sext_u64(val as u64, esize);
                 // A W destination takes only the low 32 bits.
                 self.write_zr(rd, if q == 0 { val & 0xFFFF_FFFF } else { val });

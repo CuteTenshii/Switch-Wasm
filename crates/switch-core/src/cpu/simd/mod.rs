@@ -178,12 +178,12 @@ impl Cpu {
             // PMULL has a 64-bit source element, so it precedes the size check.
             if opcode == 0b1110 && u == 0 {
                 let half = if q { 64 } else { 0 };
-                let a = (self.vregs[rn as usize] >> half) as u64;
-                let b = (self.vregs[rm as usize] >> half) as u64;
+                let a = shr128(self.vregs[rn as usize], half) as u64;
+                let b = shr128(self.vregs[rm as usize], half) as u64;
                 self.vregs[rd as usize] = match size {
                     0b00 => (0..8u32).fold(0u128, |acc, i| {
                         let lane = poly_mul((a >> (8 * i)) & 0xFF, (b >> (8 * i)) & 0xFF, 8);
-                        acc | (lane << (16 * i))
+                        acc | shl128(lane, 16 * i)
                     }),
                     0b11 => poly_mul(a, b, 64),
                     _ => return Ok(false), // 16- and 32-bit sources are undefined
@@ -199,7 +199,7 @@ impl Cpu {
             let half = if q { elements * esize } else { 0 };
             let signed = u == 0;
             let narrow = |v: u128, base: u32, i: u32| {
-                let raw = ((v >> (base + esize * i)) & elem_mask(esize)) as u64;
+                let raw = (shr128(v, base + esize * i) & elem_mask(esize)) as u64;
                 if signed {
                     sext_u64(raw, esize) as i64 as i128
                 } else {
@@ -217,8 +217,8 @@ impl Cpu {
                     let rounding = u == 1;
                     let mut packed: u128 = 0;
                     for i in 0..elements {
-                        let a = ((a_reg >> (wide * i)) & elem_mask(wide)) as u64;
-                        let b = ((b_reg >> (wide * i)) & elem_mask(wide)) as u64;
+                        let a = (shr128(a_reg, wide * i) & elem_mask(wide)) as u64;
+                        let b = (shr128(b_reg, wide * i) & elem_mask(wide)) as u64;
                         let mut value = if subtract {
                             a.wrapping_sub(b)
                         } else {
@@ -228,7 +228,7 @@ impl Cpu {
                             value = value.wrapping_add(1 << (esize - 1));
                         }
                         let narrowed = (value >> esize) & (elem_mask(esize) as u64);
-                        packed |= u128::from(narrowed) << (esize * i);
+                        packed |= shl128(u128::from(narrowed), esize * i);
                     }
                     self.vregs[rd as usize] = if q {
                         (d_reg & elem_mask(64)) | (packed << 64)
@@ -242,7 +242,7 @@ impl Cpu {
             for i in 0..elements {
                 let b = narrow(b_reg, half, i);
                 let a = if matches!(opcode, 0b0001 | 0b0011) {
-                    let raw = ((a_reg >> (wide * i)) & elem_mask(wide)) as u64;
+                    let raw = (shr128(a_reg, wide * i) & elem_mask(wide)) as u64;
                     if signed {
                         sext_u64(raw, wide) as i64 as i128
                     } else {
@@ -252,7 +252,7 @@ impl Cpu {
                     narrow(a_reg, half, i)
                 };
                 let acc = {
-                    let raw = ((d_reg >> (wide * i)) & elem_mask(wide)) as u64;
+                    let raw = (shr128(d_reg, wide * i) & elem_mask(wide)) as u64;
                     if signed {
                         sext_u64(raw, wide) as i64 as i128
                     } else {
@@ -274,7 +274,7 @@ impl Cpu {
                         )))
                     }
                 };
-                out |= ((value as u128) & elem_mask(wide)) << (wide * i);
+                out |= shl128((value as u128) & elem_mask(wide), wide * i);
             }
             self.vregs[rd as usize] = out;
             return Ok(true);
@@ -302,25 +302,25 @@ impl Cpu {
                 _ => return Ok(false),
             };
             let key = 16 * u + opcode;
-            let elem = ((self.vregs[rm] >> (index * esize)) & elem_mask(esize)) as u64;
+            let elem = (shr128(self.vregs[rm], index * esize) & elem_mask(esize)) as u64;
             let a = (self.vregs[rn] & elem_mask(esize)) as u64;
             let signed = |v: u64, bits: u32| -> i128 { sext_u64(v, bits) as i64 as i128 };
             let lane =
                 |reg: usize, bits: u32| -> u64 { (self.vregs[reg] & elem_mask(bits)) as u64 };
 
             let sat = |value: i128, bits: u32| -> u64 {
-                let max = (1i128 << (bits - 1)) - 1;
-                let min = -(1i128 << (bits - 1));
+                let max = (shl128(1, bits - 1) as i128) - 1;
+                let min = -(shl128(1, bits - 1) as i128);
                 (value.clamp(min, max) as u64) & (elem_mask(bits) as u64)
             };
             let doubled = signed(a, esize) * signed(elem, esize) * 2;
             let high_half = |rounding: bool| -> i128 {
                 let product = if rounding {
-                    doubled + (1i128 << (esize - 1))
+                    doubled + (shl128(1, esize - 1) as i128)
                 } else {
                     doubled
                 };
-                product >> esize
+                sar128(product, esize)
             };
 
             let (value, width) = match key {
@@ -419,7 +419,7 @@ impl Cpu {
                 _ => return Ok(false),
             };
             let key = 16 * u + opcode;
-            let elem = ((self.vregs[rm as usize] >> (index * esize)) & elem_mask(esize)) as u64;
+            let elem = (shr128(self.vregs[rm as usize], index * esize) & elem_mask(esize)) as u64;
             let widening = matches!(key, 0x02 | 0x06 | 0x0a | 0x12 | 0x16 | 0x1a);
             if widening {
                 // SMULL/UMULL and accumulating forms: `Q` selects the Vn half, lanes widen.
@@ -436,20 +436,20 @@ impl Cpu {
                 };
                 let mut out: u128 = 0;
                 for i in 0..elements {
-                    let raw = ((src >> (base + esize * i)) & elem_mask(esize)) as u64;
+                    let raw = (shr128(src, base + esize * i) & elem_mask(esize)) as u64;
                     let a = if signed {
                         sext_u64(raw, esize) as i64 as i128
                     } else {
                         raw as i128
                     };
                     let product = a * b;
-                    let acc = ((dest >> (dest_esize * i)) & elem_mask(dest_esize)) as u64;
+                    let acc = (shr128(dest, dest_esize * i) & elem_mask(dest_esize)) as u64;
                     let value = match key & 0xF {
                         0x02 => (acc as i128).wrapping_add(product), // SMLAL/UMLAL
                         0x06 => (acc as i128).wrapping_sub(product), // SMLSL/UMLSL
                         _ => product,                                // SMULL/UMULL
                     };
-                    out |= ((value as u128) & elem_mask(dest_esize)) << (dest_esize * i);
+                    out |= shl128((value as u128) & elem_mask(dest_esize), dest_esize * i);
                 }
                 self.vregs[rd as usize] = out;
                 return Ok(true);
@@ -473,11 +473,11 @@ impl Cpu {
                         let a = sext_u64(a, esize) as i64 as i128;
                         let mut product = 2 * a * b;
                         if rounding {
-                            product += 1i128 << (esize - 1);
+                            product += shl128(1, esize - 1) as i128;
                         }
-                        let shifted = product >> esize;
-                        let max = (1i128 << (esize - 1)) - 1;
-                        let min = -(1i128 << (esize - 1));
+                        let shifted = sar128(product, esize);
+                        let max = (shl128(1, esize - 1) as i128) - 1;
+                        let min = -(shl128(1, esize - 1) as i128);
                         shifted.clamp(min, max) as u64
                     });
                     Ok(true)

@@ -50,7 +50,7 @@ impl Cpu {
         let mask = elem_mask(esize);
         let a = self.vregs[rn as usize];
         let b = self.vregs[rm as usize];
-        let get = |r: u128, i: u32| (r >> (esize * i)) & mask;
+        let get = |r: u128, i: u32| shr128(r, esize * i) & mask;
         let mut out: u128 = 0;
         match op {
             // UZP1 (even elements) / UZP2 (odd) of Vn:Vm.
@@ -63,23 +63,23 @@ impl Cpu {
                     } else {
                         get(b, index)
                     };
-                    out |= v << (esize * i);
+                    out |= shl128(v, esize * i);
                 }
             }
             // TRN1 (even elements) / TRN2 (odd) of both, interleaved.
             0b001010 | 0b011010 => {
                 let odd = u32::from(op == 0b011010);
                 for i in 0..half {
-                    out |= get(a, 2 * i + odd) << (esize * 2 * i);
-                    out |= get(b, 2 * i + odd) << (esize * (2 * i + 1));
+                    out |= shl128(get(a, 2 * i + odd), esize * 2 * i);
+                    out |= shl128(get(b, 2 * i + odd), esize * (2 * i + 1));
                 }
             }
             // ZIP1 (low halves) / ZIP2 (high halves), interleaved.
             _ => {
                 let base = if op == 0b011110 { half } else { 0 };
                 for i in 0..half {
-                    out |= get(a, base + i) << (esize * 2 * i);
-                    out |= get(b, base + i) << (esize * (2 * i + 1));
+                    out |= shl128(get(a, base + i), esize * 2 * i);
+                    out |= shl128(get(b, base + i), esize * (2 * i + 1));
                 }
             }
         }
@@ -97,17 +97,17 @@ impl Cpu {
         f: F,
     ) {
         let lanes = if q { 128 / esize } else { 64 / esize };
-        let mask = (1u128 << esize) - 1;
+        let mask = elem_mask(esize);
         let a = self.vregs[rn as usize];
         let b = self.vregs[rm as usize];
         let d = self.vregs[rd as usize];
         let mut out: u128 = 0;
         for i in 0..lanes {
             let position = esize * i;
-            let va = ((a >> position) & mask) as u64;
-            let vb = ((b >> position) & mask) as u64;
-            let vd = ((d >> position) & mask) as u64;
-            out |= (f(va, vb, vd) as u128 & mask) << position;
+            let va = (shr128(a, position) & mask) as u64;
+            let vb = (shr128(b, position) & mask) as u64;
+            let vd = (shr128(d, position) & mask) as u64;
+            out |= shl128(f(va, vb, vd) as u128 & mask, position);
         }
         self.vregs[rd as usize] = out;
     }
@@ -124,17 +124,17 @@ impl Cpu {
     ) {
         let lanes = if q { 128 / esize } else { 64 / esize };
         let half = lanes / 2;
-        let mask = (1u128 << esize) - 1;
+        let mask = elem_mask(esize);
         let a = self.vregs[rn as usize];
         let b = self.vregs[rm as usize];
         let mut out: u128 = 0;
         for i in 0..half {
-            let a0 = ((a >> (esize * 2 * i)) & mask) as u64;
-            let a1 = ((a >> (esize * (2 * i + 1))) & mask) as u64;
-            let b0 = ((b >> (esize * 2 * i)) & mask) as u64;
-            let b1 = ((b >> (esize * (2 * i + 1))) & mask) as u64;
-            out |= (f(a0, a1) as u128 & mask) << (esize * i);
-            out |= (f(b0, b1) as u128 & mask) << (esize * (i + half));
+            let a0 = (shr128(a, esize * 2 * i) & mask) as u64;
+            let a1 = (shr128(a, esize * (2 * i + 1)) & mask) as u64;
+            let b0 = (shr128(b, esize * 2 * i) & mask) as u64;
+            let b1 = (shr128(b, esize * (2 * i + 1)) & mask) as u64;
+            out |= shl128(f(a0, a1) as u128 & mask, esize * i);
+            out |= shl128(f(b0, b1) as u128 & mask, esize * (i + half));
         }
         self.vregs[rd as usize] = out;
     }
@@ -174,9 +174,9 @@ impl Cpu {
         }
         let esize = 8u32 << size;
         let lanes = if q { 128 / esize } else { 64 / esize };
-        let mask = (1u128 << esize) - 1;
+        let mask = elem_mask(esize);
         let a = self.vregs[rn as usize];
-        let elem = |i: u32| ((a >> (esize * i)) & mask) as u64;
+        let elem = |i: u32| (shr128(a, esize * i) & mask) as u64;
         let signed = u == 0;
         let result = match opcode {
             0b00011 => {
@@ -190,7 +190,7 @@ impl Cpu {
                         v as i128
                     };
                 }
-                (sum as u128) & ((1u128 << (esize * 2)) - 1)
+                (sum as u128) & elem_mask(esize * 2)
             }
             0b01010 | 0b11010 => {
                 // SMAXV / UMAXV (0b01010), SMINV / UMINV (0b11010).
@@ -255,7 +255,7 @@ impl Cpu {
         let src = self.vregs[rn as usize];
         let mut out: u128 = 0;
         for i in 0..lanes {
-            let raw = (src >> (esize * i)) as u64 & mask;
+            let raw = shr128(src, esize * i) as u64 & mask;
             let value = if to_int {
                 let f = if esize == 64 {
                     f64::from_bits(raw)
@@ -276,7 +276,7 @@ impl Cpu {
                     u64::from(((int / scale) as f32).to_bits())
                 }
             };
-            out |= u128::from(value) << (esize * i);
+            out |= shl128(u128::from(value), esize * i);
         }
         self.vregs[rd as usize] = out;
         Ok(())
@@ -296,7 +296,7 @@ impl Cpu {
         let mask: u128 = if esize >= 128 {
             u128::MAX
         } else {
-            (1u128 << esize) - 1
+            elem_mask(esize)
         };
         let src = self.vregs[rn as usize];
         let dst = self.vregs[rd as usize];
@@ -308,16 +308,16 @@ impl Cpu {
             let wide_mask: u128 = if wide >= 128 {
                 u128::MAX
             } else {
-                (1u128 << wide) - 1
+                elem_mask(wide)
             };
             let lanes = 64 / esize;
             let base = if q { lanes } else { 0 };
             let mut out: u128 = 0;
             for i in 0..lanes {
-                let raw = ((src >> (esize * (i + base))) & mask) as u64;
+                let raw = (shr128(src, esize * (i + base)) & mask) as u64;
                 let extended = if u { raw } else { sext_u64(raw, esize) };
-                let value = ((extended as u128) << shift) & wide_mask;
-                out |= value << (wide * i);
+                let value = shl128(extended as u128, shift) & wide_mask;
+                out |= shl128(value, wide * i);
             }
             self.vregs[rd as usize] = out;
             return Ok(());
@@ -329,8 +329,8 @@ impl Cpu {
         let mut out: u128 = 0;
         for i in 0..lanes {
             let position = esize * i;
-            let raw = ((src >> position) & mask) as u64;
-            let old = ((dst >> position) & mask) as u64;
+            let raw = (shr128(src, position) & mask) as u64;
+            let old = (shr128(dst, position) & mask) as u64;
             let value: u64 = match opcode {
                 // SSHR / USHR, SSRA / USRA, SRSHR / URSHR, SRSRA / URSRA.
                 0b00000 | 0b00010 | 0b00100 | 0b00110 => {
@@ -378,7 +378,7 @@ impl Cpu {
                     )))
                 }
             };
-            out |= ((value as u128) & mask) << position;
+            out |= shl128((value as u128) & mask, position);
         }
         self.vregs[rd as usize] = out;
         Ok(())
@@ -393,12 +393,12 @@ impl Cpu {
         esize: u32,
         f: F,
     ) {
-        let mask = (1u128 << esize) - 1;
+        let mask = elem_mask(esize);
         let a = self.vregs[rn as usize];
         let mut out: u128 = 0;
         for i in 0..lanes {
-            let v = ((a >> (esize * i)) & mask) as u64;
-            out |= (f(v) as u128 & mask) << (esize * i);
+            let v = (shr128(a, esize * i) & mask) as u64;
+            out |= shl128(f(v) as u128 & mask, esize * i);
         }
         self.vregs[rd as usize] = out;
     }
@@ -418,7 +418,7 @@ impl Cpu {
     ) {
         let src_esize = 2 * dest_esize;
         let src_elements = 128 / src_esize;
-        let dest_mask = (1u128 << dest_esize) - 1;
+        let dest_mask = elem_mask(dest_esize);
         let src = self.vregs[rn as usize];
         let round_add = if rounding { 1i64 << (shift - 1) } else { 0 };
         let mut narrowed = [0u64; 16];
