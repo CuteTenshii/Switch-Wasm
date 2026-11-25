@@ -3,7 +3,8 @@
 import type {
   CallRequest, Commands, ErrorDialog, KeyboardRequest, NetState, SliceReport, WorkerMessage,
 } from '../shared/protocol';
-import { workerErrorText } from '../shared/workererror';
+import { spawnWorker } from '../shared/spawn';
+import workerUrl from '../worker/index.ts?worker&url';
 import { setAudioFormat, setAudioRing } from './audio';
 import { log } from './log';
 import { setMailbox } from './mailbox';
@@ -96,11 +97,10 @@ export function call<K extends keyof Commands>(
   });
 }
 
-// `{ type: 'module' }` must match Vite's `worker.format: 'es'`.
 export function initWorker(): void {
-  worker = new Worker(new URL('../worker/index.ts', import.meta.url), {
-    type: 'module',
-    name: 'Emulator',
+  worker = spawnWorker(workerUrl, 'Emulator', (why) => {
+    if (ready) log(why, 'error');
+    else failStart(why);
   });
   worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
     const d = e.data;
@@ -163,10 +163,6 @@ export function initWorker(): void {
         startResolve();
         break;
     }
-  };
-  worker.onerror = (e) => {
-    if (ready) log('The emulator worker ' + workerErrorText(e), 'error');
-    else failStart('The emulator worker ' + workerErrorText(e));
   };
 }
 

@@ -56,7 +56,7 @@ export default defineConfig(({ command }) => ({
     // Keep every asset a file so it gets a hashed URL.
     assetsInlineLimit: 0,
   },
-  // Must match `{ type: 'module' }` in `main/rpc.ts`, in dev and production alike.
+  // Must match `{ type: 'module' }` in `shared/spawn.ts`, in dev and production alike.
   worker: { format: 'es' },
   resolve: {
     alias: {

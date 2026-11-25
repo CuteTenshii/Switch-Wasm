@@ -11,6 +11,8 @@ import init, { switch_attach_screen, switch_init, switch_set_reader } from '@cor
 import wasmUrl from '@core/switch_wasm_bg.wasm?url';
 import { core, explainFailure, setCore, type WasmExports } from './wasm';
 import { startCores } from './coreworkers';
+import { spawnWorker } from '../shared/spawn';
+import readerUrl from './reader.ts?worker&url';
 
 // `self` is typed as the shared WorkerGlobalScope, which lacks postMessage.
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
@@ -81,15 +83,11 @@ void (async () => {
     setCore(await init({ module_or_path: module }) as unknown as WasmExports);
     // Install the panic hook before anything else can panic.
     switch_init();
-    const reader = new Worker(new URL('./reader.ts', import.meta.url), {
-      type: 'module',
-      name: 'File reader',
-    });
+    let reader!: Worker;
     // This thread starts the reader, so a read that blocks it before the reader runs times out.
     const readerRunning = new Promise<void>((resolve, reject) => {
+      reader = spawnWorker(readerUrl, 'File reader', (why) => reject(new Error(why)));
       reader.addEventListener('message', () => resolve(), { once: true });
-      reader.addEventListener('error', () => reject(new Error('the file reader worker did not start')),
-        { once: true });
     });
     switch_set_reader(reader);
     startCores(module, core.memory);

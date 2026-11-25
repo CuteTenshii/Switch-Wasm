@@ -15,23 +15,23 @@ import {
   switch_fs_upload, switch_fs_write, switch_nand_content, switch_nand_content_size, switch_nand_erase,
   switch_nand_install, switch_nand_remove, switch_saves, switch_storage_writable,
 } from '@core/switch_wasm.js';
-import { workerErrorText } from '../shared/workererror';
+import { spawnWorker } from '../shared/spawn';
+import zipperUrl from './zipper.ts?worker&url';
 import { coreLoaded } from './wasm';
 import type { ZipEntry } from './zip';
 import type { ZipReply } from './zipper';
 
 // The zip of `entries`, built in a worker of its own that takes their bytes.
 function zipOffThread(entries: ZipEntry[]): Promise<Blob> {
-  const worker = new Worker(new URL('./zipper.ts', import.meta.url), { type: 'module', name: 'Zip export' });
   return new Promise((resolve, reject) => {
+    const worker = spawnWorker(zipperUrl, 'Zip export', (why) => {
+      worker.terminate();
+      reject(new Error(why));
+    });
     worker.onmessage = (e: MessageEvent<ZipReply>) => {
       worker.terminate();
       if ('error' in e.data) reject(new Error(e.data.error));
       else resolve(e.data.blob);
-    };
-    worker.onerror = (e) => {
-      worker.terminate();
-      reject(new Error('the zip worker ' + workerErrorText(e)));
     };
     worker.postMessage(entries, [...new Set(entries.map((entry) => entry.data.buffer))]);
   });

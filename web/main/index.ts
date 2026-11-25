@@ -63,8 +63,8 @@ async function init(): Promise<void> {
     await updateRam();
   } catch (err) {
     const why = (err as Error).message;
-    failLoad(why, 'The core could not be started');
-    log('The core could not be started: ' + why, 'error', { openConsole: false });
+    failLoad(why, 'The core could not start');
+    log('The core could not start: ' + why, 'error', { openConsole: false });
     return;
   }
   endLoad();
