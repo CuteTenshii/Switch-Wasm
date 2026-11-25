@@ -1284,12 +1284,6 @@ impl Debug {
     }
 }
 
-/// The load order of an ExeFS's modules.
-const MODULE_ORDER: &[&str] = &[
-    "rtld", "main", "subsdk0", "subsdk1", "subsdk2", "subsdk3", "subsdk4", "subsdk5", "subsdk6",
-    "subsdk7", "subsdk8", "subsdk9", "sdk",
-];
-
 /// A container's kind, detected from its magic, or from the extension for an
 /// NCA whose header is still encrypted.
 enum Kind {
@@ -1364,13 +1358,12 @@ pub fn open_control(
     }
 }
 
-/// A title's Program NCA, read by range. Only the ExeFS is held in memory.
+/// A title's Program NCA, read by range. Nothing is held in memory: a booted ExeFS is
+/// freed once its modules are loaded.
 pub struct Title {
     pub nca: switch_core::nca::Nca,
     pub keys: KeySet,
-    /// The ExeFS, decrypted and hash-verified.
-    pub exefs: Vec<u8>,
-    pub exefs_pfs0: switch_core::nsp::Pfs0,
+    exefs_index: usize,
     /// The container and the Program NCA's extent; each reader opens its own handle.
     path: std::path::PathBuf,
     program: (u64, u64),
@@ -1438,35 +1431,36 @@ impl Title {
         keys: KeySet,
         base: Option<(std::path::PathBuf, (u64, u64), switch_core::nca::Nca)>,
     ) -> Title {
-        let index = nca
+        let exefs_index = nca
             .exefs_section_index()
             .unwrap_or_else(|| die(&format!("{} has no ExeFS section", path.display())));
-        let exefs = nca
-            .read_pfs0_section(program_window(&path, program.0, program.1), &keys, index)
-            .unwrap_or_else(|e| die(&format!("reading the ExeFS: {e}")));
-        let exefs_pfs0 = switch_core::nsp::Pfs0::parse(&exefs)
-            .unwrap_or_else(|e| die(&format!("the ExeFS is not a PFS0: {e}")));
         Title {
             nca,
             keys,
-            exefs,
-            exefs_pfs0,
+            exefs_index,
             path,
             program,
             base,
         }
     }
 
-    /// The modules to boot, in [`MODULE_ORDER`].
-    pub fn modules(&self) -> Vec<(&str, &[u8])> {
-        MODULE_ORDER
-            .iter()
-            .filter_map(|&name| {
-                let file = self.exefs_pfs0.find(name)?;
-                let start = file.offset as usize;
-                Some((name, &self.exefs[start..start + file.size as usize]))
-            })
-            .collect()
+    /// The ExeFS, decrypted and hash-verified, and its file table; or exit.
+    pub fn exefs(&self) -> (Vec<u8>, switch_core::nsp::Pfs0) {
+        let window = program_window(&self.path, self.program.0, self.program.1);
+        let exefs = self
+            .nca
+            .read_pfs0_section(window, &self.keys, self.exefs_index)
+            .unwrap_or_else(|e| die(&format!("reading the ExeFS: {e}")));
+        let pfs0 = switch_core::nsp::Pfs0::parse(&exefs)
+            .unwrap_or_else(|e| die(&format!("the ExeFS is not a PFS0: {e}")));
+        (exefs, pfs0)
+    }
+
+    /// The program to boot, read afresh so its ExeFS is dropped with it; or exit.
+    pub fn program(&self) -> switch_core::cpu::Program {
+        let (exefs, _) = self.exefs();
+        switch_core::cpu::Program::parse(self.nca.program_id, exefs)
+            .unwrap_or_else(|e| die(&format!("the ExeFS is not a PFS0: {e}")))
     }
 
     /// Mount this title's RomFS, streamed off disk, if it has one.
@@ -1578,8 +1572,7 @@ impl Title {
 
     fn boot_modules(&self, cpu: &mut Cpu) -> Vec<switch_core::nso::LoadedNso> {
         apply_docked(cpu);
-        let program = switch_core::cpu::Program::parse(self.nca.program_id, self.exefs.clone())
-            .unwrap_or_else(|e| die(&format!("the ExeFS is not a PFS0: {e}")));
+        let program = self.program();
         let loaded = cpu
             .boot_program(&program)
             .unwrap_or_else(|e| die(&format!("booting the program: {e:?}")));
