@@ -669,8 +669,7 @@ fn the_wireless_certification_file_is_empty() {
         cpu.set_sys_request(TLS, Some(cmd)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "cmd {cmd} result");
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "cmd {cmd} size");
-        let log = String::from_utf8_lossy(&cpu.trace).into_owned();
-        assert!(!log.contains("stub"), "{log:?}");
+        assert!(cpu.stubbed_ipc().is_empty(), "cmd {cmd} fell to the stub");
     }
 }
 

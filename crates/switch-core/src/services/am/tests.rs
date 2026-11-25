@@ -416,19 +416,13 @@ fn a_stubbed_answer_names_itself_once_and_still_succeeds() {
     cpu.register_service_handle(9, "am:self-controller");
     cpu.applet_request(TLS, 9, Some(230)).unwrap();
     assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
-    let trace = String::from_utf8_lossy(&cpu.trace).into_owned();
-    assert!(
-        trace.contains("[ipc] stub: am:self-controller cmd=Some(230)"),
-        "the stub went unreported: {trace:?}"
-    );
+    let named = vec![("am:self-controller".to_owned(), Some(230))];
+    assert_eq!(cpu.stubbed_ipc(), named, "the stub went unreported");
 
-    // Once per (interface, command).
     marshal(&mut cpu, false, 230, &[0; 4]);
     cpu.applet_request(TLS, 9, Some(230)).unwrap();
-    let repeated = String::from_utf8_lossy(&cpu.trace)
-        .matches("[ipc] stub:")
-        .count();
-    assert_eq!(repeated, 1, "the stub was reported on every call");
+    assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
+    assert_eq!(cpu.stubbed_ipc(), named, "once per (interface, command)");
 }
 
 #[test]

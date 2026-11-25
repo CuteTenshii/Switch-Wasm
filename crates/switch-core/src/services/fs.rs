@@ -2215,16 +2215,10 @@ mod tests {
         let romfs = crate::romfs::RomFs::parse(&image).unwrap();
         assert_eq!(romfs.files().len(), 58);
 
-        // Synthesized once: the second open finds it registered.
+        // Synthesized once: registered, so the second open finds it.
+        assert!(cpu.has_data_archive(NG_WORD2));
         let (result, _) = open_data_storage(&mut cpu, NG_WORD2);
         assert_eq!(result, 0);
-        let log = String::from_utf8_lossy(&cpu.trace).into_owned();
-        assert_eq!(
-            log.matches("synthesized system data archive NgWord2")
-                .count(),
-            1,
-            "{log}"
-        );
         // Reads are charged to the image's files, as for a real archive.
         let files = cpu.fs_activity.take_files();
         let version = files
@@ -2244,7 +2238,6 @@ mod tests {
         let (result, session) = open_data_storage(&mut cpu, NG_WORD2);
         assert_eq!(result, 0);
         assert_eq!(read_storage(&mut cpu, session.unwrap()), b"real");
-        assert!(!String::from_utf8_lossy(&cpu.trace).contains("synthesized"));
     }
 
     #[test]

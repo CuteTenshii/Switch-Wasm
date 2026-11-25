@@ -1866,6 +1866,29 @@ mod tests {
     use super::testing::*;
 
     #[test]
+    fn a_stub_is_logged_once_per_interface_and_command() {
+        let mut cpu = request(false, 0, &[]);
+        cpu.warn_stub("am:self-controller", Some(230), "invented");
+        cpu.warn_stub("am:self-controller", Some(230), "invented");
+        cpu.warn_stub("am:self-controller", Some(231), "invented");
+        let trace = String::from_utf8_lossy(&cpu.trace).into_owned();
+        assert_eq!(
+            trace
+                .matches("[ipc] stub: am:self-controller cmd=Some(230)")
+                .count(),
+            1,
+            "{trace}"
+        );
+        assert_eq!(
+            trace
+                .matches("[ipc] stub: am:self-controller cmd=Some(231)")
+                .count(),
+            1,
+            "{trace}"
+        );
+    }
+
+    #[test]
     fn ngc_writes_the_masked_text_back_rather_than_leaving_the_buffer() {
         const IN: u64 = 0x4000;
         const OUT: u64 = 0x5000;
