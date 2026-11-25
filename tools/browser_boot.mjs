@@ -280,9 +280,12 @@ try {
     }
     await page.waitForTimeout(1000);
   }
+  // DOM clicks: Playwright's wait for a stable element needs animation frames, which a busy
+  // or covered window stops drawing.
+  const press = (selector) => page.evaluate((s) => document.querySelector(s).click(), selector);
   const openDebugTab = async () => {
-    if (!(await page.locator('body.panel-open').count())) await page.locator('#btn-panel').click();
-    await page.getByRole('tab', { name: 'Debug' }).click();
+    if (!(await page.locator('body.panel-open').count())) await press('#btn-panel');
+    await press('.tab[data-tab="debug"]');
   };
   // The Translation section counts only while it is on screen.
   if (jitStats) await openDebugTab();
@@ -495,7 +498,7 @@ try {
     // can be too slow to open it, which costs the section and not the report.
     try {
       await openDebugTab();
-      await page.getByRole('button', { name: 'Graphics' }).click();
+      await press('[data-debug-group="graphics"]');
       // The worker answers between run slices, which a slow title stretches to seconds.
       await page.locator('#render-debug-data').waitFor({ state: 'visible', timeout: 60_000 })
         .catch(() => say('the Rendering section had no device report after 60 s'));
