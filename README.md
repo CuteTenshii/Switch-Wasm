@@ -1,7 +1,7 @@
 <p align="center"><img src="web/favicon.svg" alt="" width="96" height="96"></p>
 <h1 align="center">Switch WASM</h1>
 <p align="center">A Nintendo Switch emulator running directly in the browser, using WebAssembly and WebGPU.</p>
-<p align="center"><a href="https://git.tenshii.moe/Tenshii/Switch-Wasm/actions?workflow=check.yml"><img src="https://git.tenshii.moe/Tenshii/Switch-Wasm/badges/workflows/check.yml/badge.svg?branch=master&label=ci" alt="CI status"></a>
+<p align="center"><a href="https://git.tenshii.moe/Tenshii/Switch-Wasm/actions?workflow=ci.yml"><img src="https://git.tenshii.moe/Tenshii/Switch-Wasm/badges/workflows/ci.yml/badge.svg?branch=master&label=ci" alt="CI status"></a>
 <a href="https://discord.gg/uhy2P4vyhE"><img src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" alt="Join the Discord server"></a></p>
 
 ## Build

@@ -1,4 +1,4 @@
-name: Check and deploy
+name: CI
 
 on:
   push:
@@ -19,7 +19,7 @@ on:
       - "tsconfig*.json"
       - "*.config.ts"
       - "*.config.mjs"
-      - ".forgejo/workflows/check.yml"
+      - ".forgejo/workflows/ci.yml"
   pull_request:
     paths:
       - "crates/**"
@@ -37,11 +37,11 @@ on:
       - "tsconfig*.json"
       - "*.config.ts"
       - "*.config.mjs"
-      - ".forgejo/workflows/check.yml"
+      - ".forgejo/workflows/ci.yml"
   workflow_dispatch:
 
 concurrency:
-  group: check-and-deploy-${{ forgejo.ref }}
+  group: ci-${{ forgejo.ref }}
   cancel-in-progress: true
 
 jobs:
