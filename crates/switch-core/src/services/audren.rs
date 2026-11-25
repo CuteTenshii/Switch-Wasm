@@ -106,6 +106,10 @@ pub(crate) struct AudioRenderer {
     /// Frames come due whose event has not fired yet, because the guest had not taken the
     /// last one: titles mix one frame per wake, so each owed frame is owed a wake of its own.
     pub frame_events_owed: u64,
+    /// Frame events fired.
+    pub frame_wakes: u64,
+    /// `frame_wakes` when the mix last ran: a title woken per frame gets one frame per wake.
+    pub mixed_at_wake: u64,
     /// The cycle the mix has been rendered up to.
     pub rendered_through: u64,
     /// Reported in the `RendererInfoOut` tail.
@@ -421,6 +425,8 @@ impl Cpu {
                         frame_event: None,
                         next_frame_at: now.wrapping_add(FRAME_CYCLES),
                         frame_events_owed: 0,
+                        frame_wakes: 0,
+                        mixed_at_wake: 0,
                         rendered_through: now,
                         elapsed_frames: 0,
                         voices: vec![Voice::default(); voice_count as usize],
@@ -581,6 +587,7 @@ impl Cpu {
                         {
                             // Frames before anyone could wait are owed no wake.
                             renderer.frame_event = Some(event);
+                            renderer.mixed_at_wake = renderer.frame_wakes;
                             renderer.next_frame_at = now.wrapping_add(FRAME_CYCLES);
                             renderer.frame_events_owed = 0;
                         }
@@ -646,6 +653,7 @@ impl Cpu {
                 .find(|renderer| renderer.frame_event == Some(event))
             {
                 renderer.frame_events_owed -= 1;
+                renderer.frame_wakes += 1;
             }
         }
         next
@@ -993,13 +1001,19 @@ impl Cpu {
             return;
         }
         let elapsed = now.saturating_sub(renderer.rendered_through);
-        let due = elapsed / FRAME_CYCLES;
-        renderer.rendered_through = if due > MAX_CATCHUP_FRAMES {
-            now
-        } else {
-            renderer.rendered_through + due * FRAME_CYCLES
-        };
-        let due = due.min(MAX_CATCHUP_FRAMES);
+        let mut due = elapsed / FRAME_CYCLES;
+        if due > MAX_CATCHUP_FRAMES {
+            renderer.rendered_through = now.saturating_sub(MAX_CATCHUP_FRAMES * FRAME_CYCLES);
+            due = MAX_CATCHUP_FRAMES;
+        }
+        // A title that waits on the frame event refills its voices between wakes. Mixing
+        // every frame the clock owes in one update (it jumps to catch up with real time)
+        // drained their few queued buffers, and the silence stretched the music.
+        if renderer.frame_event.is_some() {
+            due = due.min(renderer.frame_wakes - renderer.mixed_at_wake);
+            renderer.mixed_at_wake += due;
+        }
+        renderer.rendered_through += due * FRAME_CYCLES;
         if due == 0 {
             self.process_mut().audren_renderers.insert(handle, renderer);
             return;

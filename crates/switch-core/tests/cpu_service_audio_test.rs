@@ -789,6 +789,38 @@ fn audren_frame_events_keep_pace_when_every_tick_comes_late() {
 }
 
 #[test]
+fn audren_mixes_one_frame_per_wake_when_the_clock_jumps() {
+    const IN: u32 = 0x3_0000;
+    const OUT: u32 = 0x4_0000;
+    const PCM: u32 = 0x5_0000;
+    const SAMPLES: u32 = 720;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    let renderer = audren_stereo(&mut cpu);
+    ipc_request_plain(&mut cpu, renderer, 7, &[]);
+    let event = cpu.mem.read_u32(cpu.tls_base() + 0x0c).unwrap();
+    // Three frames of mono PCM16 queued, as a title streaming music keeps a few buffered.
+    let mut update = AudrenUpdate::new(1, 1, 1);
+    update.voice(0, PCM_INT16, 1, PCM, SAMPLES * 2, SAMPLES);
+    update.route(0, 0, 1.0);
+    update.route(0, 1, 1.0);
+    update.mix(2);
+    update.sink(&[0, 1]);
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+    update.data[update.voices_at + 0x08] = 0; // the voice is no longer new
+
+    // The clock jumps four frames; the title takes one wake and updates once.
+    cpu.cycles += AUDREN_FRAME_CYCLES * 4;
+    assert_eq!(wait_sync(&mut cpu, &[event], 0).0, 0, "a frame came due");
+    reset_signal(&mut cpu, event);
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+    let mixed = cpu.audio_activity().renderers.remove(0);
+    assert_eq!(mixed.rendered_frames, 1, "one wake, one frame");
+}
+
+#[test]
 fn audren_frame_events_owed_past_the_catch_up_limit_are_dropped() {
     let (mut cpu, event) = renderer_with_frame_event();
     cpu.cycles += AUDREN_FRAME_CYCLES * 100;
