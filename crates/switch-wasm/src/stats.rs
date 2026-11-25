@@ -26,7 +26,10 @@ pub fn switch_jit_stats_json() -> String {
         });
         o.field("emitted", stats.emitted)
             .field("enteredEmitted", stats.entered_emitted)
-            .field("chained", stats.chained);
+            .field("chained", stats.chained)
+            .field("retired", stats.retired)
+            .field("retiredEmitted", stats.retired_emitted)
+            .field("dropped", stats.dropped);
     })
 }
 

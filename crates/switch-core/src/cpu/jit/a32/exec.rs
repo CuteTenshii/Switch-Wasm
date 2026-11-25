@@ -37,10 +37,17 @@ impl Cpu {
                 break;
             }
             let mut block = self.a32_block_at(self.pc);
-            let ran = self.exec_a32_block(&mut block, max_steps - steps)?;
+            let ran = match self.exec_a32_block(&mut block, max_steps - steps) {
+                Ok(ran) => ran,
+                Err(e) => {
+                    self.jit.retired += steps;
+                    return Err(e);
+                }
+            };
             self.slice_used += ran;
             steps += ran;
         }
+        self.jit.retired += steps;
         Ok(RunReport {
             steps,
             halted: self.halted,
@@ -156,6 +163,7 @@ impl Cpu {
             left: answer & LEFT != 0,
             chained: (fuel - self.jit.chain.fuel) as u64,
         };
+        self.jit.retired_emitted += entered.chained + entered.retired as u64;
         let hops = u64::from(self.jit.chain.hops);
         if hops != 0 {
             self.jit.chained += hops;
@@ -177,6 +185,7 @@ impl Cpu {
             if misses + 1 >= MAX_MISSES {
                 self.jit.unchain_a32(block);
                 block.drop_code();
+                self.jit.dropped += 1;
             } else {
                 block.code.set(Code::Ready {
                     entry,

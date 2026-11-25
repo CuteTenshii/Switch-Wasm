@@ -178,6 +178,7 @@ impl Cpu {
                     Err(e) => {
                         self.jit.executed += executed;
                         self.jit.linked += linked;
+                        self.jit.retired += steps;
                         return Err(e);
                     }
                 };
@@ -207,6 +208,7 @@ impl Cpu {
         }
         self.jit.executed += executed;
         self.jit.linked += linked;
+        self.jit.retired += steps;
         Ok(RunReport {
             steps,
             halted: self.halted,
@@ -376,12 +378,14 @@ impl Cpu {
             let member = block.members.borrow()[done.member - 1].clone();
             *block = member;
         }
+        self.jit.retired_emitted += chained;
         // Stopped at a block's first instruction: the next visit runs it.
         if done.retired == 0 && !done.left {
             self.pc = block.start;
             return Ok(chained);
         }
         let retired = done.retired.min(whole(block));
+        self.jit.retired_emitted += retired as u64;
         let ran = self.finish_emitted(block, retired, done.left, budget - chained)?;
         Ok(chained + ran)
     }
@@ -473,6 +477,7 @@ impl Cpu {
             if misses >= MAX_MISSES {
                 self.jit.unchain(block);
                 block.drop_code();
+                self.jit.dropped += 1;
             } else {
                 block.code.set(Code::Ready { entry, misses });
             }
@@ -482,6 +487,7 @@ impl Cpu {
         if misses != 0 {
             block.code.set(Code::Ready { entry, misses: 0 });
         }
+        self.jit.retired_emitted += retired.min(whole) as u64;
         Some(Emitted {
             retired: retired.min(whole),
             left,

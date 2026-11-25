@@ -130,6 +130,11 @@ export interface JitStats {
   enteredEmitted?: number;
   // Of those, entries a compiled block made by jumping into the next.
   chained?: number;
+  // Instructions the block loops retired, and how many of them compiled code ran.
+  retired?: number;
+  retiredEmitted?: number;
+  // Compiled blocks dropped for handing their first instruction back too often.
+  dropped?: number;
 }
 
 // Firmware NCA kind: 0 program, 1 data archive, 2 other.

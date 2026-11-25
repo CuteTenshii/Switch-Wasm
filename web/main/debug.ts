@@ -75,6 +75,11 @@ async function updateJitDebug(): Promise<void> {
   $('jit-reuse').textContent = s.translated ? fmtCount(s.executed / s.translated) : '-';
   $('jit-entered-emitted').textContent = ofEntries(s.enteredEmitted ?? 0);
   $('jit-chained').textContent = ofEntries(s.chained ?? 0);
+  const retired = s.retired ?? 0;
+  const ran = s.retiredEmitted ?? 0;
+  $('jit-retired-emitted').textContent =
+    fmtCount(ran) + (retired ? ` (${((100 * ran) / retired).toFixed(1)}%)` : '');
+  $('jit-dropped').textContent = fmtCount(s.dropped ?? 0);
 }
 
 const threadsSection = $<HTMLDetailsElement>('threads-debug-section');

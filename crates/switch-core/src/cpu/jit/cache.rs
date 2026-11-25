@@ -83,6 +83,9 @@ pub(in crate::cpu) struct Jit {
     pub(super) emitted: u64,
     pub(super) entered_emitted: u64,
     pub(super) chained: u64,
+    pub(super) retired: u64,
+    pub(super) retired_emitted: u64,
+    pub(super) dropped: u64,
     pub(super) chain: Chain,
     pub(super) a32: a32::Cache,
     /// Whether emitted code tests the watchpoints: one was armed when it was written.
@@ -108,6 +111,12 @@ pub struct JitStats {
     pub entered_emitted: u64,
     /// Entries a compiled block made by jumping straight into the next.
     pub chained: u64,
+    /// Instructions the block loops retired, compiled or not.
+    pub retired: u64,
+    /// Of those, the ones compiled code retired; the rest ran on the op walk.
+    pub retired_emitted: u64,
+    /// Compiled blocks dropped for handing their first instruction back `MAX_MISSES` times running.
+    pub dropped: u64,
 }
 
 impl Default for Jit {
@@ -126,6 +135,9 @@ impl Default for Jit {
             emitted: 0,
             entered_emitted: 0,
             chained: 0,
+            retired: 0,
+            retired_emitted: 0,
+            dropped: 0,
             chain: Chain::default(),
             a32: a32::Cache::default(),
             watches: false,
@@ -321,6 +333,9 @@ impl Jit {
             emitted: self.emitted,
             entered_emitted: self.entered_emitted,
             chained: self.chained,
+            retired: self.retired,
+            retired_emitted: self.retired_emitted,
+            dropped: self.dropped,
         }
     }
 }
