@@ -1132,6 +1132,22 @@ fn shf_decodes_apart_from_bfi() {
     ));
 }
 
+/// `idp` shares `bfi`'s opcode bits and `dset`'s constant form sits beside `fset`'s; neither is
+/// implemented, so neither may decode as its neighbour.
+#[test]
+fn idp_and_dset_are_not_taken_for_bfi_and_fset() {
+    let idp = asm(0x53f8, &[(0, 8, 2), (8, 8, 1), (39, 8, 3)]);
+    assert!(matches!(op(idp), Op::Unimplemented { .. }), "{:?}", op(idp));
+    let dset = asm(0x4900, &[(0, 8, 2), (8, 8, 1), (20, 14, 4), (34, 5, 1)]);
+    assert!(
+        matches!(op(dset), Op::Unimplemented { .. }),
+        "{:?}",
+        op(dset)
+    );
+    let fset = asm(0x4800, &[(0, 8, 2), (8, 8, 1), (20, 14, 4), (34, 5, 1)]);
+    assert!(matches!(op(fset), Op::Fset { .. }), "{:?}", op(fset));
+}
+
 /// Echoes of Wisdom's lit shader masks two light masks against an immediate so.
 #[test]
 fn lop3_decodes_the_third_operand_of_its_immediate_form() {

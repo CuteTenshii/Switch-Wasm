@@ -156,8 +156,11 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
                 signed: field(insn, 48, 1) != 0,
             };
         }
-        // bfi.
+        // bfi; bit 51 set is shf (handled above) or idp, which Eden leaves unimplemented.
         0x5bf | 0x4bf | 0x53f | 0x36f | 0x37f => {
+            if field(insn, 51, 1) != 0 {
+                return un;
+            }
             let (src, base) = match form >> 4 {
                 0x5bf => (
                     Operand::Reg(reg(insn, 20, 8)),
@@ -546,9 +549,9 @@ pub(super) fn decode_alu_wide(insn: u64) -> Op {
         );
     }
 
-    // fset, the register-writing form of fsetp.
+    // fset, the register-writing form of fsetp. Its constant-bank form is all of 0x48; 0x49 is dset.
     if insn & 0xff00_0000_0000_0000 == 0x5800_0000_0000_0000
-        || insn & 0xfe00_0000_0000_0000 == 0x4800_0000_0000_0000
+        || insn & 0xff00_0000_0000_0000 == 0x4800_0000_0000_0000
         || insn & 0xfe00_0000_0000_0000 == 0x3000_0000_0000_0000
     {
         let b = match insn >> 57 {
