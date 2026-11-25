@@ -87,3 +87,4 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 - The charset is subset to keep it small (full CJK is tens of MB).
 - Hinting is stripped (`--no-hinting`): hinted glyphs rendered collapsed horizontally under the emulator, and hinting bytecode cost about 8x more emulated instructions per frame.
 - Nintendo's private-use button glyphs (the dark and light theme sets nx-hbmenu uses) are mapped to matching letters and signs; otherwise hints render as wrong glyphs.
+- `--symbols` names a TrueType font whose Geometric Shapes (U+25A0–25FF) are copied in, as Noto Sans has none: titles fall back to U+25A1 for a missing character and expect the system font to have it, and Echoes of Wisdom faults without it. `web/font.ttf` is built from Noto Sans Regular with Noto Sans Symbols 2.
