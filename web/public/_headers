@@ -1,5 +1,6 @@
 # Cross-origin isolation, the precondition for SharedArrayBuffer.
+# The CSP nonce is for Cloudflare's injected JavaScript Detections script, which copies it from this header.
 /*
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: require-corp
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://s.tenshii.moe; connect-src 'self' https://s.tenshii.moe ws: wss:; img-src 'self' blob:; style-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://s.tenshii.moe 'nonce-P3rbCIaEQ2jN60pG1LvDFtP0'; connect-src 'self' https://s.tenshii.moe ws: wss:; img-src 'self' blob:; style-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
