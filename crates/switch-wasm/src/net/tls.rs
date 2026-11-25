@@ -535,7 +535,10 @@ mod tests {
 
         let (mut client, mut server) = open();
         serve(&mut server, &client.close_notify());
-        assert!(read_all(&mut server).is_empty());
+        assert!(
+            server.process_new_packets().unwrap().peer_has_closed(),
+            "the server never saw our close_notify"
+        );
     }
 
     #[test]

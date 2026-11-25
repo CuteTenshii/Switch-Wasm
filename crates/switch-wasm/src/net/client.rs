@@ -540,6 +540,10 @@ mod tests {
             .collect()
     }
 
+    fn state(client: &Client, stream: StreamId) -> State {
+        client.connections[&stream].state
+    }
+
     #[test]
     fn a_connect_asks_for_a_window_and_names_the_peer() {
         let mut client = Client::default();
@@ -824,11 +828,13 @@ mod tests {
         for stream in 2..=(HISTORY as u32 + 20) {
             client.outgoing(vec![connect(stream), NetCommand::Close { stream }]);
         }
-        let report = client.report();
-        assert_eq!(report.matches(r#""id":"#).count(), HISTORY);
-        assert!(report.contains(r#""id":1,"#), "the open one is not history");
+        assert_eq!(client.connections.len(), HISTORY);
         assert!(
-            !report.contains(r#""id":2,"#),
+            client.connections.contains_key(&1),
+            "the open one is not history"
+        );
+        assert!(
+            !client.connections.contains_key(&2),
             "the oldest finished one is gone"
         );
     }
@@ -850,20 +856,17 @@ mod tests {
         ]);
         // A late success for a stream the guest already closed changes nothing.
         client_event(&mut client, ServerFrame::Connected { stream: 2 });
-        let report = client.report();
-        assert!(report
-            .contains(r#""id":1,"host":"example.com","port":443,"proto":"tcp","state":"refused""#));
-        assert!(report
-            .contains(r#""id":2,"host":"example.com","port":443,"proto":"tcp","state":"closed""#));
+        assert_eq!(state(&client, 1), State::Failed(NetFailure::Refused));
+        assert_eq!(state(&client, 2), State::Closed);
     }
 
     #[test]
     fn a_connection_waits_until_its_frame_is_on_the_socket() {
         let mut client = Client::default();
         client.outgoing(vec![connect(1)]);
-        assert!(client.report().contains(r#""state":"waiting""#));
+        assert_eq!(state(&client, 1), State::Waiting);
         client.sent();
-        assert!(client.report().contains(r#""state":"connecting""#));
+        assert_eq!(state(&client, 1), State::Connecting);
         // Losing the link before then fails it all the same.
         client.outgoing(vec![connect(2)]);
         assert_eq!(client.lost().len(), 2);
@@ -881,7 +884,7 @@ mod tests {
                 reason: Failure::Denied,
             },
         );
-        assert!(client.report().contains(r#""state":"denied""#));
+        assert_eq!(state(&client, 1), State::Failed(NetFailure::Denied));
     }
 
     #[test]
@@ -997,7 +1000,7 @@ mod tests {
             client_event(&mut client, ServerFrame::Reset { stream: 1 }),
             Some(NetEvent::Reset { stream: 1 })
         );
-        assert!(client.report().contains(r#""state":"reset""#));
+        assert_eq!(state(&client, 1), State::Reset);
         let incoming = switch_relay_proto::RELAY_STREAMS;
         assert_eq!(
             client_event(
@@ -1016,9 +1019,16 @@ mod tests {
                 port: 50000
             })
         );
-        assert!(client
-            .report()
-            .contains(r#""host":"203.0.113.9","port":50000,"proto":"tcp","state":"open""#));
+        let accepted = &client.connections[&incoming];
+        assert_eq!(
+            (
+                accepted.host.as_str(),
+                accepted.port,
+                accepted.kind,
+                accepted.state
+            ),
+            ("203.0.113.9", 50000, Kind::Tcp, State::Open)
+        );
     }
 
     /// The ciphertext the client put in `Data` frames for `stream`, and the credit it granted.
@@ -1122,7 +1132,8 @@ mod tests {
                 data: b"200 OK".to_vec()
             }]
         );
-        assert!(client.report().contains(r#""sent":5,"received":6"#));
+        let connection = &client.connections[&1];
+        assert_eq!((connection.sent, connection.received), (5, 6));
         let read = client.outgoing(vec![NetCommand::Consumed {
             stream: 1,
             bytes: 6,
@@ -1175,7 +1186,7 @@ mod tests {
             client_event(&mut client, ServerFrame::Closed { stream: 1 }),
             Some(NetEvent::Closed { stream: 1 })
         );
-        assert!(client.report().contains(r#""state":"ended""#));
+        assert_eq!(state(&client, 1), State::Ended);
         // And what the guest closes goes: the TLS state with it, a plain Close to the relay.
         let pump = client.outgoing(vec![NetCommand::Close { stream: 1 }]);
         assert_eq!(decoded(pump), vec![ClientFrame::Close { stream: 1 }]);
