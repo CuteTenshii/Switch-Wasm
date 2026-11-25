@@ -47,7 +47,8 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 ## `tools/shader_compile.mjs`
 
 - Times the driver over shaders from `--dump-wgsl`, slowest first, with Chromium's GPU watchdog off. A literal is changed per run, since the driver's disk cache otherwise answers in about 100 ms.
-- `--replace=pattern::text` times a change to the WGSL next to the original. It found a branch in `ftz` costing 50 s of a 54 s compile.
+- `--replace=pattern::text` times a change to the WGSL next to the original; `\n` in the text is a newline. It found a branch in `ftz` costing 50 s of a 54 s compile, and the branches in `cbRead` doubling the compile of Breath of the Wild's large vertex shaders.
+- A fragment shader gets a vertex stage that writes its inputs; a vertex shader gets its attributes from `VertexInput` packed into one buffer (the device has fewer buffers than attributes) and an empty fragment stage. A vertex shader's cost is paid again in every pipeline that uses it.
 - Opens a window, because only a headed browser gets the machine's GPU. Times are `createRenderPipelineAsync`, not what a synchronous pipeline costs the worker.
 
 ## `tools/profile_ingame.mjs`
