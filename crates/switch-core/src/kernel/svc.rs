@@ -9,6 +9,23 @@ use crate::mem::{MemoryState, Permission, StateRun};
 use crate::{Error, Result};
 use std::fmt::Write;
 
+mod send_sync_request;
+
+const RESULT_OK: u64 = 0;
+const RESULT_INVALID_MEMORY_RANGE: u64 = 0x8000_DC01;
+// Kernel (module 1) description 114: invalid handle.
+const RESULT_INVALID_HANDLE: u64 = 1 | (114 << 9);
+// Kernel descriptions 57 and 116: invalid core id and ideal core outside the mask.
+const RESULT_INVALID_CORE_ID: u64 = 1 | (57 << 9);
+const RESULT_INVALID_COMBINATION: u64 = 1 | (116 << 9);
+const RESULT_INVALID_PRIORITY: u64 = 1 | (112 << 9);
+const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
+const RESULT_TIMED_OUT: u64 = 0xEA01;
+// Ideal-core values that are not a core: process default, none, no update.
+const IDEAL_CORE_USE_PROCESS_VALUE: i32 = -2;
+const IDEAL_CORE_DONT_CARE: i32 = -1;
+const IDEAL_CORE_NO_UPDATE: i32 = -3;
+
 impl Cpu {
     /// Every SVC a guest issues. `svc #0` (unused by Horizon) is the host halt trap.
     pub(crate) fn syscall(&mut self, imm: u16) -> Result<()> {
@@ -35,21 +52,6 @@ impl Cpu {
     /// Horizon syscalls by libnx's numbering (`nx/source/kernel/svc.s`).
     /// X0 carries the Result; out-handles and values come back in X1.
     pub(crate) fn horizon_syscall(&mut self, imm: u16) -> Result<()> {
-        const RESULT_OK: u64 = 0;
-        const RESULT_INVALID_MEMORY_RANGE: u64 = 0x8000_DC01;
-        // Kernel (module 1) description 114: invalid handle.
-        const RESULT_INVALID_HANDLE: u64 = 1 | (114 << 9);
-        // Kernel descriptions 57 and 116: invalid core id and ideal core outside the mask.
-        const RESULT_INVALID_CORE_ID: u64 = 1 | (57 << 9);
-        const RESULT_INVALID_COMBINATION: u64 = 1 | (116 << 9);
-        // Ideal-core values that are not a core: process default, none, no update.
-        const IDEAL_CORE_USE_PROCESS_VALUE: i32 = -2;
-        const IDEAL_CORE_DONT_CARE: i32 = -1;
-        const IDEAL_CORE_NO_UPDATE: i32 = -3;
-        // Memory pool and system resource figures come from the process layout (`MemoryLayout`).
-        let layout = self.memory_layout();
-        let total_memory_size = layout.total_memory;
-        let system_resource_size = layout.system_resource;
         // Trace every SVC except IPC (traced by `TRACE_IPC`) and the hot
         // WaitSynchronization, SleepThread and QueryMemory.
         if !matches!(imm, 0x21 | 0x18 | 0x0b | 0x06)
@@ -66,460 +68,41 @@ impl Cpu {
             );
         }
         match imm {
-            0x01 => {
-                // SetHeapSize(size): a heap larger than its region is refused.
-                const RESULT_OUT_OF_MEMORY: u64 = 1 | (104 << 9);
-                let size = self.read_zr(1);
-                if size > layout.heap_size {
-                    self.write_zr(0, RESULT_OUT_OF_MEMORY);
-                    return Ok(());
-                }
-                self.process_mut().heap_size = size;
-                self.write_zr(0, RESULT_OK);
-                self.write_zr(1, layout.heap_addr);
-                Ok(())
-            }
+            0x01 => self.svc_set_heap_size(),
             0x02 | 0x03 | 0x14 => {
                 // SetMemoryPermission / SetMemoryAttribute / UnmapSharedMemory
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }
-            0x04 => {
-                // MapMemory(dst, src, size): really back dst, since `virtmemFindStack` looks
-                // for unmapped ranges to place the next thread's stack mirror.
-                let dst = self.read_zr(0);
-                let src = self.read_zr(1);
-                let size = self.read_zr(2) as usize;
-                if dst == 0 || size == 0 {
-                    self.write_zr(0, RESULT_INVALID_MEMORY_RANGE);
-                    return Ok(());
-                }
-                if crate::trace::enabled(crate::trace::Trace::Map) {
-                    crate::traceln!("[map] MapMemory dst={dst:#x} src={src:#x} size={size:#x}");
-                }
-                self.mem.copy_range(dst, src, size)?;
-                self.write_zr(0, RESULT_OK);
-                Ok(())
-            }
-            0x2C => {
-                // MapPhysicalMemory(address, size): how 39-bit titles grow their heap. Pages
-                // materialise on first write via the soft-mapped address space.
-                let addr = self.read_zr(0);
-                let size = self.read_zr(1);
-                let fits = addr
-                    .checked_add(size)
-                    .is_some_and(|end| end <= layout.space_end);
-                if size == 0 || (addr & 0xFFF) != 0 || (size & 0xFFF) != 0 || !fits {
-                    self.write_zr(0, RESULT_INVALID_MEMORY_RANGE);
-                    return Ok(());
-                }
-                self.write_zr(0, RESULT_OK);
-                Ok(())
-            }
-            0x2D => {
-                // UnmapPhysicalMemory(address, size): pages are really freed for the RAM cap.
-                let addr = self.read_zr(0);
-                let size = self.read_zr(1);
-                self.mem.unmap(addr, size);
-                self.write_zr(0, RESULT_OK);
-                Ok(())
-            }
-            0x13 => {
-                // MapSharedMemory(handle, addr, size, perm): hid's is the console's block, with a
-                // connected pad published at once; others are zeroed, pl's with the shared font.
-                let addr = self.read_zr(1);
-                let size = self.read_zr(2);
-                // Prefer `hid`'s handle; the size match is a fallback.
-                if Some(self.read_zr(0)) == self.process().hid_shmem_handle
-                    || size == u64::from(HID_SHMEM_SIZE)
-                {
-                    let block = self.hid_shmem.clone();
-                    self.mem.map_shared(addr, &block)?;
-                    self.process_mut().hid_shmem_addr = addr;
-                    self.hid_mapped = true;
-                    self.set_gamepad_state(0, 0, 0, 0, 0);
-                    // An empty touch sample: a zeroed LIFO header is a ring with no capacity.
-                    self.set_touch_state(&[]);
-                } else if Some(self.read_zr(0)) == self.process().time_shmem_handle {
-                    let block = self.time_shmem.clone();
-                    self.mem.map_shared(addr, &block)?;
-                } else {
-                    self.mem.map_zero(addr, size)?;
-                    if size == u64::from(PL_SHMEM_SIZE) {
-                        self.process_mut().pl_shmem_addr = addr;
-                        self.write_shared_font(addr);
-                    }
-                }
-                self.write_zr(0, RESULT_OK);
-                Ok(())
-            }
-            0x05 => {
-                // UnmapMemory(dst, src, size). An out-of-range unmap reports a 39-bit space,
-                // which hbmenu probes for.
-                let dst = self.read_zr(0);
-                if (dst >> 48) == 0xFFFF {
-                    self.write_zr(0, 0x8000_D401);
-                    return Ok(());
-                }
-                let src = self.read_zr(1);
-                let size = self.read_zr(2) as usize;
-                if dst != 0 && src != 0 && size != 0 {
-                    self.mem.copy_range(src, dst, size)?;
-                    self.mem.unmap(dst, size as u64);
-                }
-                self.write_zr(0, RESULT_OK);
-                Ok(())
-            }
-            0x06 => {
-                // QueryMemory(info, pageInfo, addr): the run of pages in the queried page's
-                // state. Untouched soft-mapped pages read as unmapped. Only module `.text` is
-                // executable, since `rtld` finds modules by walking for executable `CodeStatic`,
-                // and `.rodata` is read-only, where `nn::diag` reads a module's name.
-                let out = self.read_zr(0);
-                let addr = self.read_zr(2);
-                // See [`crate::mem::Memory::state_run`].
-                let mut run = self.mem.state_run(addr, layout.space_end);
-                // The granted heap is in use even where no page has been touched yet.
-                let heap =
-                    layout.heap_addr..layout.heap_addr.saturating_add(self.process().heap_size);
-                if heap.contains(&addr) {
-                    run = StateRun {
-                        start: heap.start,
-                        end: heap.end,
-                        mapped: true,
-                        perm: Permission::ReadWrite,
-                        state: MemoryState::Normal,
-                    };
-                } else if addr < heap.start {
-                    run.end = run.end.min(heap.start);
-                } else if !heap.is_empty() {
-                    run.start = run.start.max(heap.end);
-                }
-                // Past the end of the space is one inaccessible region up to 2^64, as Horizon
-                // reports it: `rtld` walks regions until the address wraps.
-                if addr >= layout.space_end {
-                    run = StateRun {
-                        start: layout.space_end,
-                        end: 0,
-                        mapped: false,
-                        perm: Permission::None,
-                        state: MemoryState::Inaccessible,
-                    };
-                }
-                let (base, size) = (run.start, run.end.wrapping_sub(run.start));
-                let mut info = Vec::with_capacity(40);
-                info.extend_from_slice(&base.to_le_bytes());
-                info.extend_from_slice(&size.to_le_bytes());
-                for v in [
-                    run.state as u32, // type
-                    0,
-                    run.perm as u32,
-                    0,
-                    0,
-                    0,
-                ] {
-                    info.extend_from_slice(&v.to_le_bytes());
-                }
-                for (i, &b) in info.iter().enumerate() {
-                    self.mem.write_u8(out.wrapping_add(i as u64), b)?;
-                }
-                self.write_zr(0, RESULT_OK);
-                self.write_zr(1, if run.mapped { 0x1000 } else { 0 }); // page info
-                Ok(())
-            }
-            0x07 => {
-                // ExitProcess. Only the main thread returns to the exit stub; any other
-                // thread here is an emulator bug, so say so loudly.
-                let pc = self.get_pc();
-                let at_stub = pc == crate::cpu::SELF_RETURN_TRAMPOLINE
-                    || pc.wrapping_sub(4) == crate::cpu::SELF_RETURN_TRAMPOLINE;
-                if at_stub && self.current_thread_index() != 0 {
-                    let line = format!(
-                        "{} reached the emulator's process-exit stub, which only the main thread \
-                         returns to; the process is ending because of it (x30={:#x}, sp={:#x})",
-                        self.thread_label(self.current_thread_handle()),
-                        self.read_zr(30),
-                        self.sp()
-                    );
-                    let line = format!("{line}\n{}", self.trail_text());
-                    self.log(crate::trace::Level::Error, &line);
-                }
-                self.exit_process(crate::cpu::Ending::Exited);
-                Ok(())
-            }
+            0x04 => self.svc_map_memory(),
+            0x2C => self.svc_map_physical_memory(),
+            0x2D => self.svc_unmap_physical_memory(),
+            0x13 => self.svc_map_shared_memory(),
+            0x05 => self.svc_unmap_memory(),
+            0x06 => self.svc_query_memory(),
+            0x07 => self.svc_exit_process(),
             0x0A => {
                 // ExitThread: only the main thread ending stops the process.
                 self.exit_thread();
                 Ok(())
             }
-            0x08 => {
-                // CreateThread(entry = X1, arg = X2, stack_top = X3, priority = W4, core = W5)
-                // -> handle in X1. Starts suspended with its own TLS block.
-                let entry = self.branch_target(self.read_zr(1))?;
-                let arg = self.read_zr(2);
-                let stack_top = self.read_zr(3);
-                // AArch32 passes the priority in r0 and the core in r4.
-                let (priority, core) = if self.mode == crate::cpu::ExecMode::A32 {
-                    (self.read_zr(0), self.read_zr(4))
-                } else {
-                    (self.read_zr(4), self.read_zr(5))
-                };
-                let priority = priority as u32;
-                if priority > 63 {
-                    const RESULT_INVALID_PRIORITY: u64 = 1 | (112 << 9);
-                    self.write_zr(0, RESULT_INVALID_PRIORITY);
-                    return Ok(());
-                }
-                let core = match core as u32 as i32 {
-                    IDEAL_CORE_USE_PROCESS_VALUE => self.process().main_thread_core,
-                    core @ 0..=3 if self.process().process_core_mask >> core & 1 != 0 => core as u8,
-                    _ => {
-                        self.write_zr(0, RESULT_INVALID_CORE_ID);
-                        return Ok(());
-                    }
-                };
-                let handle = self.create_thread(entry, arg, stack_top, priority as u8, core);
-                if crate::trace::enabled(crate::trace::Trace::Wait) {
-                    crate::traceln!(
-                        "[thread] create handle={handle:#x} entry={entry:#x} core={core}"
-                    );
-                }
-                self.write_zr(0, RESULT_OK);
-                self.write_zr(1, handle);
-                Ok(())
-            }
-            0x09 => {
-                // StartThread
-                let handle = self.read_zr(0);
-                let started = self.start_thread(handle);
-                if crate::trace::enabled(crate::trace::Trace::Wait) {
-                    crate::traceln!("[thread] start handle={handle:#x} -> {started}");
-                }
-                self.write_zr(0, RESULT_OK);
-                Ok(())
-            }
-            0x32 => {
-                // SetThreadActivity(handle, activity): 0 = Runnable, 1 = Paused. The caller
-                // can't suspend itself, and a no-op change reports busy.
-                const RESULT_BUSY: u64 = 1 | (122 << 9);
-                const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
-                let handle = self.read_zr(0);
-                let paused = self.read_zr(1) != 0;
-                if self.current_thread_handle() == handle {
-                    self.write_zr(0, RESULT_BUSY);
-                    return Ok(());
-                }
-                let result = match self.set_thread_paused(handle, paused) {
-                    Some(true) => RESULT_OK,
-                    Some(false) => RESULT_INVALID_STATE,
-                    None => RESULT_INVALID_HANDLE,
-                };
-                self.write_zr(0, result);
-                Ok(())
-            }
-            0x33 => {
-                // GetThreadContext3(out = X0, handle = X1): the suspended thread's registers.
-                let out = self.read_zr(0);
-                let handle = self.read_zr(1);
-                let ok = self.write_thread_context(out, handle);
-                self.write_zr(0, if ok { RESULT_OK } else { RESULT_INVALID_HANDLE });
-                Ok(())
-            }
-            0x0B => {
-                // SleepThread(nanoseconds = X0). 0, -1 and -2 are yield modes; other values
-                // really sleep, which matters for `nn::os` poll loops.
-                let nanoseconds = self.svc_arg64(0, 0, 1) as i64;
-                self.write_zr(0, RESULT_OK);
-                match self.wait_deadline(nanoseconds) {
-                    Some(deadline) => self.sleep_until(deadline),
-                    None => self.yield_thread(),
-                }
-                Ok(())
-            }
-            0x1A => {
-                // ArbitrateLock(owner = W0, mutex = X1, self = W2)
-                let owner = self.read_zr(0) as u32;
-                let mutex = self.read_zr(1);
-                let requester = self.read_zr(2) as u32;
-                if crate::trace::enabled(crate::trace::Trace::Wait) {
-                    crate::traceln!(
-                        "[wait] lock mutex={mutex:#x} owner={owner:#x} self={requester:#x} thread={:#x}",
-                        self.current_thread_handle()
-                    );
-                }
-                self.write_zr(0, RESULT_OK);
-                self.arbitrate_lock(owner, mutex, requester);
-                Ok(())
-            }
-            0x1B => {
-                // ArbitrateUnlock(mutex = X0)
-                let mutex = self.read_zr(0);
-                self.write_zr(0, RESULT_OK);
-                self.arbitrate_unlock(mutex);
-                Ok(())
-            }
-            0x1C => {
-                // WaitProcessWideKeyAtomic(mutex = X0, key = X1, self = W2, timeout = X3)
-                let mutex = self.read_zr(0);
-                let key = self.read_zr(1);
-                let requester = self.read_zr(2) as u32;
-                // A negative timeout waits forever; a positive one is in nanoseconds.
-                let timeout = self.svc_arg64(3, 3, 4) as i64;
-                if crate::trace::enabled(crate::trace::Trace::Wait) {
-                    crate::traceln!(
-                        "[wait] condvar key={key:#x} mutex={mutex:#x} timeout={timeout} thread={:#x} bt={:x?}",
-                        self.current_thread_handle(),
-                        self.backtrace(8)
-                    );
-                }
-                self.write_zr(0, RESULT_OK);
-                self.wait_process_wide_key(mutex, key, requester, timeout);
-                Ok(())
-            }
-            0x34 => {
-                // WaitForAddress(address = X0, arb_type = W1, value = W2, timeout = X3).
-                // If the arb_type predicate doesn't hold, report InvalidState instead of blocking.
-                const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
-                const RESULT_TIMED_OUT: u64 = 0xEA01;
-                let addr = self.read_zr(0);
-                let arb_type = self.read_zr(1) as u32;
-                let value = self.read_zr(2) as u32 as i32;
-                let timeout = self.svc_arg64(3, 3, 4) as i64;
-                if crate::trace::enabled(crate::trace::Trace::Wait) {
-                    crate::traceln!(
-                        "[wait] arbiter addr={addr:#x} type={arb_type} value={value} \
-                         timeout={timeout} thread={:#x}",
-                        self.current_thread_handle()
-                    );
-                }
-                // Write the result before blocking: blocking switches register files.
-                let outcome = self.arbitrate_address(addr, arb_type, value, timeout);
-                self.write_zr(
-                    0,
-                    match outcome {
-                        ArbiterWait::Blocked => RESULT_OK,
-                        ArbiterWait::Mismatch => RESULT_INVALID_STATE,
-                        ArbiterWait::TimedOut => RESULT_TIMED_OUT,
-                    },
-                );
-                if outcome == ArbiterWait::Blocked {
-                    self.block_on_address(addr, timeout);
-                }
-                Ok(())
-            }
-            0x35 => {
-                // SignalToAddress(address = X0, signal_type = W1, value = W2, count = W3).
-                const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
-                let addr = self.read_zr(0);
-                let signal_type = self.read_zr(1) as u32;
-                let value = self.read_zr(2) as u32 as i32;
-                let count = self.read_zr(3) as u32 as i32;
-                if crate::trace::enabled(crate::trace::Trace::Wait) {
-                    crate::traceln!(
-                        "[wait] arbiter signal addr={addr:#x} type={signal_type} value={value} \
-                         count={count} thread={:#x}",
-                        self.current_thread_handle()
-                    );
-                }
-                let ok = self.signal_to_address(addr, signal_type, value, count);
-                self.write_zr(0, if ok { RESULT_OK } else { RESULT_INVALID_STATE });
-                Ok(())
-            }
+            0x08 => self.svc_create_thread(),
+            0x09 => self.svc_start_thread(),
+            0x32 => self.svc_set_thread_activity(),
+            0x33 => self.svc_get_thread_context3(),
+            0x0B => self.svc_sleep_thread(),
+            0x1A => self.svc_arbitrate_lock(),
+            0x1B => self.svc_arbitrate_unlock(),
+            0x1C => self.svc_wait_process_wide_key_atomic(),
+            0x34 => self.svc_wait_for_address(),
+            0x35 => self.svc_signal_to_address(),
             // SynchronizePreemptionState only unpins a pinned thread, and nothing here pins one.
             0x36 => Ok(()),
-            0x1D => {
-                // SignalProcessWideKey(key = X0, count = W1)
-                let key = self.read_zr(0);
-                let count = self.read_zr(1) as u32 as i32;
-                if crate::trace::enabled(crate::trace::Trace::Wait) {
-                    crate::traceln!(
-                        "[wait] signal key={key:#x} count={count} thread={:#x}",
-                        self.current_thread_handle()
-                    );
-                }
-                self.write_zr(0, RESULT_OK);
-                self.signal_process_wide_key(key, count);
-                Ok(())
-            }
-            0x0C => {
-                // GetThreadPriority(handle = X1) -> priority in W1.
-                match self.thread_priority(self.read_zr(1)) {
-                    Some(priority) => {
-                        self.write_zr(0, RESULT_OK);
-                        self.write_zr(1, u64::from(priority));
-                    }
-                    None => self.write_zr(0, RESULT_INVALID_HANDLE),
-                }
-                Ok(())
-            }
-            0x0D => {
-                // SetThreadPriority(handle = X0, priority = W1)
-                const RESULT_INVALID_PRIORITY: u64 = 1 | (112 << 9);
-                let handle = self.read_zr(0);
-                let priority = self.read_zr(1) as u32;
-                let result = if priority > 63 {
-                    RESULT_INVALID_PRIORITY
-                } else if self.set_thread_priority(handle, priority as u8) {
-                    RESULT_OK
-                } else {
-                    RESULT_INVALID_HANDLE
-                };
-                self.write_zr(0, result);
-                Ok(())
-            }
-            0x0E => {
-                // GetThreadCoreMask(handle = W2) -> ideal core W1, affinity X2 (A32 r2:r3).
-                let handle = self.read_zr(2);
-                match self.thread_core_mask(handle) {
-                    Some((ideal_core, affinity)) => {
-                        self.write_zr(0, RESULT_OK);
-                        self.write_zr(1, u64::from(ideal_core as u32));
-                        self.svc_out64(2, 2, 3, affinity);
-                    }
-                    None => self.write_zr(0, RESULT_INVALID_HANDLE),
-                }
-                Ok(())
-            }
-            0x0F => {
-                // SetThreadCoreMask(handle = W0, ideal core = W1, affinity = X2, r2:r3 on A32),
-                // checked in the kernel's order.
-                let handle = self.read_zr(0);
-                let requested = self.read_zr(1) as u32 as i32;
-                let affinity = self.svc_arg64(2, 2, 3);
-                let Some((current_ideal, _)) = self.thread_core_mask(handle) else {
-                    self.write_zr(0, RESULT_INVALID_HANDLE);
-                    return Ok(());
-                };
-                let checked = match requested {
-                    IDEAL_CORE_USE_PROCESS_VALUE => Ok((
-                        i32::from(self.process().main_thread_core),
-                        1u64 << self.process().main_thread_core,
-                    )),
-                    _ if affinity & !self.process().process_core_mask != 0 => {
-                        Err(RESULT_INVALID_CORE_ID)
-                    }
-                    _ if affinity == 0 => Err(RESULT_INVALID_COMBINATION),
-                    core @ 0..=3 if affinity & (1 << core) == 0 => Err(RESULT_INVALID_COMBINATION),
-                    core @ 0..=3 => Ok((core, affinity)),
-                    IDEAL_CORE_DONT_CARE => Ok((IDEAL_CORE_DONT_CARE, affinity)),
-                    IDEAL_CORE_NO_UPDATE
-                        if current_ideal >= 0 && affinity & (1 << current_ideal) == 0 =>
-                    {
-                        Err(RESULT_INVALID_COMBINATION)
-                    }
-                    IDEAL_CORE_NO_UPDATE => Ok((current_ideal, affinity)),
-                    _ => Err(RESULT_INVALID_CORE_ID),
-                };
-                let result = match checked {
-                    Ok((ideal, affinity)) if self.set_thread_core_mask(handle, ideal, affinity) => {
-                        RESULT_OK
-                    }
-                    Ok(_) => RESULT_INVALID_HANDLE,
-                    Err(result) => result,
-                };
-                self.write_zr(0, result);
-                Ok(())
-            }
+            0x1D => self.svc_signal_process_wide_key(),
+            0x0C => self.svc_get_thread_priority(),
+            0x0D => self.svc_set_thread_priority(),
+            0x0E => self.svc_get_thread_core_mask(),
+            0x0F => self.svc_set_thread_core_mask(),
             0x16 => {
                 // CloseHandle(handle)
                 self.close_handle(self.read_zr(0));
@@ -531,40 +114,8 @@ impl Cpu {
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }
-            0x17 => {
-                // ResetSignal(handle): clear an event and report whether it was signalled.
-                const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
-                let handle = self.read_zr(0);
-                let was_signalled = self.reset_signal(handle);
-                if crate::trace::enabled(crate::trace::Trace::Wait) {
-                    crate::traceln!(
-                        "[wait] reset handle={handle:#x} {:?} -> {was_signalled}",
-                        self.event_name(handle)
-                    );
-                }
-                self.write_zr(
-                    0,
-                    if was_signalled {
-                        RESULT_OK
-                    } else {
-                        RESULT_INVALID_STATE
-                    },
-                );
-                Ok(())
-            }
-            0x19 => {
-                // CancelSynchronization(thread): wakes a `nn::os::MultiWait` waiting on no handle.
-                let cancelled = self.cancel_synchronization(self.read_zr(0));
-                self.write_zr(
-                    0,
-                    if cancelled {
-                        RESULT_OK
-                    } else {
-                        RESULT_INVALID_HANDLE
-                    },
-                );
-                Ok(())
-            }
+            0x17 => self.svc_reset_signal(),
+            0x19 => self.svc_cancel_synchronization(),
             0x10 => {
                 // GetCurrentProcessorNumber: the running thread's core.
                 let core = self.current_core();
@@ -576,804 +127,799 @@ impl Cpu {
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }
-            0x15 => {
-                // CreateTransferMemory(addr, size, perm): the creator's pages become a shared
-                // block, so a process the memory is passed to sees what the creator writes.
-                // Kernel description 106: the range is not the caller's memory.
-                const RESULT_INVALID_CURRENT_MEMORY: u64 = 1 | (106 << 9);
-                let addr = self.read_zr(1);
-                let size = self.read_zr(2);
-                // Untouched heap is the guest's too; the block backs every page of the range,
-                // so it must fit under the memory cap once it replaces what is backed there.
-                let owned = addr.checked_add(size).is_some_and(|end| {
-                    self.mem.owns_range(addr, end)
-                        && self.mem.mapped_bytes() - self.mem.mapped_bytes_in(addr, end) + size
-                            <= self.mem.max_mapped_bytes()
-                });
-                if !owned {
-                    self.write_zr(0, RESULT_INVALID_CURRENT_MEMORY);
-                    return Ok(());
-                }
-                let size = size as usize;
-                let handle = self.alloc_handle();
-                self.grant_handle(handle);
-                let page = crate::mem::PAGE_SIZE;
-                if size != 0 && addr.is_multiple_of(page as u64) && size.is_multiple_of(page) {
-                    let block = crate::mem::SharedPages::new(size);
-                    let mut contents = [0u8; crate::mem::PAGE_SIZE];
-                    for offset in (0..size).step_by(page) {
-                        self.mem.read_into(addr + offset as u64, &mut contents)?;
-                        block.write(offset as u32, &contents)?;
-                    }
-                    self.mem.map_shared(addr, &block)?;
-                    self.transfer_memories.insert(handle, block);
-                }
-                self.write_zr(0, RESULT_OK);
-                self.write_zr(1, handle);
-                Ok(())
-            }
-            0x18 => {
-                // WaitSynchronization(out_index, handles, num_handles, timeout). X1 is the
-                // index of the signalled handle.
-                const RESULT_TIMED_OUT: u64 = 0xEA01;
-                const RESULT_CANCELLED: u64 = 1 | (118 << 9);
-                let handles_ptr = self.read_zr(1);
-                let count = (self.read_zr(2) as u32).min(0x40);
-                let timeout = self.svc_arg64(3, 0, 3) as i64;
-                let handles: Vec<u64> = (0..count)
-                    .map(|i| {
-                        u64::from(
-                            self.mem
-                                .read_u32(handles_ptr.wrapping_add(u64::from(i) * 4))
-                                .unwrap_or(0),
-                        )
-                    })
-                    .collect();
-                if crate::trace::enabled(crate::trace::Trace::Wait) {
-                    let named: Vec<String> = handles
-                        .iter()
-                        .map(|&h| match (self.event_name(h), self.event_signaled(h)) {
-                            (Some(name), Some(true)) => format!("{h:#x} {name} signalled"),
-                            (Some(name), _) => format!("{h:#x} {name}"),
-                            _ => format!("{h:#x} (not an event)"),
-                        })
-                        .collect();
-                    crate::traceln!("[wait] pc={:#x} timeout={timeout} {named:?}", self.pc);
-                }
-                // Presents drive vsync.
-                let refreshed = self.cycles.wrapping_sub(self.last_vsync_cycles)
-                    >= crate::cpu::VSYNC_PERIOD_CYCLES;
-                if self.nv.gpu.frames != self.last_vsync_frame || refreshed {
-                    self.last_vsync_frame = self.nv.gpu.frames;
-                    self.last_vsync_cycles = self.cycles;
-                    for vsync in self.vsync_events.clone() {
-                        self.signal_event(vsync);
-                    }
-                }
-                // `hid` ticks for the same reason.
-                self.hid_tick();
-                // Audio buffer events fire here; see `Cpu::audio_tick`.
-                let next_buffer = self.audio_tick(&handles);
-                // First ready handle; unmodelled handles count as ready.
-                let ready = handles
-                    .iter()
-                    .position(|&h| self.waitable_signaled(h) != Some(false));
-                if let Some(index) = ready {
-                    self.consume_event(handles[index]);
-                    self.write_zr(0, RESULT_OK);
-                    self.write_zr(1, index as u64);
-                    self.yield_thread();
-                    return Ok(());
-                }
-                if self.take_sync_cancelled() {
-                    self.write_zr(0, RESULT_CANCELLED);
-                    return Ok(());
-                }
-                // Nothing fired. A poll times out; a blocking wait parks.
-                if timeout == 0 {
-                    self.write_zr(0, RESULT_TIMED_OUT);
-                    return Ok(());
-                }
-                // A blocking wait on vsync is certain to fire, so park until the tick.
-                if timeout != 0
-                    && self.vsync_throttle
-                    && self.vsync_events.iter().any(|v| handles.contains(v))
-                {
-                    self.pc = self.pc.wrapping_sub(4);
-                    self.park_on_events(self.next_display_tick());
-                    return Ok(());
-                }
-                // Same for an audio buffer event: park until the buffer finishes.
-                if let Some(done_at) = next_buffer {
-                    // Park until the buffer's own deadline, then reissue the `svc`.
-                    self.pc = self.pc.wrapping_sub(4);
-                    self.sleep_until(done_at);
-                    return Ok(());
-                }
-                // Rewind onto the `svc` and park until a signal or display tick wakes us.
-                // Reporting a handle as signalled would run that object's handler.
-                self.pc = self.pc.wrapping_sub(4);
-                self.park_on_events(self.next_display_tick());
-                Ok(())
-            }
+            0x15 => self.svc_create_transfer_memory(),
+            0x18 => self.svc_wait_synchronization(),
             0x1E => {
                 // GetSystemTick: 19.2 MHz, scaled from cycles of the 1.02 GHz CPU.
                 self.svc_out64(0, 0, 1, self.system_tick());
                 Ok(())
             }
-            0x1F => {
-                // ConnectToNamedPort
-                let name_ptr = self.read_zr(1);
-                let name = if name_ptr != 0 {
-                    self.read_port_name(name_ptr)
-                } else {
-                    String::new()
-                };
-                let handle = self.alloc_handle();
-                self.record_handle(handle, &name);
-                self.grant_handle(handle);
-                self.write_zr(0, RESULT_OK);
-                self.write_zr(1, handle);
-                Ok(())
-            }
-            0x20..=0x23 => {
-                // SendSyncRequest variants: a named service's stub, else the generic reply.
-                let tls = self.tpidr;
-                let session = self.read_zr(0);
-                // A Close request (type 2) has no command id; it tears down the session.
-                if self.ipc_message_type(tls) == 2 {
-                    self.close_session(session);
-                    self.write_ipc_response(tls, 0, &[], &[], &[])?;
-                    self.write_zr(0, RESULT_OK);
-                    return Ok(());
-                }
-                // A clone reaches its owner's interface and domain objects.
-                let handle = self
-                    .session_owners
-                    .get(&session)
-                    .copied()
-                    .unwrap_or(session);
-                let cmd_id = self.ipc_command_id(tls);
-                let svc_name = self.service_name(handle).map(|s| s.to_string());
-                if crate::trace::enabled(crate::trace::Trace::Ipc) {
-                    let obj = self.ipc_domain_object_id(tls);
-                    let iface = self.domain_interface(handle, obj).map(|s| s.to_string());
-                    let words: Vec<String> = (0..8)
-                        .map(|i| format!("{:08x}", self.mem.read_u32(tls + i * 4).unwrap_or(0)))
-                        .collect();
-                    crate::traceln!(
-                        "[ipc] pc={:#x} h={} svc={:?} obj={} iface={:?} type={} cmd={:?} {}",
-                        self.pc,
-                        handle,
-                        svc_name,
-                        obj,
-                        iface,
-                        self.ipc_message_type(tls),
-                        cmd_id,
-                        words.join(" ")
-                    );
-                }
-                // CloneCurrentObject (control 2) and its Ex form (4) reply with a new session
-                // handle as a move handle, sharing this session's interface and domain: objects
-                // opened through either are reachable through both.
-                if self.ipc_is_control_request(tls) && matches!(cmd_id, Some(2) | Some(4)) {
-                    if let Some(name) = svc_name.clone() {
-                        let clone = self.alloc_handle();
-                        self.record_handle(clone, &name);
-                        self.session_owners.insert(clone, handle);
-                        self.write_ipc_response(tls, 0, &[clone], &[], &[])?;
-                        self.write_zr(0, RESULT_OK);
-                        return Ok(());
-                    }
-                }
-                // QueryPointerBufferSize (control 3): `nnSdk` checks pointer args against it.
-                if self.ipc_is_control_request(tls) && cmd_id == Some(3) {
-                    let size = super::ipc::POINTER_BUFFER_SIZE.to_le_bytes();
-                    self.write_ipc_response(tls, 0, &[], &size, &[])?;
-                    self.write_zr(0, RESULT_OK);
-                    return Ok(());
-                }
-                // A domain Close has no command id; handle it before any service sees it.
-                if self.ipc_is_domain_close(tls) {
-                    let object_id = self.ipc_domain_object_id(tls);
-                    self.close_domain_object(tls, handle, object_id)?;
-                    self.write_zr(0, RESULT_OK);
-                    return Ok(());
-                }
-                if let Some(name) = svc_name {
-                    match name.as_str() {
-                        "sm:" | "sm" => self.sm_request(tls, cmd_id, handle)?,
-                        "fsp-srv" | "fsp-srv:" => {
-                            // Domain sub-objects on fsp-srv, routed by recorded interface.
-                            let object_id = self.ipc_domain_object_id(tls);
-                            match self.domain_interface(handle, object_id) {
-                                Some("fsp-srv-fs") => self.fs_request(tls, cmd_id, handle)?,
-                                Some("fsp-srv-fs-dir") => self.fs_dir_request(
-                                    tls,
-                                    cmd_id,
-                                    Self::object_key(handle, object_id),
-                                )?,
-                                Some("fsp-srv-fs-file") => self.fs_file_request(
-                                    tls,
-                                    cmd_id,
-                                    Self::object_key(handle, object_id),
-                                )?,
-                                Some("fsp-srv-storage") => {
-                                    self.fs_storage_request(tls, handle, cmd_id)?
-                                }
-                                Some("fsp-srv-save-info-reader") => {
-                                    self.fs_save_data_info_reader_request(tls, handle, cmd_id)?
-                                }
-                                Some("fsp-srv-device-operator") => {
-                                    self.fs_device_operator_request(tls, cmd_id)?
-                                }
-                                Some("fsp-srv-sd-detection")
-                                | Some("fsp-srv-gamecard-detection") => {
-                                    self.fs_detection_notifier_request(tls, handle, cmd_id)?
-                                }
-                                _ => self.fsp_srv_request(tls, cmd_id, handle)?,
-                            }
-                        }
-                        // The same interfaces over their own session handle (non-domain callers).
-                        "fsp-srv-fs" => self.fs_request(tls, cmd_id, handle)?,
-                        "fsp-srv-fs-dir" => {
-                            self.fs_dir_request(tls, cmd_id, Self::object_key(handle, 0))?
-                        }
-                        "fsp-srv-fs-file" => {
-                            self.fs_file_request(tls, cmd_id, Self::object_key(handle, 0))?
-                        }
-                        "fsp-srv-storage" => self.fs_storage_request(tls, handle, cmd_id)?,
-                        "fsp-srv-save-info-reader" => {
-                            self.fs_save_data_info_reader_request(tls, handle, cmd_id)?
-                        }
-                        "fsp-srv-device-operator" => {
-                            self.fs_device_operator_request(tls, cmd_id)?
-                        }
-                        "fsp-srv-sd-detection" | "fsp-srv-gamecard-detection" => {
-                            self.fs_detection_notifier_request(tls, handle, cmd_id)?
-                        }
-                        "vi:m" | "vi:m:" => self.vi_request(tls, handle, cmd_id)?,
-                        // fatal:u, the guest giving up.
-                        "fatal:u" | "fatal:p" => self.fatal_request(tls, cmd_id)?,
-                        "set" => self.set_request(tls, handle, cmd_id)?,
-                        "set:sys" => self.set_sys_request(tls, cmd_id)?,
-                        "nvdrv" | "nvdrv:" | "nvdrv:a" | "nvdrv:a:" | "nvdrv:s" | "nvdrv:t" => {
-                            self.nvdrv_request(tls, cmd_id, handle)?
-                        }
-                        "pl:u" | "pl:s" => self.pl_request(tls, cmd_id)?,
-                        // caps:a, the screenshot album.
-                        "caps:a" => self.caps_album_accessor_request(tls, handle, cmd_id)?,
-                        // time:* sub-interfaces as domain out-objects.
-                        "time:s" | "time:u" | "time:a" | "time:r" => {
-                            let object_id = self.ipc_domain_object_id(tls);
-                            match self.domain_interface(handle, object_id) {
-                                Some("time:system-clock") => {
-                                    self.time_system_clock_request(tls, cmd_id)?
-                                }
-                                Some("time:steady-clock") => {
-                                    self.time_steady_clock_request(tls, cmd_id)?
-                                }
-                                Some("time:timezone") => self.time_timezone_request(tls, cmd_id)?,
-                                _ => self.time_request(tls, cmd_id, handle)?,
-                            }
-                        }
-                        // The same over their own session handle.
-                        "time:system-clock" => self.time_system_clock_request(tls, cmd_id)?,
-                        "time:steady-clock" => self.time_steady_clock_request(tls, cmd_id)?,
-                        "time:timezone" => self.time_timezone_request(tls, cmd_id)?,
-                        // psm (power state management).
-                        "psm" => {
-                            let object_id = self.ipc_domain_object_id(tls);
-                            match self.domain_interface(handle, object_id) {
-                                Some("psm-session") => self.psm_session_request(tls, cmd_id)?,
-                                _ => self.psm_request(tls, cmd_id, handle)?,
-                            }
-                        }
-                        "psm-session" => self.psm_session_request(tls, cmd_id)?,
-                        // appletOE / appletAE and the `am` sub-interfaces over their own handles.
-                        "appletOE"
-                        | "appletAE"
-                        | "am:proxy-service"
-                        | "am:application-proxy"
-                        | "am:common-state-getter"
-                        | "am:self-controller"
-                        | "am:window-controller"
-                        | "am:audio-controller"
-                        | "am:display-controller"
-                        | "am:library-applet-creator"
-                        | "am:application-functions"
-                        | "am:library-applet-proxy"
-                        | "am:system-applet-proxy"
-                        | "am:library-applet-self-accessor"
-                        | "am:applet-common-functions"
-                        | "am:system-process-common-functions"
-                        | "am:application-observer"
-                        | "am:applet-alternative-functions"
-                        | "am:process-winding-controller"
-                        | "am:home-menu-functions"
-                        | "am:global-state-controller"
-                        | "am:cradle-firmware-updater"
-                        | "am:application-creator"
-                        | "am:lock-accessor"
-                        | "am:storage"
-                        | "am:storage-accessor"
-                        | "am:debug-functions" => self.applet_request(tls, handle, cmd_id)?,
-                        // nifm at all three privilege levels.
-                        "nifm:u" | "nifm:s" | "nifm:a" => {
-                            let object_id = self.ipc_domain_object_id(tls);
-                            match self.domain_interface(handle, object_id) {
-                                Some("nifm:general-service") => {
-                                    self.nifm_general_service_request(tls, handle, cmd_id)?
-                                }
-                                Some("nifm:request") => {
-                                    self.nifm_request_object_request(tls, handle, cmd_id)?
-                                }
-                                _ => self.nifm_request(tls, cmd_id, handle)?,
-                            }
-                        }
-                        // The same two over their own session handles.
-                        "nifm:general-service" => {
-                            self.nifm_general_service_request(tls, handle, cmd_id)?
-                        }
-                        "nifm:request" => self.nifm_request_object_request(tls, handle, cmd_id)?,
-                        // ssl and its contexts.
-                        "ssl" | "ssl:s" | "ssl:service" | "ssl:context" => {
-                            self.ssl_request(tls, handle, cmd_id)?
-                        }
-                        // hid, IAppletResource and IActiveVibrationDeviceList.
-                        "hid"
-                        | "hid:dbg"
-                        | "hid:sys"
-                        | "hid:server"
-                        | "hid:applet-resource"
-                        | "hid:vibration-devices" => self.hid_request(tls, handle, cmd_id)?,
-                        // lm, the log manager.
-                        "lm" | "lm:service" | "lm:logger" => {
-                            self.lm_request(tls, handle, cmd_id)?
-                        }
-                        // acc, the user accounts.
-                        "acc:u0" | "acc:u1" | "acc:su" | "acc:profile" | "acc:profile-editor"
-                        | "acc:manager" | "acc:administrator" | "acc:async-context"
-                        | "acc:notifier" => self.acc_request(tls, handle, cmd_id)?,
-                        // ns, installed content.
-                        "ns:am"
-                        | "ns:am2"
-                        | "ns:ec"
-                        | "ns:rid"
-                        | "ns:rt"
-                        | "ns:web"
-                        | "ns:ro"
-                        | "ns:su"
-                        | "ns:system-update-control"
-                        | "ns:vm"
-                        | "ns:dev"
-                        | "ns:app-manager"
-                        | "ns:read-only-record"
-                        | "ns:read-only-control"
-                        | "ns:content-management"
-                        | "ns:download-task"
-                        | "ns:account-proxy"
-                        | "ns:app-version"
-                        | "ns:factory-reset"
-                        | "ns:ecommerce"
-                        | "ns:dynamic-rights"
-                        | "ns:document"
-                        | "ns:request-server-stopper"
-                        | "ns:async-latest-update"
-                        | "ns:async-unnamed" => self.ns_request(tls, handle, cmd_id)?,
-                        // aoc, add-on content.
-                        "aoc:u" | "aoc:purchase-events" => self.aoc_request(tls, handle, cmd_id)?,
-                        // ldr:ro, used by `nn::ro`.
-                        "ldr:ro" => self.ldr_ro_request(tls, handle, cmd_id)?,
-                        // csrng and `spl:`.
-                        "csrng" => self.csrng_request(tls, cmd_id)?,
-                        "spl:" | "spl:mig" | "spl:fs" | "spl:ssl" | "spl:es" | "spl:manu" => {
-                            self.spl_request(tls, cmd_id)?
-                        }
-                        "es" => self.es_request(tls, cmd_id)?,
-                        // pdm, play history.
-                        "pdm:qry" | "pdm:ntfy" | "pdm:info" => self.pdm_request(tls, cmd_id)?,
-                        // prepo, play reports.
-                        "prepo:u" | "prepo:a" | "prepo:a2" | "prepo:m" | "prepo:s" => {
-                            self.prepo_request(tls, cmd_id)?
-                        }
-                        // pm, the process manager.
-                        "pm:shell" | "pm:dmnt" | "pm:info" | "pm:bm" => {
-                            self.pm_request(tls, handle, cmd_id)?
-                        }
-                        // pcv and clkrst, the clock manager.
-                        "pcv" | "clkrst" | "clkrst:i" | "clkrst:session-0" | "clkrst:session-1"
-                        | "clkrst:session-2" | "clkrst:session-3" => {
-                            self.pcv_request(tls, handle, cmd_id)?
-                        }
-                        // mm:u, multimedia clocks.
-                        "mm:u" => self.mm_request(tls, cmd_id)?,
-                        // ts, temperature sensors.
-                        "ts" | "ts:u" | "ts:s" | "ts:session-internal" | "ts:session-external" => {
-                            self.ts_request(tls, handle, cmd_id)?
-                        }
-                        // sfdnsres, the DNS resolver.
-                        "sfdnsres" => self.sfdnsres_request(tls, cmd_id)?,
-                        // nsd, the environment's host names.
-                        "nsd:a" | "nsd:u" => self.nsd_request(tls, handle, cmd_id)?,
-                        // bsd, sockets.
-                        "bsd:u" | "bsd:s" => self.bsd_request(tls, handle, cmd_id)?,
-                        // apm, clock profiles.
-                        "apm" | "apm:p" | "apm:am" | "apm:sys" | "apm:session" => {
-                            self.apm_request(tls, handle, cmd_id)?
-                        }
-                        // pctl and IParentalControlService.
-                        "pctl" | "pctl:s" | "pctl:a" | "pctl:r" | "pctl:factory"
-                        | "pctl:service" => self.pctl_request(tls, handle, cmd_id)?,
-                        // audout, PCM output.
-                        "audout:u" | "audout:a" | "audout:d" => self.audout_request(tls, cmd_id)?,
-                        "audout:iaudioout" => self.audio_out_request(tls, cmd_id, handle)?,
-                        // psc, power-state notifications.
-                        "psc:m" | "psc:service" | "psc:module" => {
-                            self.psc_request(tls, handle, cmd_id)?
-                        }
-                        // gpio and its pad sessions.
-                        "gpio" | "gpio:pad" => self.gpio_request(tls, handle, cmd_id)?,
-                        // Mii database.
-                        "mii:e" | "mii:u" | "mii:s" => self.mii_request(tls, handle, cmd_id)?,
-                        "mii:database" | "mii:static" => self.mii_request(tls, handle, cmd_id)?,
-                        "miiimg" => self.miiimg_request(tls, cmd_id)?,
-                        // hwopus, the Opus decoder.
-                        "hwopus" | "hwopus:decoder" => self.hwopus_request(tls, handle, cmd_id)?,
-                        "audren:u" => self.audren_request(tls, handle, cmd_id)?,
-                        "audren:iaudiorenderer" => {
-                            self.audren_renderer_request(tls, cmd_id, handle)?
-                        }
-                        "audren:iaudiodevice" => self.audio_device_request(tls, cmd_id, handle)?,
-                        // lbl, the backlight.
-                        "lbl" => self.lbl_request(tls, handle, cmd_id)?,
-                        // audctl, system audio settings.
-                        "audctl" => self.audctl_request(tls, handle, cmd_id)?,
-                        // nfc:sys; no reader attached.
-                        "nfc:sys" | "nfc:system" => self.nfc_request(tls, handle, cmd_id)?,
-                        // nfp:sys and nfp:user, amiibo; no reader attached.
-                        "nfp:sys" | "nfp:system" | "nfp:user" | "nfp:iuser" => {
-                            self.nfp_request(tls, handle, cmd_id)?
-                        }
-                        // btm:sys, the Bluetooth manager.
-                        "btm:sys" | "btm:core" => self.btm_request(tls, handle, cmd_id)?,
-                        // ngc, the profanity filter.
-                        "ngc:u" | "ngct:u" | "ngct:s" => self.ngc_request(tls, handle, cmd_id)?,
-                        "npns:s" | "npns:u" => self.npns_request(tls, handle, cmd_id)?,
-                        // ldn:m and lp2p:m, local wireless monitors; ldn:u, local wireless itself.
-                        "ldn:m" | "ldn:monitor" => self.ldn_monitor_request(tls, handle, cmd_id)?,
-                        "ldn:u" | "ldn:user" | "ldn:client-monitor" => {
-                            self.ldn_user_request(tls, handle, cmd_id)?
-                        }
-                        "lp2p:m" | "lp2p:monitor" => {
-                            self.lp2p_monitor_request(tls, handle, cmd_id)?
-                        }
-                        // ovln, the overlay message queue.
-                        "ovln:snd" | "ovln:rcv" | "ovln:sender" | "ovln:receiver" => {
-                            self.ovln_request(tls, handle, cmd_id)?
-                        }
-                        // olsc, save-data cloud backup.
-                        "olsc:s"
-                        | "olsc:system-service"
-                        | "olsc:transfer-task-list"
-                        | "olsc:remote-storage"
-                        | "olsc:daemon"
-                        | "olsc:transfer-end-holder"
-                        | "olsc:transfer-start-holder"
-                        | "olsc:error-holder"
-                        | "olsc:stopper" => self.olsc_request(tls, handle, cmd_id)?,
-                        // friend and its IServiceCreator interfaces.
-                        "friend:u"
-                        | "friend:v"
-                        | "friend:m"
-                        | "friend:s"
-                        | "friend:a"
-                        | "friend:service"
-                        | "friend:notification"
-                        | "friend:daemon-suspend-session" => {
-                            self.friend_request(tls, handle, cmd_id)?
-                        }
-                        // news and its article store.
-                        "news:a"
-                        | "news:c"
-                        | "news:m"
-                        | "news:p"
-                        | "news:v"
-                        | "news:service"
-                        | "news:arrival-event"
-                        | "news:overwrite-event"
-                        | "news:data"
-                        | "news:database" => self.news_request(tls, handle, cmd_id)?,
-                        // nim:eca, the eShop's web requests.
-                        "nim:eca" | "nim:shop-server" | "nim:shop-accessor" | "nim:shop-async" => {
-                            self.nim_eca_request(tls, handle, cmd_id)?
-                        }
-                        // bcat, background delivery.
-                        "bcat:a" | "bcat:m" | "bcat:u" | "bcat:s" | "bcat:service"
-                        | "bcat:storage" | "bcat:progress" | "bcat:notifier"
-                        | "bcat:suspension" | "bcat:file" | "bcat:directory" => {
-                            self.bcat_request(tls, handle, cmd_id)?
-                        }
-                        // notif, alarms and notifications.
-                        "notif:a" | "notif:s" | "notif:event-accessor" => {
-                            self.notif_request(tls, handle, cmd_id)?
-                        }
-                        // ntc, the network clock's synchronisation.
-                        "ntc" | "ntc:ensure" => self.ntc_request(tls, handle, cmd_id)?,
-                        // usb:ds and usb:hs, with nothing plugged in.
-                        "usb:ds" | "usb:ds-service" | "usb:ds-interface" | "usb:ds-endpoint" => {
-                            self.usb_ds_request(tls, handle, cmd_id)?
-                        }
-                        "usb:hs" => self.usb_hs_request(tls, handle, cmd_id)?,
-                        // erpt, error reports.
-                        "erpt:c" => self.erpt_context_request(tls, handle, cmd_id)?,
-                        "erpt:r" | "erpt:report" | "erpt:manager" | "erpt:attachment" => {
-                            self.erpt_session_request(tls, handle, cmd_id)?
-                        }
-                        name => {
-                            // Known service without a stub: reply with a fabricated sub-session
-                            // (`reply_with_fabricated_object`).
-                            let name = name.to_string();
-                            // Control commands first: a fabricated pointer buffer size would
-                            // make callers use pointer buffers, which this IPC layer doesn't read.
-                            if self.ipc_is_control_request(tls) {
-                                match cmd_id {
-                                    Some(0) => {
-                                        let obj = self.alloc_domain_object();
-                                        self.record_domain_object(handle, obj, &name);
-                                        self.write_ipc_response(
-                                            tls,
-                                            0,
-                                            &[],
-                                            &obj.to_le_bytes(),
-                                            &[],
-                                        )?;
-                                    }
-                                    _ => {
-                                        self.write_ipc_response(
-                                            tls,
-                                            0,
-                                            &[],
-                                            &0u16.to_le_bytes(),
-                                            &[],
-                                        )?;
-                                    }
-                                }
-                                self.write_zr(0, RESULT_OK);
-                                return Ok(());
-                            }
-                            self.warn_no_implementation(&name, cmd_id);
-                            self.reply_with_fabricated_object(tls, handle, &name, cmd_id)?
-                        }
-                    }
-                } else {
-                    // Unrecognized session: try the vi stub, else the generic object-id reply.
-                    if let Some(cmd) = cmd_id {
-                        // vi: GetIApplicationDisplayService (2) and display/session (100+).
-                        if cmd == 2 || cmd >= 100 {
-                            return self.vi_request(tls, handle, cmd_id);
-                        }
-                    }
-                    let start = self.ipc_reply_start(tls);
-                    let is_domain = self
-                        .mem
-                        .read_u32(tls.wrapping_add(u64::from(start + 0x10)))
-                        .unwrap_or(0)
-                        == 0x4943_4653;
-                    // A fresh object id for a caller that expects an out-object.
-                    self.warn_no_implementation("<untracked session>", cmd_id);
-                    let data = {
-                        let obj = self.next_object_id;
-                        self.next_object_id = obj.wrapping_add(1);
-                        obj
-                    };
-                    if is_domain {
-                        for i in 0..4u32 {
-                            let _ = self
-                                .mem
-                                .write_u32(tls.wrapping_add(u64::from(start + i * 4)), 0);
-                        }
-                        let _ = self
-                            .mem
-                            .write_u32(tls.wrapping_add(u64::from(start + 0x10)), 0x4F43_4653);
-                        let _ = self
-                            .mem
-                            .write_u32(tls.wrapping_add(u64::from(start + 0x14)), 0);
-                        let _ = self
-                            .mem
-                            .write_u32(tls.wrapping_add(u64::from(start + 0x18)), 0);
-                        let _ = self
-                            .mem
-                            .write_u32(tls.wrapping_add(u64::from(start + 0x1C)), 0);
-                        let _ = self
-                            .mem
-                            .write_u32(tls.wrapping_add(u64::from(start + 0x20)), data);
-                        let _ = self
-                            .mem
-                            .write_u32(tls.wrapping_add(u64::from(start + 0x24)), 0);
-                        let _ = self
-                            .mem
-                            .write_u32(tls.wrapping_add(u64::from(start + 0x28)), data);
-                    } else {
-                        let _ = self
-                            .mem
-                            .write_u32(tls.wrapping_add(u64::from(start)), 0x4F43_4653);
-                        let _ = self
-                            .mem
-                            .write_u32(tls.wrapping_add(u64::from(start + 0x04)), 0);
-                        let _ = self
-                            .mem
-                            .write_u32(tls.wrapping_add(u64::from(start + 0x08)), 0);
-                        let _ = self
-                            .mem
-                            .write_u32(tls.wrapping_add(u64::from(start + 0x0C)), 0);
-                        let _ = self
-                            .mem
-                            .write_u32(tls.wrapping_add(u64::from(start + 0x10)), data);
-                    }
-                }
-                // A service that could not answer wrote no reply, so the request is still in the
-                // buffer: rewind onto the `svc` and run the call again after the wait.
-                if let Some(until) = std::mem::take(&mut self.pending_retry) {
-                    self.pc = self.pc.wrapping_sub(4);
-                    self.sleep_until(until);
-                    return Ok(());
-                }
-                self.write_zr(0, RESULT_OK);
-                // Yield after X0 is written: `yield_thread` swaps register files.
-                if std::mem::take(&mut self.pending_yield) {
-                    self.yield_thread();
-                }
-                // Same for a service that asked to sleep until a deadline (`vi`'s present).
-                if let Some(until) = std::mem::take(&mut self.pending_sleep) {
-                    self.sleep_until(until);
-                }
-                Ok(())
-            }
+            0x1F => self.svc_connect_to_named_port(),
+            0x20..=0x23 => self.svc_send_sync_request(),
             0x24 => {
                 // GetProcessId(out_process_id, process_handle): Result in X0, id in X1.
                 self.write_zr(0, RESULT_OK);
                 self.svc_out64(1, 1, 2, 1);
                 Ok(())
             }
-            0x25 => {
-                // GetThreadId(out_thread_id, handle): each thread's own id, in X1.
-                let handle = self.read_zr(1);
-                match self.thread_id(handle) {
-                    Some(id) => {
-                        self.write_zr(0, RESULT_OK);
-                        self.svc_out64(1, 1, 2, id);
-                    }
-                    None => self.write_zr(0, RESULT_INVALID_HANDLE),
-                }
-                Ok(())
-            }
-            0x26 => {
-                // Break(reason, arg, size): decode the reason, read the arg when it is an
-                // integer, and print a frame-pointer backtrace.
-                let reason = self.read_zr(0);
-                let arg = self.read_zr(1);
-                let size = self.read_zr(2);
-                let reason_name = match reason & 0xFF {
-                    0 => "Panic",
-                    1 => "Assert",
-                    2 => "User",
-                    3 => "PreLoadDll",
-                    4 => "PostLoadDll",
-                    5 => "PreUnloadDll",
-                    6 => "PostUnloadDll",
-                    7 => "CppException",
-                    _ => "Unknown",
-                };
-                // Only tells a debugger something, such as a module about to load: it returns.
-                const NOTIFICATION_ONLY: u64 = 0x8000_0000;
-                if reason & NOTIFICATION_ONLY != 0 {
-                    self.log(
-                        crate::trace::Level::Debug,
-                        &format!("[svcBreak] notification: {reason_name} arg={arg:#x}"),
-                    );
-                    self.write_zr(0, 0);
-                    return Ok(());
-                }
-                let mut msg = format!(
-                    "[svcBreak] reason={reason_name} ({reason:#x}) arg={arg:#x} size={size:#x}"
-                );
-                if let Some(value) = match size {
-                    1 => self.mem.read_u8(arg).ok().map(u64::from),
-                    2 => self.mem.read_u16(arg).ok().map(u64::from),
-                    4 => self.mem.read_u32(arg).ok().map(u64::from),
-                    8 => self.mem.read_u64(arg).ok(),
-                    _ => None,
-                } {
-                    let _ = write!(msg, " value={value:#x}");
-                }
-                msg.push('\n');
-                for addr in self.backtrace(16) {
-                    let _ = writeln!(msg, "  {addr:#010x}");
-                }
-                self.out.extend_from_slice(msg.as_bytes());
-                let first = msg.lines().next().unwrap_or_default().to_owned();
-                self.exit_process(crate::cpu::Ending::Faulted(first));
-                Ok(())
-            }
-            0x27 => {
-                // OutputDebugString(ptr, size)
-                let ptr = self.read_zr(0);
-                let len = (self.read_zr(1) as i64).clamp(0, 4096) as u64;
-                if ptr != 0 && len > 0 {
-                    for i in 0..len {
-                        match self.mem.read_u8(ptr.wrapping_add(i)) {
-                            Ok(b) => self.out.push(b),
-                            Err(_) => break,
-                        }
-                    }
-                }
-                Ok(())
-            }
-            0x29 => {
-                // GetInfo(out, infoType, handle, infoSubValue): value in X1.
-                let info_type = self.read_zr(1);
-                let value = match info_type {
-                    // Core/priority masks from the NPDM; 0 makes `nnSdk` assert.
-                    0 => self.process().process_core_mask, // CoreMask
-                    1 => 0x0FFF_FFFF_F000_0000,            // PriorityMask: 28..=59
-                    // Alias/heap regions from the layout, below 4 GiB (`u32` guest addresses).
-                    2 => layout.alias_addr, // AliasRegionAddress
-                    3 => layout.alias_size, // AliasRegionSize
-                    4 => layout.heap_addr,  // HeapRegionAddress
-                    5 => layout.heap_size,  // HeapRegionSize
-                    6 => total_memory_size, // TotalMemorySize
-                    7 => 0,                 // UsedMemorySize
-                    8 => 0,                 // DebuggerAttached
-                    9 => 0,                 // ResourceLimit
-                    // RandomEntropy: non-zero SplitMix64 per subvalue; `sdk` aborts on zero.
-                    11 => {
-                        let sub = self.svc_arg64(3, 0, 3).wrapping_add(1);
-                        let mut z = sub.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-                        z ^ (z >> 31)
-                    }
-                    // System resource size. Non-zero enables `nnSdk`'s virtual address memory
-                    // manager; see [`GUEST_ALIAS_REGION_SIZE`] and [`VAMM_ARENA_SIZE`].
-                    16 => system_resource_size, // SystemResourceSizeTotal
-                    17 => 0,                    // SystemResourceSizeUsed
-                    // Total/UsedNonSystemMemorySize, which `nn::init` sizes the heap from.
-                    21 => total_memory_size - system_resource_size,
-                    22 => 0,
-                    12 => u64::from(GUEST_ASLR_REGION_ADDR),
-                    13 => u64::from(GUEST_ASLR_REGION_SIZE),
-                    // Stack mirror region: clear of `STACK_TOP`, room for several stacks.
-                    14 => u64::from(GUEST_STACK_REGION_ADDR),
-                    15 => u64::from(GUEST_STACK_REGION_SIZE),
-                    20 => 0, // UserExceptionContextAddress
-                    28 => 0, // AliasRegionExtraSize
-                    _ => 0,
-                };
-                if crate::trace::enabled(crate::trace::Trace::Svc) {
-                    crate::traceln!("[svc]   -> GetInfo({info_type}) = {value:#x}");
-                }
-                self.svc_out64(1, 1, 2, value);
-                self.write_zr(0, RESULT_OK);
-                Ok(())
-            }
-            0x6F => {
-                // GetSystemInfo(out, handle, infoType): value in X1.
-                let info_type = self.read_zr(2);
-                let value = match info_type {
-                    2 => 0x1000_0000, // TotalMemorySize
-                    3 => 0,           // UsedMemorySize
-                    _ => 0,
-                };
-                self.write_zr(1, value);
-                self.write_zr(0, RESULT_OK);
-                Ok(())
-            }
+            0x25 => self.svc_get_thread_id(),
+            0x26 => self.svc_break(),
+            0x27 => self.svc_output_debug_string(),
+            0x29 => self.svc_get_info(),
+            0x6F => self.svc_get_system_info(),
             _ => Err(Error::Cpu(format!(
                 "unimplemented Horizon syscall #{:#x}",
                 imm
             ))),
         }
+    }
+
+    /// SetHeapSize(size): a heap larger than its region is refused.
+    fn svc_set_heap_size(&mut self) -> Result<()> {
+        const RESULT_OUT_OF_MEMORY: u64 = 1 | (104 << 9);
+        let layout = self.memory_layout();
+        let size = self.read_zr(1);
+        if size > layout.heap_size {
+            self.write_zr(0, RESULT_OUT_OF_MEMORY);
+            return Ok(());
+        }
+        self.process_mut().heap_size = size;
+        self.write_zr(0, RESULT_OK);
+        self.write_zr(1, layout.heap_addr);
+        Ok(())
+    }
+
+    /// MapMemory(dst, src, size): really back dst, since `virtmemFindStack` looks
+    /// for unmapped ranges to place the next thread's stack mirror.
+    fn svc_map_memory(&mut self) -> Result<()> {
+        let dst = self.read_zr(0);
+        let src = self.read_zr(1);
+        let size = self.read_zr(2) as usize;
+        if dst == 0 || size == 0 {
+            self.write_zr(0, RESULT_INVALID_MEMORY_RANGE);
+            return Ok(());
+        }
+        if crate::trace::enabled(crate::trace::Trace::Map) {
+            crate::traceln!("[map] MapMemory dst={dst:#x} src={src:#x} size={size:#x}");
+        }
+        self.mem.copy_range(dst, src, size)?;
+        self.write_zr(0, RESULT_OK);
+        Ok(())
+    }
+
+    /// MapPhysicalMemory(address, size): how 39-bit titles grow their heap. Pages
+    /// materialise on first write via the soft-mapped address space.
+    fn svc_map_physical_memory(&mut self) -> Result<()> {
+        let layout = self.memory_layout();
+        let addr = self.read_zr(0);
+        let size = self.read_zr(1);
+        let fits = addr
+            .checked_add(size)
+            .is_some_and(|end| end <= layout.space_end);
+        if size == 0 || (addr & 0xFFF) != 0 || (size & 0xFFF) != 0 || !fits {
+            self.write_zr(0, RESULT_INVALID_MEMORY_RANGE);
+            return Ok(());
+        }
+        self.write_zr(0, RESULT_OK);
+        Ok(())
+    }
+
+    /// UnmapPhysicalMemory(address, size): pages are really freed for the RAM cap.
+    fn svc_unmap_physical_memory(&mut self) -> Result<()> {
+        let addr = self.read_zr(0);
+        let size = self.read_zr(1);
+        self.mem.unmap(addr, size);
+        self.write_zr(0, RESULT_OK);
+        Ok(())
+    }
+
+    /// MapSharedMemory(handle, addr, size, perm): hid's is the console's block, with a
+    /// connected pad published at once; others are zeroed, pl's with the shared font.
+    fn svc_map_shared_memory(&mut self) -> Result<()> {
+        let addr = self.read_zr(1);
+        let size = self.read_zr(2);
+        // Prefer `hid`'s handle; the size match is a fallback.
+        if Some(self.read_zr(0)) == self.process().hid_shmem_handle
+            || size == u64::from(HID_SHMEM_SIZE)
+        {
+            let block = self.hid_shmem.clone();
+            self.mem.map_shared(addr, &block)?;
+            self.process_mut().hid_shmem_addr = addr;
+            self.hid_mapped = true;
+            self.set_gamepad_state(0, 0, 0, 0, 0);
+            // An empty touch sample: a zeroed LIFO header is a ring with no capacity.
+            self.set_touch_state(&[]);
+        } else if Some(self.read_zr(0)) == self.process().time_shmem_handle {
+            let block = self.time_shmem.clone();
+            self.mem.map_shared(addr, &block)?;
+        } else {
+            self.mem.map_zero(addr, size)?;
+            if size == u64::from(PL_SHMEM_SIZE) {
+                self.process_mut().pl_shmem_addr = addr;
+                self.write_shared_font(addr);
+            }
+        }
+        self.write_zr(0, RESULT_OK);
+        Ok(())
+    }
+
+    /// UnmapMemory(dst, src, size). An out-of-range unmap reports a 39-bit space,
+    /// which hbmenu probes for.
+    fn svc_unmap_memory(&mut self) -> Result<()> {
+        let dst = self.read_zr(0);
+        if (dst >> 48) == 0xFFFF {
+            self.write_zr(0, 0x8000_D401);
+            return Ok(());
+        }
+        let src = self.read_zr(1);
+        let size = self.read_zr(2) as usize;
+        if dst != 0 && src != 0 && size != 0 {
+            self.mem.copy_range(src, dst, size)?;
+            self.mem.unmap(dst, size as u64);
+        }
+        self.write_zr(0, RESULT_OK);
+        Ok(())
+    }
+
+    /// QueryMemory(info, pageInfo, addr): the run of pages in the queried page's
+    /// state. Untouched soft-mapped pages read as unmapped. Only module `.text` is
+    /// executable, since `rtld` finds modules by walking for executable `CodeStatic`,
+    /// and `.rodata` is read-only, where `nn::diag` reads a module's name.
+    fn svc_query_memory(&mut self) -> Result<()> {
+        let layout = self.memory_layout();
+        let out = self.read_zr(0);
+        let addr = self.read_zr(2);
+        // See [`crate::mem::Memory::state_run`].
+        let mut run = self.mem.state_run(addr, layout.space_end);
+        // The granted heap is in use even where no page has been touched yet.
+        let heap = layout.heap_addr..layout.heap_addr.saturating_add(self.process().heap_size);
+        if heap.contains(&addr) {
+            run = StateRun {
+                start: heap.start,
+                end: heap.end,
+                mapped: true,
+                perm: Permission::ReadWrite,
+                state: MemoryState::Normal,
+            };
+        } else if addr < heap.start {
+            run.end = run.end.min(heap.start);
+        } else if !heap.is_empty() {
+            run.start = run.start.max(heap.end);
+        }
+        // Past the end of the space is one inaccessible region up to 2^64, as Horizon
+        // reports it: `rtld` walks regions until the address wraps.
+        if addr >= layout.space_end {
+            run = StateRun {
+                start: layout.space_end,
+                end: 0,
+                mapped: false,
+                perm: Permission::None,
+                state: MemoryState::Inaccessible,
+            };
+        }
+        let (base, size) = (run.start, run.end.wrapping_sub(run.start));
+        let mut info = Vec::with_capacity(40);
+        info.extend_from_slice(&base.to_le_bytes());
+        info.extend_from_slice(&size.to_le_bytes());
+        for v in [
+            run.state as u32, // type
+            0,
+            run.perm as u32,
+            0,
+            0,
+            0,
+        ] {
+            info.extend_from_slice(&v.to_le_bytes());
+        }
+        for (i, &b) in info.iter().enumerate() {
+            self.mem.write_u8(out.wrapping_add(i as u64), b)?;
+        }
+        self.write_zr(0, RESULT_OK);
+        self.write_zr(1, if run.mapped { 0x1000 } else { 0 }); // page info
+        Ok(())
+    }
+
+    /// ExitProcess. Only the main thread returns to the exit stub; any other
+    /// thread here is an emulator bug, so say so loudly.
+    fn svc_exit_process(&mut self) -> Result<()> {
+        let pc = self.get_pc();
+        let at_stub = pc == crate::cpu::SELF_RETURN_TRAMPOLINE
+            || pc.wrapping_sub(4) == crate::cpu::SELF_RETURN_TRAMPOLINE;
+        if at_stub && self.current_thread_index() != 0 {
+            let line = format!(
+                "{} reached the emulator's process-exit stub, which only the main thread \
+                 returns to; the process is ending because of it (x30={:#x}, sp={:#x})",
+                self.thread_label(self.current_thread_handle()),
+                self.read_zr(30),
+                self.sp()
+            );
+            let line = format!("{line}\n{}", self.trail_text());
+            self.log(crate::trace::Level::Error, &line);
+        }
+        self.exit_process(crate::cpu::Ending::Exited);
+        Ok(())
+    }
+
+    /// CreateThread(entry = X1, arg = X2, stack_top = X3, priority = W4, core = W5)
+    /// -> handle in X1. Starts suspended with its own TLS block.
+    fn svc_create_thread(&mut self) -> Result<()> {
+        let entry = self.branch_target(self.read_zr(1))?;
+        let arg = self.read_zr(2);
+        let stack_top = self.read_zr(3);
+        // AArch32 passes the priority in r0 and the core in r4.
+        let (priority, core) = if self.mode == crate::cpu::ExecMode::A32 {
+            (self.read_zr(0), self.read_zr(4))
+        } else {
+            (self.read_zr(4), self.read_zr(5))
+        };
+        let priority = priority as u32;
+        if priority > 63 {
+            self.write_zr(0, RESULT_INVALID_PRIORITY);
+            return Ok(());
+        }
+        let core = match core as u32 as i32 {
+            IDEAL_CORE_USE_PROCESS_VALUE => self.process().main_thread_core,
+            core @ 0..=3 if self.process().process_core_mask >> core & 1 != 0 => core as u8,
+            _ => {
+                self.write_zr(0, RESULT_INVALID_CORE_ID);
+                return Ok(());
+            }
+        };
+        let handle = self.create_thread(entry, arg, stack_top, priority as u8, core);
+        if crate::trace::enabled(crate::trace::Trace::Wait) {
+            crate::traceln!("[thread] create handle={handle:#x} entry={entry:#x} core={core}");
+        }
+        self.write_zr(0, RESULT_OK);
+        self.write_zr(1, handle);
+        Ok(())
+    }
+
+    /// StartThread
+    fn svc_start_thread(&mut self) -> Result<()> {
+        let handle = self.read_zr(0);
+        let started = self.start_thread(handle);
+        if crate::trace::enabled(crate::trace::Trace::Wait) {
+            crate::traceln!("[thread] start handle={handle:#x} -> {started}");
+        }
+        self.write_zr(0, RESULT_OK);
+        Ok(())
+    }
+
+    /// SetThreadActivity(handle, activity): 0 = Runnable, 1 = Paused. The caller
+    /// can't suspend itself, and a no-op change reports busy.
+    fn svc_set_thread_activity(&mut self) -> Result<()> {
+        const RESULT_BUSY: u64 = 1 | (122 << 9);
+        let handle = self.read_zr(0);
+        let paused = self.read_zr(1) != 0;
+        if self.current_thread_handle() == handle {
+            self.write_zr(0, RESULT_BUSY);
+            return Ok(());
+        }
+        let result = match self.set_thread_paused(handle, paused) {
+            Some(true) => RESULT_OK,
+            Some(false) => RESULT_INVALID_STATE,
+            None => RESULT_INVALID_HANDLE,
+        };
+        self.write_zr(0, result);
+        Ok(())
+    }
+
+    /// GetThreadContext3(out = X0, handle = X1): the suspended thread's registers.
+    fn svc_get_thread_context3(&mut self) -> Result<()> {
+        let out = self.read_zr(0);
+        let handle = self.read_zr(1);
+        let ok = self.write_thread_context(out, handle);
+        self.write_zr(0, if ok { RESULT_OK } else { RESULT_INVALID_HANDLE });
+        Ok(())
+    }
+
+    /// SleepThread(nanoseconds = X0). 0, -1 and -2 are yield modes; other values
+    /// really sleep, which matters for `nn::os` poll loops.
+    fn svc_sleep_thread(&mut self) -> Result<()> {
+        let nanoseconds = self.svc_arg64(0, 0, 1) as i64;
+        self.write_zr(0, RESULT_OK);
+        match self.wait_deadline(nanoseconds) {
+            Some(deadline) => self.sleep_until(deadline),
+            None => self.yield_thread(),
+        }
+        Ok(())
+    }
+
+    /// ArbitrateLock(owner = W0, mutex = X1, self = W2)
+    fn svc_arbitrate_lock(&mut self) -> Result<()> {
+        let owner = self.read_zr(0) as u32;
+        let mutex = self.read_zr(1);
+        let requester = self.read_zr(2) as u32;
+        if crate::trace::enabled(crate::trace::Trace::Wait) {
+            crate::traceln!(
+                "[wait] lock mutex={mutex:#x} owner={owner:#x} self={requester:#x} thread={:#x}",
+                self.current_thread_handle()
+            );
+        }
+        self.write_zr(0, RESULT_OK);
+        self.arbitrate_lock(owner, mutex, requester);
+        Ok(())
+    }
+
+    /// ArbitrateUnlock(mutex = X0)
+    fn svc_arbitrate_unlock(&mut self) -> Result<()> {
+        let mutex = self.read_zr(0);
+        self.write_zr(0, RESULT_OK);
+        self.arbitrate_unlock(mutex);
+        Ok(())
+    }
+
+    /// WaitProcessWideKeyAtomic(mutex = X0, key = X1, self = W2, timeout = X3)
+    fn svc_wait_process_wide_key_atomic(&mut self) -> Result<()> {
+        let mutex = self.read_zr(0);
+        let key = self.read_zr(1);
+        let requester = self.read_zr(2) as u32;
+        // A negative timeout waits forever; a positive one is in nanoseconds.
+        let timeout = self.svc_arg64(3, 3, 4) as i64;
+        if crate::trace::enabled(crate::trace::Trace::Wait) {
+            crate::traceln!(
+                "[wait] condvar key={key:#x} mutex={mutex:#x} timeout={timeout} thread={:#x} bt={:x?}",
+                self.current_thread_handle(),
+                self.backtrace(8)
+            );
+        }
+        self.write_zr(0, RESULT_OK);
+        self.wait_process_wide_key(mutex, key, requester, timeout);
+        Ok(())
+    }
+
+    /// WaitForAddress(address = X0, arb_type = W1, value = W2, timeout = X3).
+    /// If the arb_type predicate doesn't hold, report InvalidState instead of blocking.
+    fn svc_wait_for_address(&mut self) -> Result<()> {
+        let addr = self.read_zr(0);
+        let arb_type = self.read_zr(1) as u32;
+        let value = self.read_zr(2) as u32 as i32;
+        let timeout = self.svc_arg64(3, 3, 4) as i64;
+        if crate::trace::enabled(crate::trace::Trace::Wait) {
+            crate::traceln!(
+                "[wait] arbiter addr={addr:#x} type={arb_type} value={value} \
+                 timeout={timeout} thread={:#x}",
+                self.current_thread_handle()
+            );
+        }
+        // Write the result before blocking: blocking switches register files.
+        let outcome = self.arbitrate_address(addr, arb_type, value, timeout);
+        self.write_zr(
+            0,
+            match outcome {
+                ArbiterWait::Blocked => RESULT_OK,
+                ArbiterWait::Mismatch => RESULT_INVALID_STATE,
+                ArbiterWait::TimedOut => RESULT_TIMED_OUT,
+            },
+        );
+        if outcome == ArbiterWait::Blocked {
+            self.block_on_address(addr, timeout);
+        }
+        Ok(())
+    }
+
+    /// SignalToAddress(address = X0, signal_type = W1, value = W2, count = W3).
+    fn svc_signal_to_address(&mut self) -> Result<()> {
+        let addr = self.read_zr(0);
+        let signal_type = self.read_zr(1) as u32;
+        let value = self.read_zr(2) as u32 as i32;
+        let count = self.read_zr(3) as u32 as i32;
+        if crate::trace::enabled(crate::trace::Trace::Wait) {
+            crate::traceln!(
+                "[wait] arbiter signal addr={addr:#x} type={signal_type} value={value} \
+                 count={count} thread={:#x}",
+                self.current_thread_handle()
+            );
+        }
+        let ok = self.signal_to_address(addr, signal_type, value, count);
+        self.write_zr(0, if ok { RESULT_OK } else { RESULT_INVALID_STATE });
+        Ok(())
+    }
+
+    /// SignalProcessWideKey(key = X0, count = W1)
+    fn svc_signal_process_wide_key(&mut self) -> Result<()> {
+        let key = self.read_zr(0);
+        let count = self.read_zr(1) as u32 as i32;
+        if crate::trace::enabled(crate::trace::Trace::Wait) {
+            crate::traceln!(
+                "[wait] signal key={key:#x} count={count} thread={:#x}",
+                self.current_thread_handle()
+            );
+        }
+        self.write_zr(0, RESULT_OK);
+        self.signal_process_wide_key(key, count);
+        Ok(())
+    }
+
+    /// GetThreadPriority(handle = X1) -> priority in W1.
+    fn svc_get_thread_priority(&mut self) -> Result<()> {
+        match self.thread_priority(self.read_zr(1)) {
+            Some(priority) => {
+                self.write_zr(0, RESULT_OK);
+                self.write_zr(1, u64::from(priority));
+            }
+            None => self.write_zr(0, RESULT_INVALID_HANDLE),
+        }
+        Ok(())
+    }
+
+    /// SetThreadPriority(handle = X0, priority = W1)
+    fn svc_set_thread_priority(&mut self) -> Result<()> {
+        let handle = self.read_zr(0);
+        let priority = self.read_zr(1) as u32;
+        let result = if priority > 63 {
+            RESULT_INVALID_PRIORITY
+        } else if self.set_thread_priority(handle, priority as u8) {
+            RESULT_OK
+        } else {
+            RESULT_INVALID_HANDLE
+        };
+        self.write_zr(0, result);
+        Ok(())
+    }
+
+    /// GetThreadCoreMask(handle = W2) -> ideal core W1, affinity X2 (A32 r2:r3).
+    fn svc_get_thread_core_mask(&mut self) -> Result<()> {
+        let handle = self.read_zr(2);
+        match self.thread_core_mask(handle) {
+            Some((ideal_core, affinity)) => {
+                self.write_zr(0, RESULT_OK);
+                self.write_zr(1, u64::from(ideal_core as u32));
+                self.svc_out64(2, 2, 3, affinity);
+            }
+            None => self.write_zr(0, RESULT_INVALID_HANDLE),
+        }
+        Ok(())
+    }
+
+    /// SetThreadCoreMask(handle = W0, ideal core = W1, affinity = X2, r2:r3 on A32),
+    /// checked in the kernel's order.
+    fn svc_set_thread_core_mask(&mut self) -> Result<()> {
+        let handle = self.read_zr(0);
+        let requested = self.read_zr(1) as u32 as i32;
+        let affinity = self.svc_arg64(2, 2, 3);
+        let Some((current_ideal, _)) = self.thread_core_mask(handle) else {
+            self.write_zr(0, RESULT_INVALID_HANDLE);
+            return Ok(());
+        };
+        let checked = match requested {
+            IDEAL_CORE_USE_PROCESS_VALUE => Ok((
+                i32::from(self.process().main_thread_core),
+                1u64 << self.process().main_thread_core,
+            )),
+            _ if affinity & !self.process().process_core_mask != 0 => Err(RESULT_INVALID_CORE_ID),
+            _ if affinity == 0 => Err(RESULT_INVALID_COMBINATION),
+            core @ 0..=3 if affinity & (1 << core) == 0 => Err(RESULT_INVALID_COMBINATION),
+            core @ 0..=3 => Ok((core, affinity)),
+            IDEAL_CORE_DONT_CARE => Ok((IDEAL_CORE_DONT_CARE, affinity)),
+            IDEAL_CORE_NO_UPDATE if current_ideal >= 0 && affinity & (1 << current_ideal) == 0 => {
+                Err(RESULT_INVALID_COMBINATION)
+            }
+            IDEAL_CORE_NO_UPDATE => Ok((current_ideal, affinity)),
+            _ => Err(RESULT_INVALID_CORE_ID),
+        };
+        let result = match checked {
+            Ok((ideal, affinity)) if self.set_thread_core_mask(handle, ideal, affinity) => {
+                RESULT_OK
+            }
+            Ok(_) => RESULT_INVALID_HANDLE,
+            Err(result) => result,
+        };
+        self.write_zr(0, result);
+        Ok(())
+    }
+
+    /// ResetSignal(handle): clear an event and report whether it was signalled.
+    fn svc_reset_signal(&mut self) -> Result<()> {
+        let handle = self.read_zr(0);
+        let was_signalled = self.reset_signal(handle);
+        if crate::trace::enabled(crate::trace::Trace::Wait) {
+            crate::traceln!(
+                "[wait] reset handle={handle:#x} {:?} -> {was_signalled}",
+                self.event_name(handle)
+            );
+        }
+        self.write_zr(
+            0,
+            if was_signalled {
+                RESULT_OK
+            } else {
+                RESULT_INVALID_STATE
+            },
+        );
+        Ok(())
+    }
+
+    /// CancelSynchronization(thread): wakes a `nn::os::MultiWait` waiting on no handle.
+    fn svc_cancel_synchronization(&mut self) -> Result<()> {
+        let cancelled = self.cancel_synchronization(self.read_zr(0));
+        self.write_zr(
+            0,
+            if cancelled {
+                RESULT_OK
+            } else {
+                RESULT_INVALID_HANDLE
+            },
+        );
+        Ok(())
+    }
+
+    /// CreateTransferMemory(addr, size, perm): the creator's pages become a shared
+    /// block, so a process the memory is passed to sees what the creator writes.
+    fn svc_create_transfer_memory(&mut self) -> Result<()> {
+        // Kernel description 106: the range is not the caller's memory.
+        const RESULT_INVALID_CURRENT_MEMORY: u64 = 1 | (106 << 9);
+        let addr = self.read_zr(1);
+        let size = self.read_zr(2);
+        // Untouched heap is the guest's too; the block backs every page of the range,
+        // so it must fit under the memory cap once it replaces what is backed there.
+        let owned = addr.checked_add(size).is_some_and(|end| {
+            self.mem.owns_range(addr, end)
+                && self.mem.mapped_bytes() - self.mem.mapped_bytes_in(addr, end) + size
+                    <= self.mem.max_mapped_bytes()
+        });
+        if !owned {
+            self.write_zr(0, RESULT_INVALID_CURRENT_MEMORY);
+            return Ok(());
+        }
+        let size = size as usize;
+        let handle = self.alloc_handle();
+        self.grant_handle(handle);
+        let page = crate::mem::PAGE_SIZE;
+        if size != 0 && addr.is_multiple_of(page as u64) && size.is_multiple_of(page) {
+            let block = crate::mem::SharedPages::new(size);
+            let mut contents = [0u8; crate::mem::PAGE_SIZE];
+            for offset in (0..size).step_by(page) {
+                self.mem.read_into(addr + offset as u64, &mut contents)?;
+                block.write(offset as u32, &contents)?;
+            }
+            self.mem.map_shared(addr, &block)?;
+            self.transfer_memories.insert(handle, block);
+        }
+        self.write_zr(0, RESULT_OK);
+        self.write_zr(1, handle);
+        Ok(())
+    }
+
+    /// WaitSynchronization(out_index, handles, num_handles, timeout). X1 is the
+    /// index of the signalled handle.
+    fn svc_wait_synchronization(&mut self) -> Result<()> {
+        const RESULT_CANCELLED: u64 = 1 | (118 << 9);
+        let handles_ptr = self.read_zr(1);
+        let count = (self.read_zr(2) as u32).min(0x40);
+        let timeout = self.svc_arg64(3, 0, 3) as i64;
+        let handles: Vec<u64> = (0..count)
+            .map(|i| {
+                u64::from(
+                    self.mem
+                        .read_u32(handles_ptr.wrapping_add(u64::from(i) * 4))
+                        .unwrap_or(0),
+                )
+            })
+            .collect();
+        if crate::trace::enabled(crate::trace::Trace::Wait) {
+            let named: Vec<String> = handles
+                .iter()
+                .map(|&h| match (self.event_name(h), self.event_signaled(h)) {
+                    (Some(name), Some(true)) => format!("{h:#x} {name} signalled"),
+                    (Some(name), _) => format!("{h:#x} {name}"),
+                    _ => format!("{h:#x} (not an event)"),
+                })
+                .collect();
+            crate::traceln!("[wait] pc={:#x} timeout={timeout} {named:?}", self.pc);
+        }
+        // Presents drive vsync.
+        let refreshed =
+            self.cycles.wrapping_sub(self.last_vsync_cycles) >= crate::cpu::VSYNC_PERIOD_CYCLES;
+        if self.nv.gpu.frames != self.last_vsync_frame || refreshed {
+            self.last_vsync_frame = self.nv.gpu.frames;
+            self.last_vsync_cycles = self.cycles;
+            for vsync in self.vsync_events.clone() {
+                self.signal_event(vsync);
+            }
+        }
+        // `hid` ticks for the same reason.
+        self.hid_tick();
+        // Audio buffer events fire here; see `Cpu::audio_tick`.
+        let next_buffer = self.audio_tick(&handles);
+        // First ready handle; unmodelled handles count as ready.
+        let ready = handles
+            .iter()
+            .position(|&h| self.waitable_signaled(h) != Some(false));
+        if let Some(index) = ready {
+            self.consume_event(handles[index]);
+            self.write_zr(0, RESULT_OK);
+            self.write_zr(1, index as u64);
+            self.yield_thread();
+            return Ok(());
+        }
+        if self.take_sync_cancelled() {
+            self.write_zr(0, RESULT_CANCELLED);
+            return Ok(());
+        }
+        // Nothing fired. A poll times out; a blocking wait parks.
+        if timeout == 0 {
+            self.write_zr(0, RESULT_TIMED_OUT);
+            return Ok(());
+        }
+        // A blocking wait on vsync is certain to fire, so park until the tick.
+        if timeout != 0
+            && self.vsync_throttle
+            && self.vsync_events.iter().any(|v| handles.contains(v))
+        {
+            self.pc = self.pc.wrapping_sub(4);
+            self.park_on_events(self.next_display_tick());
+            return Ok(());
+        }
+        // Same for an audio buffer event: park until the buffer finishes.
+        if let Some(done_at) = next_buffer {
+            // Park until the buffer's own deadline, then reissue the `svc`.
+            self.pc = self.pc.wrapping_sub(4);
+            self.sleep_until(done_at);
+            return Ok(());
+        }
+        // Rewind onto the `svc` and park until a signal or display tick wakes us.
+        // Reporting a handle as signalled would run that object's handler.
+        self.pc = self.pc.wrapping_sub(4);
+        self.park_on_events(self.next_display_tick());
+        Ok(())
+    }
+
+    /// ConnectToNamedPort
+    fn svc_connect_to_named_port(&mut self) -> Result<()> {
+        let name_ptr = self.read_zr(1);
+        let name = if name_ptr != 0 {
+            self.read_port_name(name_ptr)
+        } else {
+            String::new()
+        };
+        let handle = self.alloc_handle();
+        self.record_handle(handle, &name);
+        self.grant_handle(handle);
+        self.write_zr(0, RESULT_OK);
+        self.write_zr(1, handle);
+        Ok(())
+    }
+
+    /// GetThreadId(out_thread_id, handle): each thread's own id, in X1.
+    fn svc_get_thread_id(&mut self) -> Result<()> {
+        let handle = self.read_zr(1);
+        match self.thread_id(handle) {
+            Some(id) => {
+                self.write_zr(0, RESULT_OK);
+                self.svc_out64(1, 1, 2, id);
+            }
+            None => self.write_zr(0, RESULT_INVALID_HANDLE),
+        }
+        Ok(())
+    }
+
+    /// Break(reason, arg, size): decode the reason, read the arg when it is an
+    /// integer, and print a frame-pointer backtrace.
+    fn svc_break(&mut self) -> Result<()> {
+        let reason = self.read_zr(0);
+        let arg = self.read_zr(1);
+        let size = self.read_zr(2);
+        let reason_name = match reason & 0xFF {
+            0 => "Panic",
+            1 => "Assert",
+            2 => "User",
+            3 => "PreLoadDll",
+            4 => "PostLoadDll",
+            5 => "PreUnloadDll",
+            6 => "PostUnloadDll",
+            7 => "CppException",
+            _ => "Unknown",
+        };
+        // Only tells a debugger something, such as a module about to load: it returns.
+        const NOTIFICATION_ONLY: u64 = 0x8000_0000;
+        if reason & NOTIFICATION_ONLY != 0 {
+            self.log(
+                crate::trace::Level::Debug,
+                &format!("[svcBreak] notification: {reason_name} arg={arg:#x}"),
+            );
+            self.write_zr(0, 0);
+            return Ok(());
+        }
+        let mut msg =
+            format!("[svcBreak] reason={reason_name} ({reason:#x}) arg={arg:#x} size={size:#x}");
+        if let Some(value) = match size {
+            1 => self.mem.read_u8(arg).ok().map(u64::from),
+            2 => self.mem.read_u16(arg).ok().map(u64::from),
+            4 => self.mem.read_u32(arg).ok().map(u64::from),
+            8 => self.mem.read_u64(arg).ok(),
+            _ => None,
+        } {
+            let _ = write!(msg, " value={value:#x}");
+        }
+        msg.push('\n');
+        for addr in self.backtrace(16) {
+            let _ = writeln!(msg, "  {addr:#010x}");
+        }
+        self.out.extend_from_slice(msg.as_bytes());
+        let first = msg.lines().next().unwrap_or_default().to_owned();
+        self.exit_process(crate::cpu::Ending::Faulted(first));
+        Ok(())
+    }
+
+    /// OutputDebugString(ptr, size)
+    fn svc_output_debug_string(&mut self) -> Result<()> {
+        let ptr = self.read_zr(0);
+        let len = (self.read_zr(1) as i64).clamp(0, 4096) as u64;
+        if ptr != 0 && len > 0 {
+            for i in 0..len {
+                match self.mem.read_u8(ptr.wrapping_add(i)) {
+                    Ok(b) => self.out.push(b),
+                    Err(_) => break,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// GetInfo(out, infoType, handle, infoSubValue): value in X1.
+    fn svc_get_info(&mut self) -> Result<()> {
+        // Memory pool and system resource figures come from the process layout (`MemoryLayout`).
+        let layout = self.memory_layout();
+        let total_memory_size = layout.total_memory;
+        let system_resource_size = layout.system_resource;
+        let info_type = self.read_zr(1);
+        let value = match info_type {
+            // Core/priority masks from the NPDM; 0 makes `nnSdk` assert.
+            0 => self.process().process_core_mask, // CoreMask
+            1 => 0x0FFF_FFFF_F000_0000,            // PriorityMask: 28..=59
+            // Alias/heap regions from the layout, below 4 GiB (`u32` guest addresses).
+            2 => layout.alias_addr, // AliasRegionAddress
+            3 => layout.alias_size, // AliasRegionSize
+            4 => layout.heap_addr,  // HeapRegionAddress
+            5 => layout.heap_size,  // HeapRegionSize
+            6 => total_memory_size, // TotalMemorySize
+            7 => 0,                 // UsedMemorySize
+            8 => 0,                 // DebuggerAttached
+            9 => 0,                 // ResourceLimit
+            // RandomEntropy: non-zero SplitMix64 per subvalue; `sdk` aborts on zero.
+            11 => {
+                let sub = self.svc_arg64(3, 0, 3).wrapping_add(1);
+                let mut z = sub.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^ (z >> 31)
+            }
+            // System resource size. Non-zero enables `nnSdk`'s virtual address memory
+            // manager; see [`GUEST_ALIAS_REGION_SIZE`] and [`VAMM_ARENA_SIZE`].
+            16 => system_resource_size, // SystemResourceSizeTotal
+            17 => 0,                    // SystemResourceSizeUsed
+            // Total/UsedNonSystemMemorySize, which `nn::init` sizes the heap from.
+            21 => total_memory_size - system_resource_size,
+            22 => 0,
+            12 => u64::from(GUEST_ASLR_REGION_ADDR),
+            13 => u64::from(GUEST_ASLR_REGION_SIZE),
+            // Stack mirror region: clear of `STACK_TOP`, room for several stacks.
+            14 => u64::from(GUEST_STACK_REGION_ADDR),
+            15 => u64::from(GUEST_STACK_REGION_SIZE),
+            20 => 0, // UserExceptionContextAddress
+            28 => 0, // AliasRegionExtraSize
+            _ => 0,
+        };
+        if crate::trace::enabled(crate::trace::Trace::Svc) {
+            crate::traceln!("[svc]   -> GetInfo({info_type}) = {value:#x}");
+        }
+        self.svc_out64(1, 1, 2, value);
+        self.write_zr(0, RESULT_OK);
+        Ok(())
+    }
+
+    /// GetSystemInfo(out, handle, infoType): value in X1.
+    fn svc_get_system_info(&mut self) -> Result<()> {
+        let info_type = self.read_zr(2);
+        let value = match info_type {
+            2 => 0x1000_0000, // TotalMemorySize
+            3 => 0,           // UsedMemorySize
+            _ => 0,
+        };
+        self.write_zr(1, value);
+        self.write_zr(0, RESULT_OK);
+        Ok(())
     }
 }
 
