@@ -105,8 +105,9 @@ Section headings are paths under `crates/core/src/services/`; a heading that sta
 
 - Every shared-font type is answered: the Home Menu looks glyphs up across the whole set. With no firmware fonts, the host font stands in for each type, wrapped with `encode_bfttf` (`fonts.rs`) so it takes the same path; padding it to whole words is safe since trailing zeros are past every table.
 - Shared `.bfttf` fonts are xored with a key derived from the known plaintext magic; the header's size field stays byte-reversed as on a console.
-- `GetSharedFontInOrderOfPriority` command 6 (system variant) is answered like 5; without it callers saw "loaded, zero fonts" and retried forever. Language priority order is not modelled.
-- The smallest of the three output buffers bounds the entry count, and the reply count must match what was written.
+- `GetSharedFontInOrderOfPriority` (5) and its system variant (6) each report six of the seven fonts, as 21.2.0's glue does: 5 leaves out `nintendo_ext2` (type 6), 6 leaves out `nintendo_ext` (5). Without 6, callers saw "loaded, zero fonts" and retried forever. Reporting all seven gave the 21.2.0 `offlineWeb` and `web` applets an eighth font next to their own, and their font texture cache, sized per font, overflowed its fixed `0x4c0000` `Font` heap (`Heap::allocate` failing for `0x2c000`). The order is glue's per language (`zh-CN`/`zh-Hans`, `zh-TW`/`zh-Hant`, `ko`, anything else).
+- `shared_font_regions` is indexed by font type: a firmware font that is missing or does not fit keeps an empty region, which the priority commands skip.
+- The smallest of the three output buffers bounds the entry count, and the reply count matches what was written (glue always replies 6, which is the same once the caller leaves room for six).
 
 ## `am/mod.rs`
 

@@ -101,13 +101,25 @@ impl Cpu {
             archives.insert(id, image);
         }
 
-        for (id, name) in SHARED_FONTS {
-            let font = archives
-                .get(&id)
-                .and_then(|image| crate::romfs::RomFs::parse(image).ok()?.read_path(name))
-                .and_then(decode_bfttf);
-            let Some(font) = font else { continue };
-            self.push_shared_font(&font);
+        let fonts: Vec<Option<Vec<u8>>> = SHARED_FONTS
+            .iter()
+            .map(|&(id, name)| {
+                archives
+                    .get(&id)
+                    .and_then(|image| crate::romfs::RomFs::parse(image).ok()?.read_path(name))
+                    .and_then(decode_bfttf)
+            })
+            .collect();
+        if fonts.iter().any(Option::is_some) {
+            for font in &fonts {
+                match font {
+                    Some(font) => self.push_shared_font(font),
+                    // An empty region keeps every later font at its type's index.
+                    None => self
+                        .shared_font_regions
+                        .push(FontRegion { offset: 0, size: 0 }),
+                }
+            }
         }
 
         if self.shared_font_regions.is_empty() && !self.shared_font.is_empty() {
@@ -134,10 +146,12 @@ impl Cpu {
         }
     }
 
-    /// Append a decoded font; one that does not fit is dropped, not truncated.
-    fn push_shared_font(&mut self, font: &[u8]) {
+    /// Append a decoded font; one that does not fit gets an empty region, not a truncated one.
+    pub(crate) fn push_shared_font(&mut self, font: &[u8]) {
         let offset = self.pl_shmem_image.len();
         if offset + font.len() > PL_SHMEM_SIZE as usize {
+            self.shared_font_regions
+                .push(FontRegion { offset: 0, size: 0 });
             return;
         }
         self.pl_shmem_image.extend_from_slice(font);
