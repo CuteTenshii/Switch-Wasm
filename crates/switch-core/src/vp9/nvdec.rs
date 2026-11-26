@@ -235,6 +235,86 @@ pub fn parse_prob_table(p: &[u8]) -> FrameContext {
     fc
 }
 
+/// Fills `seg`'s tree and prediction probabilities from the probability table.
+pub fn read_segmentation_probs(seg: &mut Segmentation, probs: &[u8]) {
+    seg.tree_probs
+        .copy_from_slice(&probs[table::SEG_TREE..table::SEG_PRED]);
+    seg.pred_probs
+        .copy_from_slice(&probs[table::SEG_PRED..table::SEG_PRED + 3]);
+}
+
+/// The table nvdec reads for a frame with the default probabilities, for tests that drive it.
+#[cfg(test)]
+pub(crate) fn default_prob_table() -> Vec<u8> {
+    write_prob_table(&FrameContext::defaults(), &Segmentation::default())
+}
+
+/// The inverse of [`parse_prob_table`].
+#[cfg(test)]
+fn write_prob_table(fc: &FrameContext, seg: &Segmentation) -> Vec<u8> {
+    let mut p = vec![0u8; 3744];
+    for i in 0..7 {
+        p[table::INTER_MODE + i * 4..][..3].copy_from_slice(&fc.inter_mode[i]);
+    }
+    p[table::INTRA_INTER..][..4].copy_from_slice(&fc.intra_inter);
+    for i in 0..10 {
+        p[table::UV_MODE_FIRST8 + i * 8..][..8].copy_from_slice(&fc.uv_mode[i][..8]);
+        p[table::UV_MODE_NINTH + i] = fc.uv_mode[i][8];
+    }
+    p[table::TX] = fc.tx8[0][0];
+    p[table::TX + 1] = fc.tx8[1][0];
+    p[table::TX + 2..][..2].copy_from_slice(&fc.tx16[0]);
+    p[table::TX + 4..][..2].copy_from_slice(&fc.tx16[1]);
+    p[table::TX + 6..][..3].copy_from_slice(&fc.tx32[0]);
+    p[table::TX + 9..][..3].copy_from_slice(&fc.tx32[1]);
+    for i in 0..4 {
+        p[table::Y_MODE_FIRST8 + i * 8..][..8].copy_from_slice(&fc.y_mode[i][..8]);
+        p[table::Y_MODE_NINTH + i] = fc.y_mode[i][8];
+    }
+    for i in 0..16 {
+        p[table::PARTITION + i * 4..][..3].copy_from_slice(&fc.partition[i]);
+    }
+    for i in 0..4 {
+        p[table::SWITCHABLE_INTERP + i * 2..][..2].copy_from_slice(&fc.switchable_interp[i]);
+    }
+    p[table::COMP_INTER..][..5].copy_from_slice(&fc.comp_inter);
+    p[table::SKIP..][..3].copy_from_slice(&fc.skip);
+    p[table::MV_JOINTS..][..3].copy_from_slice(&fc.mv.joints);
+    for c in 0..2 {
+        let comp = &fc.mv.comps[c];
+        p[table::MV_SIGN + c] = comp.sign;
+        p[table::MV_CLASS0 + c] = comp.class0[0];
+        p[table::MV_FP + c * 3..][..3].copy_from_slice(&comp.fp);
+        p[table::MV_CLASS0_HP + c] = comp.class0_hp;
+        p[table::MV_HP + c] = comp.hp;
+        p[table::MV_CLASSES + c * 10..][..10].copy_from_slice(&comp.classes);
+        for j in 0..2 {
+            p[table::MV_CLASS0_FP + c * 6 + j * 3..][..3].copy_from_slice(&comp.class0_fp[j]);
+        }
+        p[table::MV_BITS + c * 10..][..10].copy_from_slice(&comp.bits);
+    }
+    for i in 0..5 {
+        p[table::SINGLE_REF + i * 2..][..2].copy_from_slice(&fc.single_ref[i]);
+    }
+    p[table::COMP_REF..][..5].copy_from_slice(&fc.comp_ref);
+    for tx in 0..4 {
+        for plane in 0..2 {
+            for r in 0..2 {
+                for band in 0..6 {
+                    for ctx in 0..6 {
+                        let at =
+                            table::COEF + (((tx * 2 + plane) * 2 + r) * 6 + band) * 24 + ctx * 4;
+                        p[at..at + 3].copy_from_slice(&fc.coef[tx][plane][r][band][ctx]);
+                    }
+                }
+            }
+        }
+    }
+    p[table::SEG_TREE..table::SEG_PRED].copy_from_slice(&seg.tree_probs);
+    p[table::SEG_PRED..table::SEG_PRED + 3].copy_from_slice(&seg.pred_probs);
+    p
+}
+
 /// The decoder state that lives as long as an nvdec channel: the previous frame and the
 /// segmentation maps the driver keeps in its own buffers.
 #[derive(Debug, Default)]
@@ -245,6 +325,12 @@ pub struct Channel {
 }
 
 impl Channel {
+    /// Forgets the previous frame and the segmentation maps, for a stream this channel did not
+    /// decode up to now.
+    pub fn reset(&mut self) {
+        *self = Channel::default();
+    }
+
     /// Decodes one frame from what an nvdec `EXECUTE` names: the picture setup, the tile data, the
     /// probability table and the three reference frames (`None` where the driver has none).
     pub fn decode(
@@ -277,10 +363,7 @@ impl Channel {
             fc: parse_prob_table(probs),
             seg: {
                 let mut seg = setup.seg.clone();
-                seg.tree_probs
-                    .copy_from_slice(&probs[table::SEG_TREE..table::SEG_PRED]);
-                seg.pred_probs
-                    .copy_from_slice(&probs[table::SEG_PRED..table::SEG_PRED + 3]);
+                read_segmentation_probs(&mut seg, probs);
                 seg
             },
             lf: setup.lf.clone(),
@@ -358,6 +441,25 @@ mod tests {
         assert!(setup.use_prev_frame_mvs());
         setup.flags = 0;
         assert!(!setup.use_prev_frame_mvs(), "the previous frame was hidden");
+    }
+
+    #[test]
+    fn a_written_probability_table_reads_back() {
+        let mut fc = FrameContext::defaults();
+        fc.uv_mode[3][8] = 17;
+        fc.mv.comps[1].class0_fp[1][2] = 77;
+        fc.coef[3][1][1][5][5][2] = 9;
+        let mut seg = Segmentation::default();
+        seg.tree_probs[6] = 40;
+        seg.pred_probs[2] = 41;
+        let p = write_prob_table(&fc, &seg);
+        assert_eq!(parse_prob_table(&p), fc);
+        let mut read = Segmentation::default();
+        read_segmentation_probs(&mut read, &p);
+        assert_eq!(
+            (read.tree_probs, read.pred_probs),
+            (seg.tree_probs, seg.pred_probs)
+        );
     }
 
     #[test]

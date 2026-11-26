@@ -43,7 +43,7 @@ fn ac_quant(qindex: i32, delta: i32) -> i32 {
 }
 
 /// The size of each frame in a packet, from its superframe index when it has one.
-fn split_superframe(data: &[u8]) -> Vec<&[u8]> {
+pub fn split_superframe(data: &[u8]) -> Vec<&[u8]> {
     if let Some(&marker) = data.last() {
         if marker & 0xe0 == 0xc0 {
             let frames = usize::from(marker & 7) + 1;
@@ -103,11 +103,22 @@ impl Decoder {
     }
 
     pub fn decode_frame(&mut self, data: &[u8]) -> Result<Option<Arc<Frame>>, Error> {
+        let decoded = self.decode_frame_inspecting(data, &mut |_, _| {})?;
+        Ok(decoded.shown.then_some(decoded.frame))
+    }
+
+    /// Decodes one frame, shown or not, handing `inspect` what its tiles are decoded with and
+    /// the tile data first. A frame that shows an existing one is not inspected.
+    pub fn decode_frame_inspecting(
+        &mut self,
+        data: &[u8],
+        inspect: &mut dyn FnMut(&FrameInput, &[u8]),
+    ) -> Result<Decoded, Error> {
         let mut hdr = self.read_uncompressed_header(data)?;
         if hdr.show_existing_frame {
             return self.ref_frame_map[hdr.frame_to_show]
                 .clone()
-                .map(Some)
+                .map(|frame| Decoded { frame, shown: true })
                 .ok_or(Error::Corrupt("showing an empty frame slot"));
         }
         let compressed_start = hdr.uncompressed_header_size;
@@ -160,6 +171,7 @@ impl Decoder {
             cur_seg_map: std::mem::take(&mut self.current_seg_map),
             count: !hdr.error_resilient && !hdr.frame_parallel,
         };
+        inspect(&input, &data[compressed_end..]);
         let mut output = decode_pixels(input, &data[compressed_end..]);
         self.last_seg_map = std::mem::take(&mut output.last_seg_map);
         self.current_seg_map = std::mem::take(&mut output.cur_seg_map);
@@ -198,8 +210,17 @@ impl Decoder {
         }
         self.last_width = hdr.width;
         self.last_height = hdr.height;
-        Ok(hdr.show_frame.then_some(frame))
+        Ok(Decoded {
+            frame,
+            shown: hdr.show_frame,
+        })
     }
+}
+
+/// A decoded frame and whether the stream shows it.
+pub struct Decoded {
+    pub frame: Arc<Frame>,
+    pub shown: bool,
 }
 
 /// What decoding a frame's tiles needs, apart from the tile data.

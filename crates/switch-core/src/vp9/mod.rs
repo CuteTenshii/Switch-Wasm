@@ -10,6 +10,7 @@
 
 mod block;
 mod bool_decoder;
+mod bool_encoder;
 pub mod decoder;
 mod frame;
 mod header;
@@ -20,6 +21,7 @@ mod loopfilter;
 mod modeinfo;
 pub mod nvdec;
 mod probs;
+pub mod rebuild;
 mod tables;
 mod tokens;
 mod transforms_1d;

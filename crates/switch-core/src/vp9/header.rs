@@ -603,16 +603,21 @@ fn decode_term_subexp(r: &mut BoolDecoder) -> i32 {
     uniform + 64
 }
 
+/// `inv_remap_prob`: the probability a coded `delta` turns `prob` into.
+pub fn inv_remap_prob(delta: usize, prob: u8) -> u8 {
+    let v = i32::from(INV_MAP_TABLE[delta.min(254)]);
+    let m = i32::from(prob) - 1;
+    (if (m << 1) <= 255 {
+        1 + inv_recenter_nonneg(v, m)
+    } else {
+        255 - inv_recenter_nonneg(v, 254 - m)
+    }) as u8
+}
+
 /// `vp9_diff_update_prob`.
 pub fn diff_update(r: &mut BoolDecoder, prob: &mut u8) {
     if r.read(252) {
         let delta = decode_term_subexp(r) as usize;
-        let v = i32::from(INV_MAP_TABLE[delta.min(254)]);
-        let m = i32::from(*prob) - 1;
-        *prob = if (m << 1) <= 255 {
-            1 + inv_recenter_nonneg(v, m)
-        } else {
-            255 - inv_recenter_nonneg(v, 254 - m)
-        } as u8;
+        *prob = inv_remap_prob(delta, *prob);
     }
 }
