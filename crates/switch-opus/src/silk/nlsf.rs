@@ -1,6 +1,6 @@
 //! NLSF dequantisation and conversion to a stable LPC filter.
 
-use crate::opus::tables_silk::*;
+use crate::tables_silk::*;
 use super::{
     clz32, inverse32_varq, rshift_round, rshift_round64, sat16, smlawb, smmul, smulbb, smulww,
     sub_sat32, NlsfCodebook, MAX_LPC_ORDER, NLSF_QUANT_MAX_AMPLITUDE,

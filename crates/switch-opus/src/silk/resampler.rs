@@ -1,6 +1,6 @@
 //! The resampler to the output rate.
 
-use crate::opus::tables_silk::*;
+use crate::tables_silk::*;
 use super::{rshift_round, sat16, smlabb, smlawb, smulbb, smulwb, smulww};
 
 /// Which of the four resampling paths a rate pair needs.

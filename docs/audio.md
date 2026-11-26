@@ -1,6 +1,6 @@
 # Audio
 
-`services/audout.rs`, `services/audren.rs`, `services/hwopus.rs`, `services/audio.rs` (the mixing) and `src/opus/`.
+`services/audout.rs`, `services/audren.rs`, `services/hwopus.rs`, `services/audio.rs` (the mixing) and `crates/switch-opus/`.
 
 Section headings are paths under `crates/switch-core/src/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
 

@@ -1,7 +1,7 @@
 //! The shell-coded excitation pulses.
 
-use crate::opus::range::RangeDecoder;
-use crate::opus::tables_silk::*;
+use crate::range::RangeDecoder;
+use crate::tables_silk::*;
 use super::{
     LOG2_SHELL_CODEC_FRAME_LENGTH, MAX_NB_SHELL_BLOCKS, N_RATE_LEVELS, SHELL_CODEC_FRAME_LENGTH,
     SILK_MAX_PULSES,

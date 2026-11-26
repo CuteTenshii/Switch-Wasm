@@ -244,13 +244,13 @@ pub fn read_segmentation_probs(seg: &mut Segmentation, probs: &[u8]) {
 }
 
 /// The table nvdec reads for a frame with the default probabilities, for tests that drive it.
-#[cfg(test)]
-pub(crate) fn default_prob_table() -> Vec<u8> {
+#[cfg(any(test, feature = "testing"))]
+pub fn default_prob_table() -> Vec<u8> {
     write_prob_table(&FrameContext::defaults(), &Segmentation::default())
 }
 
 /// The inverse of [`parse_prob_table`].
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 fn write_prob_table(fc: &FrameContext, seg: &Segmentation) -> Vec<u8> {
     let mut p = vec![0u8; 3744];
     for i in 0..7 {

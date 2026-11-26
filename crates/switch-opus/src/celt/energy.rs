@@ -1,7 +1,7 @@
 //! Coarse, fine and leftover band energy.
 
-use crate::opus::range::RangeDecoder;
-use crate::opus::tables_celt::*;
+use crate::range::RangeDecoder;
+use crate::tables_celt::*;
 use super::{MAX_FINE_BITS, NB_EBANDS};
 
 /// A Laplace-distributed coarse energy delta.

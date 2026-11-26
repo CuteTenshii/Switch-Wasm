@@ -1,6 +1,6 @@
 // Check that the browser's WebCodecs decoder takes the VP9 streams `vp9/rebuild.rs` writes:
 // decode every `x.rebuilt.ivf` in a directory and compare each frame with `x.rebuilt.yuv`.
-//   cargo run --release -p switch-core --example vp9_rebuild_check -- <dir> --out <dir>
+//   cargo run --release -p switch-vp9 --example vp9_rebuild_check -- <dir> --out <dir>
 //   node tools/vp9_webcodecs_check.mjs <dir> [--headless]
 import { readdirSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';

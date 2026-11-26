@@ -12,7 +12,7 @@
 use clap::Parser;
 use std::fs;
 use std::path::Path;
-use switch_core::opus::{Decoder, MultiStreamDecoder};
+use switch_opus::{Decoder, MultiStreamDecoder};
 
 fn read_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])

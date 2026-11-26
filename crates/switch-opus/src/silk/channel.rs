@@ -1,7 +1,7 @@
 //! A channel's state, side information and frame decode.
 
-use crate::opus::range::RangeDecoder;
-use crate::opus::tables_silk::*;
+use crate::range::RangeDecoder;
+use crate::tables_silk::*;
 use super::nlsf::{bwexpander, nlsf2a, nlsf_decode, nlsf_unpack};
 use super::pulses::decode_pulses;
 use super::resampler::Resampler;

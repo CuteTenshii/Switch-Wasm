@@ -7,10 +7,10 @@ use crate::gpu::nvmap::NvMap;
 use crate::gpu::syncpt::Host1x;
 use crate::mem::Memory;
 use crate::trace::{enabled, Level, Trace};
-use crate::vp9;
 use crate::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use switch_vp9 as vp9;
 
 /// host1x's own class, for syncpoint waits and loads.
 const CLASS_HOST1X: u32 = 0x01;

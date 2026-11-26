@@ -1,0 +1,14 @@
+[package]
+name = "switch-opus"
+version = "0.1.0"
+edition = "2021"
+description = "An Opus decoder (RFC 6716) ported from the reference decoder"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+clap = { version = "4.6.7", features = ["derive"] }

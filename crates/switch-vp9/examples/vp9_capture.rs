@@ -1,8 +1,8 @@
 //! Decode the first captured frame of an nvdec stream and write it as a PPM:
 //! `vp9_capture <dir> <out.ppm>`, `<dir>` holding `c10_001_{setup,bits,probs}.bin`.
 use clap::Parser;
-use switch_core::vp9::decoder::{decode_pixels, FrameInput};
-use switch_core::vp9::nvdec::{parse_prob_table, PicSetup};
+use switch_vp9::decoder::{decode_pixels, FrameInput};
+use switch_vp9::nvdec::{parse_prob_table, PicSetup};
 
 #[derive(Parser)]
 struct Cli {

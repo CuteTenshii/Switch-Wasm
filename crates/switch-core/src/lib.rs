@@ -80,7 +80,6 @@ pub mod npdm;
 pub mod nro;
 pub mod nso;
 pub mod nsp;
-pub mod opus;
 pub mod romfs;
 pub mod services;
 pub mod source;
@@ -89,7 +88,6 @@ pub mod ticket;
 pub mod trace;
 pub mod uuid;
 pub mod vfs;
-pub mod vp9;
 pub mod xci;
 
 pub use error::{Error, Result};

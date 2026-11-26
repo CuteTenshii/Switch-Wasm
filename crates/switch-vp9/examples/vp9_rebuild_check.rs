@@ -8,10 +8,10 @@
 use clap::Parser;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use switch_core::vp9::decoder::split_superframe;
-use switch_core::vp9::nvdec::{Dimensions, PicSetup};
-use switch_core::vp9::rebuild::Rebuilder;
-use switch_core::vp9::{Decoder, Frame};
+use switch_vp9::decoder::split_superframe;
+use switch_vp9::nvdec::{Dimensions, PicSetup};
+use switch_vp9::rebuild::Rebuilder;
+use switch_vp9::{Decoder, Frame};
 
 #[derive(Parser)]
 struct Cli {

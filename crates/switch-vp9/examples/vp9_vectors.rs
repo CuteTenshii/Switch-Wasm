@@ -3,8 +3,8 @@
 //! `idct`: random blocks through `vp9_iht*_add_c`, `vpx_idct32x32_1024_add_c` and `vpx_iwht4x4_16_add_c`.
 //! `intra`: `vpx_*_predictor_*_c`.
 use clap::{Parser, ValueEnum};
-use switch_core::vp9::idct::{inverse_transform_add, inverse_wht_add};
-use switch_core::vp9::intra::{edges_from, predict_from};
+use switch_vp9::idct::{inverse_transform_add, inverse_wht_add};
+use switch_vp9::intra::{edges_from, predict_from};
 
 #[derive(Clone, ValueEnum)]
 enum Kind {

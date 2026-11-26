@@ -1,7 +1,7 @@
 //! The implicit bit allocation.
 
-use crate::opus::range::{RangeDecoder, BITRES};
-use crate::opus::tables_celt::*;
+use crate::range::{RangeDecoder, BITRES};
+use crate::tables_celt::*;
 use super::{ALLOC_STEPS, FINE_OFFSET, LOG_MAX_PSEUDO, MAX_FINE_BITS, NB_ALLOC_VECTORS, NB_EBANDS};
 
 /// Pulses a pseudo-pulse count stands for; above 8 it is logarithmic.

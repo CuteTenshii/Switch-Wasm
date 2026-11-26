@@ -1,6 +1,6 @@
 //! Excitation, long-term prediction and LPC synthesis.
 
-use crate::opus::tables_silk::*;
+use crate::tables_silk::*;
 use super::{
     add_sat32, div32_varq, inverse32_varq, lshift_sat32, rshift_round, sat16, silk_rand, smlabb,
     smlawb, smulwb, smulww, ChannelState, FrameControl, LTP_ORDER, MAX_LPC_ORDER, MAX_NB_SUBFR,

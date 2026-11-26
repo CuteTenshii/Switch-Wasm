@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use switch_core::gpu::multimedia::HostDecoder;
 use switch_core::trace::{emit_at, Level};
-use switch_core::vp9::Frame;
+use switch_vp9::Frame;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{

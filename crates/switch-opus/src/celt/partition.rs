@@ -1,7 +1,7 @@
 //! One band of one channel, split into partitions.
 
-use crate::opus::range::{ilog, RangeDecoder, BITRES};
-use crate::opus::tables_celt::*;
+use crate::range::{ilog, RangeDecoder, BITRES};
+use crate::tables_celt::*;
 use super::allocation::{bits2pulses, cache_row, get_pulses, pulses2bits};
 use super::vq::{alg_unquant, renormalise_vector};
 use super::{QTHETA_OFFSET, QTHETA_OFFSET_TWOPHASE};

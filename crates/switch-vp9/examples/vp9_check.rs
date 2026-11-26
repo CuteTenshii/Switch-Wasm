@@ -1,7 +1,7 @@
 //! Decode every `x.ivf` in a directory and compare each shown frame with the `x.yuv` ffmpeg wrote
 //! beside it (`ffmpeg -i x.ivf -f rawvideo -pix_fmt yuv420p x.yuv`): `vp9_check <dir>`.
 use clap::Parser;
-use switch_core::vp9::Decoder;
+use switch_vp9::Decoder;
 
 #[derive(Parser)]
 struct Cli {

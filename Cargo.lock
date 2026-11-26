@@ -1226,6 +1226,8 @@ name = "switch-core"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "switch-opus",
+ "switch-vp9",
 ]
 
 [[package]]
@@ -1237,6 +1239,13 @@ dependencies = [
  "switch-core",
  "web-time",
  "wgpu",
+]
+
+[[package]]
+name = "switch-opus"
+version = "0.1.0"
+dependencies = [
+ "clap",
 ]
 
 [[package]]
@@ -1259,6 +1268,13 @@ name = "switch-relay-proto"
 version = "0.1.0"
 
 [[package]]
+name = "switch-vp9"
+version = "0.1.0"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "switch-wasm"
 version = "0.1.0"
 dependencies = [
@@ -1270,6 +1286,7 @@ dependencies = [
  "switch-core",
  "switch-gpu",
  "switch-relay-proto",
+ "switch-vp9",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

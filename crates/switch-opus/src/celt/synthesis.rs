@@ -1,7 +1,7 @@
 //! Postfilter, de-emphasis and synthesis.
 
-use crate::opus::mdct::Mdct;
-use crate::opus::tables_celt::*;
+use crate::mdct::Mdct;
+use crate::tables_celt::*;
 use super::bands::denormalise_bands;
 use super::{COMBFILTER_MINPERIOD, MAX_LM, NB_EBANDS, OVERLAP, PREEMPH, SHORT_MDCT_SIZE, SIG_SCALE};
 

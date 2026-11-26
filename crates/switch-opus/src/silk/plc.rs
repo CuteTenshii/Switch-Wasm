@@ -1,6 +1,6 @@
 //! Packet loss concealment and comfort noise.
 
-use crate::opus::tables_silk::*;
+use crate::tables_silk::*;
 use super::nlsf::{bwexpander, lpc_inverse_pred_gain, nlsf2a};
 use super::synthesis::lpc_analysis_filter;
 use super::{

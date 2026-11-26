@@ -1,7 +1,7 @@
 //! Mid/side stereo prediction.
 
-use crate::opus::range::RangeDecoder;
-use crate::opus::tables_silk::*;
+use crate::range::RangeDecoder;
+use crate::tables_silk::*;
 use super::{rshift_round, sat16, smlabb, smlawb, smulbb, smulwb, STEREO_INTERP_LEN_MS};
 
 /// The mid/side prediction state a stereo stream carries between frames.

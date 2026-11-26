@@ -1,7 +1,7 @@
 //! Time the VP9 decoder on an IVF clip: `vp9_bench <clip.ivf> [--loops <n>]`.
 use clap::Parser;
 use std::time::Instant;
-use switch_core::vp9::Decoder;
+use switch_vp9::Decoder;
 
 #[derive(Parser)]
 struct Cli {

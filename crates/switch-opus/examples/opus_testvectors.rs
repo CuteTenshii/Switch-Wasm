@@ -1,7 +1,7 @@
 //! Decode the official Opus test vectors and write the result out for
 //! `opus_compare`.
 //!
-//! Usage: `cargo run --release -p switch-core --example opus_testvectors -- <dir> [--out <dir>]`
+//! Usage: `cargo run --release -p switch-opus --example opus_testvectors -- <dir> [--out <dir>]`
 //!
 //! Each vector is decoded to stereo and to mono. The final range must match on
 //! every packet; the samples go to `<out dir>/testvectorNN.rs.dec` and
@@ -12,7 +12,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
-use switch_core::opus::Decoder;
+use switch_opus::Decoder;
 
 /// Longest frame Opus can carry: 120 ms at 48 kHz.
 const MAX_FRAME: usize = 5760;

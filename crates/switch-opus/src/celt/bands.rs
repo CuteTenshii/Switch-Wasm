@@ -1,7 +1,7 @@
 //! Every band of a frame: stereo, folding, time-frequency changes and anti-collapse.
 
-use crate::opus::range::{RangeDecoder, BITRES};
-use crate::opus::tables_celt::*;
+use crate::range::{RangeDecoder, BITRES};
+use crate::tables_celt::*;
 use super::partition::{compute_theta, lcg_rand, quant_band, quant_band_n1, BandCtx};
 use super::vq::renormalise_vector;
 use super::{NB_EBANDS, SHORT_MDCT_SIZE, SPREAD_AGGRESSIVE};

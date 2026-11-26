@@ -1,7 +1,7 @@
 //! PVQ codewords and the shape of one coded vector.
 
-use crate::opus::range::RangeDecoder;
-use crate::opus::tables_celt::*;
+use crate::range::RangeDecoder;
+use crate::tables_celt::*;
 use super::SPREAD_NONE;
 
 /// `U(n, k)`: PVQ codewords with `k` pulses in `n` dimensions and a positive

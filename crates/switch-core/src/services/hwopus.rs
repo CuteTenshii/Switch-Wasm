@@ -3,8 +3,8 @@
 //! Packets carry an eight-byte big-endian `{u32 size, u32 final_range}` header.
 
 use crate::cpu::Cpu;
-use crate::opus;
 use crate::Result;
+use switch_opus as opus;
 
 /// Description 1001: unsupported sample rate.
 const OPUS_INVALID_SAMPLE_RATE: u32 = 111 | (1001 << 9);
