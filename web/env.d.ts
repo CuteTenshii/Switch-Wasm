@@ -39,10 +39,10 @@ declare module '@core/switch_wasm.js' {
   export function initSync(
     options: { module: WebAssembly.Module; memory: WebAssembly.Memory },
   ): Record<string, unknown>;
-  // `crates/switch-wasm/src/gpu.rs`: what it renders on, or why it cannot.
+  // `crates/wasm/src/gpu.rs`: what it renders on, or why it cannot.
   export function switch_gpu_open(
     deviceMsaa: boolean, interleave: boolean): Promise<string>;
-  // `crates/switch-wasm/src/screen.rs`; the first throws when the canvas has no 2d context.
+  // `crates/wasm/src/screen.rs`; the first throws when the canvas has no 2d context.
   export function switch_attach_screen(canvas: OffscreenCanvas): void;
   export function switch_present(): boolean;
   export function switch_clear_screen(): void;
@@ -84,7 +84,7 @@ declare module '@core/switch_wasm.js' {
   // `[width, height]`.
   export function switch_fb_size(): Uint32Array;
   export function switch_frame_count(): number;
-  // `crates/switch-wasm/src/idb/persist.rs`: the SD card and saves, to and from IndexedDB.
+  // `crates/wasm/src/idb/persist.rs`: the SD card and saves, to and from IndexedDB.
   export function switch_restore_storage(): Promise<number>;
   export function switch_flush_storage(): Promise<number>;
   // `idb/nand.rs`: registers the stored firmware; the system data archives it took.
@@ -99,7 +99,7 @@ declare module '@core/switch_wasm.js' {
   export function switch_nand_erase(): Promise<void>;
   // `idb/users.rs`: stores the guest's profile edits; whether there were any.
   export function switch_store_profile_edits(): Promise<boolean>;
-  // The exports that carry bytes or text, in `crates/switch-wasm/src`. The ones that return a
+  // The exports that carry bytes or text, in `crates/wasm/src`. The ones that return a
   // `Result` throw its error.
   export function switch_last_error(): string;
   // The panic that trapped the last call, which is then forgotten.

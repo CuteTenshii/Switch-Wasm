@@ -2,7 +2,7 @@
 
 Interpreter details for A64, A32, SIMD and floating point that the code relies on. A64 decode traps are in [a64-decode.md](a64-decode.md).
 
-Section headings are paths under `crates/switch-core/src/cpu/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
+Section headings are paths under `crates/core/src/cpu/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
 
 ## `bits.rs`
 
@@ -59,10 +59,10 @@ Section headings are paths under `crates/switch-core/src/cpu/`; a heading that s
 - FPSCR rounding bits 23:22 match FPCR. `VCMP` sets FPSCR N/Z/C/V, not the condition flags; `VMRS APSR_nzcv` copies them.
 - In the extension register load/store space only bits 24:21 = `0010` is the core-pair `VMOV`. Treating every P=0, W=0 encoding as one ran `vldmia sp, {d14-d15}` as a move into `lr` and `sp`, and Mario Kart 8 Deluxe returned through a zeroed stack.
 
-## `crates/switch-core/tests/a32/mod.rs`
+## `crates/core/tests/a32/mod.rs`
 
 - A32 test encodings are assembled with `llvm-mc -triple=armv7-none-eabi`, never by hand, so tests cannot agree with a decoder mistake. `dead_code` is allowed because each test crate compiles the whole harness module.
 
-## `crates/switch-core/tests/cpu/mod.rs`
+## `crates/core/tests/cpu/mod.rs`
 
 - `RequestUpdateAudioRenderer` input strides come from libnx's `audren.h`; input and output entry sizes differ.

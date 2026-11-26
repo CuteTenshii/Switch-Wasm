@@ -2,7 +2,7 @@
 
 NCA, NSP/XCI, RomFS, tickets, NSO/NRO, NPDM and the range-reading stack.
 
-Section headings are paths under `crates/switch-core/src/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
+Section headings are paths under `crates/core/src/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
 
 ## `control.rs`
 
@@ -22,7 +22,7 @@ Section headings are paths under `crates/switch-core/src/`; a heading that start
 - The ticket's `common_key_id` does not pick the `titlekek`: retail tickets may say 0 while the content needs a later generation (Asphalt 9: 0 vs `titlekek_07`). The NCA's key generation selects it.
 - A ticket bundled in the container overrides a `title.keys` entry for the same rights id (the dump may be for a different revision).
 
-## `crates/switch-core/examples/romfs_selftest.rs`
+## `crates/core/examples/romfs_selftest.rs`
 
 - Without IVFC verification ([`nca.rs`](#ncars)), wrong bytes from the HostSource -> NCA window -> AES-CTR -> compression/cache stack are served silently. The self-test relies on the invariant that a range's bytes must not depend on how it is read (whole, chunked, reversed, with evicting reads between). Samples target file edges and 64 KiB block boundaries (`compressed.rs` caches `CACHED_BLOCKS`, 4). `--samples`, `--seed`, `--window`, and `--inject` (canary that must be detected) control it.
 

@@ -10,7 +10,7 @@ Copyright Eden Emulator Project and yuzu Emulator Project. Licensed under the GN
 
 ## libopus
 
-`crates/switch-opus/src/` is a port of the [Opus](https://opus-codec.org) reference decoder.
+`crates/opus/src/` is a port of the [Opus](https://opus-codec.org) reference decoder.
 
 ```
 Copyright 2001-2023 Xiph.Org, Skype Limited, Octasic,
@@ -61,7 +61,7 @@ https://datatracker.ietf.org/ipr/1526/
 
 ## libvpx
 
-`crates/switch-vp9/src/` is a port of the [libvpx](https://chromium.googlesource.com/webm/libvpx) v1.17.0 VP9 decoder; its tables and inverse transforms are generated from the libvpx sources.
+`crates/vp9/src/` is a port of the [libvpx](https://chromium.googlesource.com/webm/libvpx) v1.17.0 VP9 decoder; its tables and inverse transforms are generated from the libvpx sources.
 
 ```
 Copyright (c) 2010, The WebM Project authors. All rights reserved.

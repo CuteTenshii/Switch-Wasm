@@ -2,7 +2,7 @@
 
 What each system service must answer, and why. `kernel/svc.rs` dispatches by session name; each module owns its constants, handlers and tests, and service state lives on `Process` (per process) or `Machine` (per console). IPC framing and the SVCs are in [kernel.md](kernel.md); `audout`, `audren` and `hwopus` are in [audio.md](audio.md).
 
-Section headings are paths under `crates/switch-core/src/services/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
+Section headings are paths under `crates/core/src/services/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
 
 ## The services
 
@@ -63,11 +63,11 @@ Section headings are paths under `crates/switch-core/src/services/`; a heading t
 - `acc:manager` `GetNintendoAccountUserResourceCache` (130, and 136 from 19.0.0) fails with 124-0200 (registration required), since no Nintendo Account is linked: Shop parses a birthday out of any success. `LoadIdTokenCache` (3, renumbered 4 in 19.0.0) loads an empty cache under both ids; Minecraft showed the error applet when 4 was refused.
 - An `AccountUid` is two `u64`s, not a UUID, so a user's uid is 128 random bits (`acc::random_uid`, never zero): the page makes one for each profile it creates, and the core's own first user gets one made once per process, shared by every console in it so two consoles run in lockstep see the same user.
 
-## `crates/switch-core/src/uuid.rs`
+## `crates/core/src/uuid.rs`
 
 - An id that is a UUID is built with `crate::uuid`, not written as 16 bytes of text: `parse` for a constant (a malformed one fails the build), `v4` for a random one, `v8` for one derived from data, and `is_valid` for a test. These are the ids libnx types as `Uuid`: the steady clock source, the Mii author and create ids, and the Wi-Fi profile id. The profile image id is not documented as a UUID and is a plain hash.
 
-## `crates/switch-core/src/display/buffer_queue.rs`
+## `crates/core/src/display/buffer_queue.rs`
 
 - `QueueBufferInput` `crop` and `transform` must be honoured: ignoring them drew Minecraft upside down and put A Short Hike's 720p frame in the corner of a 1080p screen. `scalingMode` is ignored because the canvas scales anyway.
 - `REQUEST_BUFFER` must return the registered flattened `GraphicBuffer` (kept verbatim per slot), not `nonNull = 0` with success: the app's `Surface` cache is empty on each slot's first request, and A Short Hike dereferenced the null buffer (fence at `buffer + 0x60`), which landed in soft-mapped low pages and deadlocked the WSI thread far from the cause. An unregistered slot returns Android's bad-index status.

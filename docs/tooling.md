@@ -19,7 +19,7 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 
 - The rustfmt hook runs `cargo fmt --all --check` rather than rustfmt on staged files: bare rustfmt formats `include!`d files (generated ASTC tables), cargo fmt does not. Clippy covers the whole workspace and all targets, since switch-core changes break switch-wasm lints. Hooks read the working tree because cargo can't build from the index.
 
-## `crates/switch-gpu/examples/screenshot.rs`
+## `crates/gpu/examples/screenshot.rs`
 
 - Draws on the GPU backend through native wgpu and falls back per draw; with no adapter, or with `--software`, every draw is the rasterizer's. The rasterizer is the reference and is far slower once draws cover pixels, so use `--software` only to check the device against it. Run it as `cargo run --release -p switch-gpu --example screenshot`; building `-p switch-core` leaves a stale binary.
 - It prints the Rendering panel's report (`rendering: {...}`) at the end. The device switches: `--only <i>` (or `<a>..<b>`) puts only those draws on the device; `--web-limits` hides native-only features and `--defer-readbacks` never waits for a readback, so a native run takes the browser's routes and latches as it does, which narrows down a fallback a browser run reported but does not list the browser's (only `browser_boot.mjs` does); `--interleave`, `--sync-every-present`, `--device-msaa` and `--times` are for comparing routes, and `--software-compute` runs every compute launch in software, to compare against the device's. `--software` refuses them.
@@ -63,17 +63,17 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 
 - Prints a timeline, faults, refused commands, the pad, device timers, the last frames and the busiest guest threads from a `browser_boot.mjs --out` report or a saved page log.
 
-## `crates/switch-core/examples/difftest.rs`
+## `crates/core/examples/difftest.rs`
 
 - Driven by `tools/difftest.py`: assembles instructions, runs them under qemu-aarch64 and here, and reports the first differing register (it found the TRN1/TRN2 lane mix-up behind hbmenu's JPEG decode). Usage `difftest <code.bin> --inputs <inputs.bin> --out <out.bin> --inputs-addr <hex>`. The dump buffer is sized from the program: a fixed 128 once silently stopped comparing past 128.
 
-## `crates/switch-core/examples/hotspots.rs`
+## `crates/core/examples/hotspots.rs`
 
 - The group table mirrors `jit::decode`'s arms, so it ranks work inside the translator (loads and stores walk the page table; SIMD/FP re-derive operands each execution). `jit_coverage` measures what the emitter has no writer for (`cpu::emits`); this measures where the instructions go, written or not. NRO rankings do not transfer to retail. Addresses are keyed by page, not a fixed window, since retail modules load anywhere.
 - `--from-frame` and `--frames` pick the window; a boot's loading bursts and videos differ from its steady frames. `--simd` ranks SIMD&FP instructions with each address counted at most `HOT` times, roughly what blocks run before they are compiled; the disassembler names no vector data processing, so those rows are encodings with registers masked. Counts go into hash maps, since an ordered map per executed instruction made a 1,000-frame window take most of an hour.
 - `jit_coverage --frame <n>` samples a later frame than the default steady one.
 
-## `crates/switch-core/examples/frame_work.rs`
+## `crates/core/examples/frame_work.rs`
 
 - Work counts (instructions, blocks, interpreter fallbacks, draws, pixels) are identical under native and V8. Use them to decide what to fix and to prove a fix landed, and a `tools/browser_boot.mjs` or `tools/profile_ingame.mjs` run for what it was worth. A change that moves no count but looks faster on the host only made the host faster.
 - Host timings are not a scaled version of browser timings: removing a libcall only wasm pays for was about 1.15x natively and 1.44x in the browser.

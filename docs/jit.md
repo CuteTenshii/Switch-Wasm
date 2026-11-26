@@ -2,7 +2,7 @@
 
 How AArch64 blocks are translated, run, and written out as wasm.
 
-Section headings are paths under `crates/switch-core/src/cpu/jit/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
+Section headings are paths under `crates/core/src/cpu/jit/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
 
 ## `mod.rs`
 
@@ -119,14 +119,14 @@ Section headings are paths under `crates/switch-core/src/cpu/jit/`; a heading th
 - `VLDM`/`VSTM`/`VLDn`/`VSTn` check their whole range once, so a hand-back leaves nothing half moved. `LDRD`/`STRD` are written for an even `Rt` below `r14` whose base is not written back over the pair.
 - T32 has no translation: a Thumb thread runs in the interpreter, and the A32 JIT leaves the block loop when `thumb` is set.
 
-## `crates/switch-wasm/src/jit.rs`
+## `crates/wasm/src/jit.rs`
 
 - Regions go into this instance's own function table and are entered with `call_indirect` (a Rust fn pointer on wasm32 is a table index). Tables are per instance, so with several workers on one memory each has its own table and its own free list (`FREE` is thread-local).
 - Synchronous `WebAssembly.Module` is required (regions are compiled inside a run slice); windows refuse large modules synchronously but workers allow any size.
 - Freed slots are recycled, since the cache drops blocks constantly. A freed slot still points at its old function (there is no null function entry), so memory is bounded by the peak number installed. Slot 0 is the linker's null and means "not installed"; it must never be handed out. A failed compile returns 0 and the block stays interpreted.
 - `attach` runs from `switch_init` right after instantiation. It probes tail calls (`tail_call_probe`) and SIMD128 (`simd_probe`) with `WebAssembly.validate`: without tail calls regions are emitted unchained, without SIMD128 Advanced SIMD stays interpreted. Every module is offered the function table as `e`.`t`; unchained ones do not import it.
 
-## `crates/switch-wasm/src/heap.rs`
+## `crates/wasm/src/heap.rs`
 
 - The global allocator is dlmalloc with a 4 MiB growth granularity instead of 64 KiB. Guest RAM is backed per 4 KiB page on first touch, so asset loading caused hundreds of `memory.grow`s (about 500 for 32 MiB in Just Dance 2019), and each grow cost V8 time per instance importing the memory (every compiled block): 0.4 s of `SetInstanceMemory` over 60 frames, measured on the unshared build. Unused grown memory is not backed until written.
 - The allocator sits behind a spin lock (`Heap::with`), since core workers instantiate over the same shared memory and all allocate.
@@ -148,7 +148,7 @@ Section headings are paths under `crates/switch-core/src/cpu/jit/`; a heading th
 - `NO_PC` poisons the pc before each case, so a block that should write it and does not is caught. The discard slot is skipped because a `CMP` fused into its branch is emitted without the discarded register write.
 - A `none` mode case means the interpreter's watchpoint saw the access; an emitted block that went ahead anyway would blind the watchpoint. Memory is compared after every non-`exact` case, so a store with the right register effects but wrong bytes or address is caught.
 
-## `crates/switch-core/examples/emit_selftest.rs`
+## `crates/core/examples/emit_selftest.rs`
 
 - Complements `emit_difftest` (which covers only what a real title runs) with adversarial operands: 0 and -1 divisors, `INT_MIN` dividends, shift amounts at 32/64, all 16 NZCV settings per condition. It needs no title or keys, so it runs anywhere; CI does not run it.
 - Encodings are swept from `cpu::emits` over all 2048 bits-31:21 prefixes rather than hand-written, since a wrong hand encoding silently tests a different instruction. Disassembly is used only for grouping and naming; the interpreter is the reference. The disassembler names no Advanced SIMD form, so those are bucketed by encoding with Rd, Rn and Rm masked. Random fills almost never land on a scalar FRINT, so those are swept on their own, a bucket per type and opcode, under every FPCR rounding mode (`fpcr:`).
@@ -159,26 +159,26 @@ Section headings are paths under `crates/switch-core/src/cpu/jit/`; a heading th
 - Faulting cases are kept: the expected result is "block retired nothing, state unchanged".
 - Register seed sets pair `i64::MIN` with -1 (SDIV overflow, which traps in wasm) and ramp shift amounts around 32 and 64 (A64 takes them modulo operand width, wasm modulo its own). One set targets the last bytes of pages so accesses straddle into a mapped page. Another holds doubles with few significant bits and small exponents (`mixed_double` in `examples/common/emit.rs`, reproduced as `mixedDouble` in `emit_difftest.mjs`), which noise never produces and which put fused multiply-adds on exact ties. The exclusive monitor is armed for pairs too, and its snapshots (`excl:`) carry both doublewords.
 
-## `crates/switch-core/examples/a32_emit_selftest.rs`
+## `crates/core/examples/a32_emit_selftest.rs`
 
 - Generates random data-processing, load/store, `LDM`/`STM` and branch encodings by field, emits each under several register sets and flag values, and records the interpreter's result; `node tools/emit_difftest.mjs --out=target/a32-emit-selftest` runs the modules under V8. It also covers VFP, Advanced SIMD, `LDRD`/`STRD` and `SBFX`/`UBFX`, seeding the vector registers and FPSCR. A case with a float operation carries `nansign`: the interpreter's compiled `a + b` and the engine pick different NaNs when both operands are one, so every word that reads as a NaN is compared as the canonical NaN. Memory cases hold one instruction, since a multi-instruction body may hand back partway.
 
-## `crates/switch-core/examples/jit_coverage.rs`
+## `crates/core/examples/jit_coverage.rs`
 
 - Emitter coverage is answered statically by `switch_core::cpu::emits`, plus `writes_exit` for the branches it writes as exits or terminators (not `translates`, which says yes to forms the emitter still refuses), weighted by a real frame's instruction mix, not by host timing.
 
-## `crates/switch-core/examples/a32_jit_coverage.rs`
+## `crates/core/examples/a32_jit_coverage.rs`
 
 - The A32 counterpart, with `a32_translates` and `a32_emits`. It skips `--skip` steps, measures `--window` instructions one by one, and ranks the classes (bits 27:20 and 7:4) the emitter has no writer for. On Mario Kart 8 Deluxe (3B steps in, 100M measured, 32k distinct words) 0.60% decodes to the interpreter and 0.03% has no writer, a long tail under 0.01% per class (plain acquire loads, `CLZ`, `UDIV`, a load multiple naming its base, barriers, the reciprocal estimates, VFP v8 forms).
 
-## `crates/switch-core/tests/jit_test.rs`
+## `crates/core/tests/jit_test.rs`
 
 - The JIT tests are differential (registers, flags, vectors, pc, retired count, written memory) against the interpreter, on an `llvm-mc` + `ld.lld` corpus that also samples ops the translator deliberately hands back (system registers, scalar FP). A separate test checks that the corpus executes, since two runs that both fault immediately would also match.
 
-## `crates/switch-core/tests/jit_emitted_test.rs`
+## `crates/core/tests/jit_emitted_test.rs`
 
 - Runs the emitted path on the host with a fake `JitHost` whose entries are Rust functions doing what the block's first `retired` ops would.
 
-## `crates/switch-core/tests/jit_a32_test.rs`
+## `crates/core/tests/jit_a32_test.rs`
 
 - Runs `llvm-mc` programs both ways and compares registers, flags, cycles, steps and memory at every step budget.

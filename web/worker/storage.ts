@@ -191,7 +191,7 @@ export const STORAGE = {
     }
     return out;
   },
-  // Content lives in OPFS, or IndexedDB without it; `crates/switch-wasm/src/idb/content.rs` owns both.
+  // Content lives in OPFS, or IndexedDB without it; `crates/wasm/src/idb/content.rs` owns both.
   nandContent: switch_nand_content,
   nandInstall: switch_nand_install,
   nandRemove: switch_nand_remove,

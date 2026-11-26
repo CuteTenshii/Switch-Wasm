@@ -1,6 +1,6 @@
 # Relay protocol
 
-How the browser reaches the Internet when the guest opens a TCP connection, a UDP socket or a listener. The page opens one WebSocket to a relay (`crates/switch-relay`, a native binary the user runs) and multiplexes every guest stream over it. The relay does DNS and the real sockets; the guest's TLS stays in the emulator, so the relay only ever sees ciphertext.
+How the browser reaches the Internet when the guest opens a TCP connection, a UDP socket or a listener. The page opens one WebSocket to a relay (`crates/relay`, a native binary the user runs) and multiplexes every guest stream over it. The relay does DNS and the real sockets; the guest's TLS stays in the emulator, so the relay only ever sees ciphertext.
 
 Nothing here is needed to play: with no relay URL set, the network stays empty.
 

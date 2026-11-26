@@ -2,7 +2,7 @@
 
 The Maxwell engines, shader translation, the software rasterizer and texture handling. The `wgpu` backend is in [gpu-backend.md](gpu-backend.md).
 
-Section headings are paths under `crates/switch-core/src/gpu/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
+Section headings are paths under `crates/core/src/gpu/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
 
 ## `nvdrv.rs`
 
@@ -233,7 +233,7 @@ Section headings are paths under `crates/switch-core/src/gpu/`; a heading that s
 - Activity is keyed by numbers, not strings: with thousands of draws a frame, labels are formatted only when a surface is first seen. Tallies cap at 256 entries (overflow summed into one) and refusal reasons at 32 (reasons may embed addresses).
 - Refusals are tracked by reason, apart from per-surface `failed` counts, since the reason says what to implement next.
 
-## `crates/switch-core/examples/shader_coverage.rs`
+## `crates/core/examples/shader_coverage.rs`
 
 - WGSL translation is per program and stops at the first blocker, so the tool reports the first blocker per program; fix and re-run.
 - It reports twice: with no optional features (the browser) and with quad ops. Fragment shaders use `wgsl::QUAD_SWAP` without quad ops, so a gap between the passes means a vertex program shuffles.
@@ -241,7 +241,7 @@ Section headings are paths under `crates/switch-core/src/gpu/`; a heading that s
 - One address can decode differently under different constant bank bindings; the first decode is kept.
 - qlaunch is the preferred subject (a frame is almost pure rasterizer).
 
-## `crates/switch-core/examples/bcn_difftest.rs`
+## `crates/core/examples/bcn_difftest.rs`
 
 - The fixture comes from a throwaway C harness around `bcdec.h` (public domain): per codec, 4000 random 16-byte blocks, each written as the input then the decoded texels, in the order BC1, BC2, BC3, BC7 (RGBA8), BC4 (R8), BC5 (RG8), then BC6H UF16 and SF16 (RGB as `f32`).
 - BC6H must match exactly; every 8-bit codec, BC7 included, passes within 1/255. BC1-3 differ legitimately: this decoder expands 5:6:5 endpoints by bit replication (as BPTC does), `bcdec` by rounding; both are within S3TC tolerance.

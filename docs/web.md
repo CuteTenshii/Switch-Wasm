@@ -2,7 +2,7 @@
 
 The page, the worker, and the wasm bindings between them.
 
-Section headings are paths under `crates/switch-wasm/src/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
+Section headings are paths under `crates/wasm/src/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
 
 ## `lib.rs`
 

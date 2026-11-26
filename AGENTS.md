@@ -19,11 +19,11 @@ the TypeScript frontend plus the Rust core compiled to `wasm32-unknown-unknown`.
 
 ## Repository map
 
-- `crates/switch-core`: dependency-free emulator core, including the AArch64
+- `crates/core`: dependency-free emulator core, including the AArch64
   interpreter and JIT, loaders, services, memory, audio, and software GPU.
-- `crates/switch-gpu`: optional `wgpu` renderer behind the core renderer
+- `crates/gpu`: optional `wgpu` renderer behind the core renderer
   interface. The software renderer is its correctness reference.
-- `crates/switch-wasm`: browser bindings over the one global session. Buffers cross the
+- `crates/wasm`: browser bindings over the one global session. Buffers cross the
   boundary through WebAssembly linear memory. JSON for the page is written
   with `switch_core::json`; do not add serde merely for bindings.
 - `web/main`: DOM, persistence, controls, display, audio, and worker RPC.

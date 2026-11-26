@@ -1,4 +1,4 @@
-// Plays the worker's audio ring (`crates/switch-wasm/src/audio.rs`) straight out of its
+// Plays the worker's audio ring (`crates/wasm/src/audio.rs`) straight out of its
 // shared memory, resampled to the output rate.
 
 // The worklet scope's globals, which the DOM types do not describe.

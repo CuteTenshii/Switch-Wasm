@@ -1,5 +1,5 @@
 // The Network tab: the switch that gives the guest Internet through the relay
-// (`crates/switch-relay`, run on this computer; see docs/relay.md), and the guest's
+// (`crates/relay`, run on this computer; see docs/relay.md), and the guest's
 // connections. Off, the guest sees a network that never answers.
 
 import { Download, Power, PowerOff } from 'lucide';

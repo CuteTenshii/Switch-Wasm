@@ -7,9 +7,9 @@ license = "AGPL-3.0-or-later"
 
 [dependencies]
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
-switch-core = { path = "../switch-core" }
-switch-vp9 = { path = "../switch-vp9" }
-switch-relay-proto = { path = "../switch-relay-proto" }
+switch-core = { path = "../core" }
+switch-vp9 = { path = "../vp9" }
+switch-relay-proto = { path = "../relay-proto" }
 
 [lib]
 crate-type = ["cdylib"]
@@ -29,7 +29,7 @@ version = "1"
 features = ["web"]
 
 [dependencies.switch-gpu]
-path = "../switch-gpu"
+path = "../gpu"
 
 [dependencies.wasm-bindgen]
 version = "0.2"
@@ -97,7 +97,7 @@ features = [
 ]
 
 [dev-dependencies]
-switch-core = { path = "../switch-core", features = ["testing"] }
+switch-core = { path = "../core", features = ["testing"] }
 
 [lints]
 workspace = true

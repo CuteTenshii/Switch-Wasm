@@ -5,7 +5,7 @@
 //! the GPU backend, as in the browser, falling back to the rasterizer where it does; without an
 //! adapter, or with `--software`, every draw is the rasterizer's. `cmp` a `--software` frame with
 //! a device frame to check the backend against that reference.
-#[path = "../../switch-core/examples/common/mod.rs"]
+#[path = "../../core/examples/common/mod.rs"]
 mod common;
 
 use clap::Parser;

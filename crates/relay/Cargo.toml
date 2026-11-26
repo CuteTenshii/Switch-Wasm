@@ -10,7 +10,7 @@ dirs = "7.0.0"
 futures-util = "0.3.34"
 serde = { version = "1.0.229", features = ["derive"] }
 socket2 = "0.6.5"
-switch-relay-proto = { path = "../switch-relay-proto" }
+switch-relay-proto = { path = "../relay-proto" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time", "io-std", "signal"] }
 tokio-tungstenite = "0.30.0"
 toml = "1.2.3"

@@ -2,7 +2,7 @@
 
 Guest memory layout, threads, scheduling, synchronization, SVCs, IPC framing, boot and diagnostics.
 
-Section headings are paths under `crates/switch-core/src/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
+Section headings are paths under `crates/core/src/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
 
 ## `kernel/layout.rs`
 

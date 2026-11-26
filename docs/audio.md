@@ -1,8 +1,8 @@
 # Audio
 
-`services/audout.rs`, `services/audren.rs`, `services/hwopus.rs`, `services/audio.rs` (the mixing) and `crates/switch-opus/`.
+`services/audout.rs`, `services/audren.rs`, `services/hwopus.rs`, `services/audio.rs` (the mixing) and `crates/opus/`.
 
-Section headings are paths under `crates/switch-core/src/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
+Section headings are paths under `crates/core/src/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
 
 `audout` is a *device*: the guest hands it finished PCM. `audren` is a *mixer*: the guest hands it sources and gets mixed PCM back. Homebrew mostly takes the first, retail the second. Both end in `Cpu::queue_audio`, which converts a source's samples to stereo at 48 kHz (5.1 folds the centre and rears into both sides, other rates are linearly resampled) and queues them per source. `Cpu::take_audio` sums the sources, so concurrent streams (the home menu's 6-channel `audout` beside a stereo `audren`) play together in one fixed format.
 
@@ -76,5 +76,5 @@ Section headings are paths under `crates/switch-core/src/`; a heading that start
 
 ## `web/main/audio.ts`
 
-- Audio never crosses a message: the worker moves the guest's queued samples into a ring in its shared linear memory after each slice (`feed` in `crates/switch-wasm/src/audio.rs`), and an `AudioWorklet` (`pcm-worklet.ts`) plays straight out of it, resampling to the output rate. The ring's address is posted once to the page (`audio_ring`), the format whenever it changes (`audio_format`).
+- Audio never crosses a message: the worker moves the guest's queued samples into a ring in its shared linear memory after each slice (`feed` in `crates/wasm/src/audio.rs`), and an `AudioWorklet` (`pcm-worklet.ts`) plays straight out of it, resampling to the output rate. The ring's address is posted once to the page (`audio_ring`), the format whenever it changes (`audio_format`).
 - More than 200 ms queued is dropped from the front, so latency stays low. Below full speed the guest produces less than real time and the worklet plays silence in the gaps; it reports played time and gaps once a second for the `[audio] page:` lines.

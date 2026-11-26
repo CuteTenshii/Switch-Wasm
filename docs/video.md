@@ -1,12 +1,12 @@
 # Video decoding
 
-Titles decode video on the console's nvdec engine and hand the frames to VIC. `gpu/multimedia.rs` models both. VP9 (codec 9) goes to the browser's decoder as frames rebuilt from what nvdec is given (`vp9/rebuild.rs`), with `vp9/` as the software decoder where the browser has none or gives up; H.264 (codec 3) goes to the browser's decoder (`gpu/h264.rs`). Both browser decoders are `WebDecoder` in `switch-wasm/src/video.rs`. Other codecs, and H.264 in a native build, only retire their syncpoints.
+Titles decode video on the console's nvdec engine and hand the frames to VIC. `gpu/multimedia.rs` models both. VP9 (codec 9) goes to the browser's decoder as frames rebuilt from what nvdec is given (`vp9/rebuild.rs`), with `vp9/` as the software decoder where the browser has none or gives up; H.264 (codec 3) goes to the browser's decoder (`gpu/h264.rs`). Both browser decoders are `WebDecoder` in `wasm/src/video.rs`. Other codecs, and H.264 in a native build, only retire their syncpoints.
 
 ## The decoder
 
 `vp9/` is bit-exact with libvpx v1.17.0 and checked against it, not against ffmpeg alone:
 
-- `tools/extract_vp9_tables.py <libvpx checkout> crates/switch-vp9/src/tables.rs` writes the constant tables from the C initializers; `tools/extract_vp9_transforms.py` translates the 1-D inverse transforms. Both are pure Python; neither is needed to build.
+- `tools/extract_vp9_tables.py <libvpx checkout> crates/vp9/src/tables.rs` writes the constant tables from the C initializers; `tools/extract_vp9_transforms.py` translates the 1-D inverse transforms. Both are pure Python; neither is needed to build.
 - `cargo run --release -p switch-vp9 --example vp9_check -- <dir>` decodes every `x.ivf` beside an `x.yuv` that ffmpeg wrote (`ffmpeg -i x.ivf -f rawvideo -pix_fmt yuv420p x.yuv`) and compares every shown frame. The clips covered tiles, hidden frames in superframes, segmentation, error-resilient and frame-parallel streams, odd sizes, lossless and compound prediction.
 - `vp9_vectors idct|intra <file>` checks the transforms and the intra predictors against the output of a small C harness linked to `libvpx.a` (random blocks through `vp9_iht*_add_c`, `vpx_idct32x32_1024_add_c`, `vpx_iwht4x4_16_add_c` and `vpx_*_predictor_*_c`).
 - `vp9_capture <dir> <out.ppm>` decodes the first frame of a captured nvdec stream (`c10_001_{setup,bits,probs}.bin`) to a PPM.

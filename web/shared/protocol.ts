@@ -548,7 +548,7 @@ export type WorkerMessage =
   | { type: 'input_mailbox'; buffer: SharedArrayBuffer; at: number }
   // `(channels << 24) | rate` of the audio in the ring, sent when it changes; 0 before a device opens.
   | { type: 'audio_format'; format: number }
-  // From `crates/switch-wasm/src/keyboard.rs`: the guest raised an error applet, or waits for text.
+  // From `crates/wasm/src/keyboard.rs`: the guest raised an error applet, or waits for text.
   | ({ type: 'error_dialog' } & ErrorDialog)
   | ({ type: 'keyboard' } & KeyboardRequest)
   // The guest's profile edits are stored; the page reloads them.

@@ -6,8 +6,8 @@ description = "Browser-oriented Nintendo Switch emulation core: container parser
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-switch-opus = { path = "../switch-opus" }
-switch-vp9 = { path = "../switch-vp9" }
+switch-opus = { path = "../opus" }
+switch-vp9 = { path = "../vp9" }
 
 [features]
 # The `testing` fixture modules, for other crates' tests.
@@ -18,4 +18,4 @@ workspace = true
 
 [dev-dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
-switch-vp9 = { path = "../switch-vp9", features = ["testing"] }
+switch-vp9 = { path = "../vp9", features = ["testing"] }

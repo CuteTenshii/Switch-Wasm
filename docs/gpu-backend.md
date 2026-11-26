@@ -2,7 +2,7 @@
 
 `switch-gpu` is the `wgpu` backend behind `gpu::renderer::Renderer`; the software rasterizer is the reference it must agree with. Core GPU notes are in [gpu.md](gpu.md).
 
-Section headings are paths under `crates/switch-gpu/src/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
+Section headings are paths under `crates/gpu/src/`; a heading that starts with `crates/`, `tools/` or `web/` is from the repository root.
 
 **It never blocks in a browser.** Reading a render target back means awaiting a promise, and a blocking wait there deadlocks. So a surface stays on the device across every draw targeting it and returns to guest memory only at `Renderer::flush`, which the engine calls before `present`. Opening the device is asynchronous too: the worker's loop calls `switch_gpu_open` as it starts, and the first slices draw on the rasterizer until it resolves. Any draw the backend cannot express falls back to `Software`. `Renderer::flush` polls with `PollType::Wait`, a real wait natively and a no-op on WebGPU, so a browser gets `Flush::Pending` and the present waits for a later slice (`Cpu::complete_pending_present`; why it must is under [renderer.rs](gpu.md#rendererrs)).
 

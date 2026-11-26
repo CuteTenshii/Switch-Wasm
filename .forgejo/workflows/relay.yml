@@ -5,15 +5,15 @@ on:
     branches: [master]
     tags: ["relay-v*"]
     paths:
-      - "crates/switch-relay/**"
-      - "crates/switch-relay-proto/**"
+      - "crates/relay/**"
+      - "crates/relay-proto/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".forgejo/workflows/relay.yml"
   pull_request:
     paths:
-      - "crates/switch-relay/**"
-      - "crates/switch-relay-proto/**"
+      - "crates/relay/**"
+      - "crates/relay-proto/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".forgejo/workflows/relay.yml"
@@ -74,7 +74,7 @@ jobs:
 
       - name: Copy the binary as switch-relay-<version>-<system>
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/switch-relay/Cargo.toml | head -1)
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/relay/Cargo.toml | head -1)
           mkdir out
           cp target/${{ matrix.target }}/release/switch-relay${{ matrix.suffix }} \
             out/switch-relay-$version-${{ matrix.system }}${{ matrix.suffix }}
@@ -104,7 +104,7 @@ jobs:
         env:
           TAG: ${{ forgejo.ref_name }}
         run: |
-          VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/switch-relay/Cargo.toml | head -1)
+          VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/relay/Cargo.toml | head -1)
           if [ "$TAG" != "relay-v$VERSION" ]; then
             echo "$TAG does not match switch-relay $VERSION in Cargo.toml" >&2
             exit 1
