@@ -211,11 +211,10 @@ pub fn switch_init() {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        session()
-            .cpu
-            .nv
-            .video
-            .set_h264(Box::new(video::WebH264::default()));
+        let engines = &mut session().cpu.nv.video;
+        engines.set_h264(Box::new(video::WebDecoder::new(video::H264)));
+        engines.set_vp9(video::vp9_decoder);
+        video::probe_vp9();
         audio::announce_ring();
         input::announce_mailbox();
         storage::start_claim();

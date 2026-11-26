@@ -6,10 +6,10 @@ use crate::gpu::h264;
 use crate::gpu::nvmap::NvMap;
 use crate::gpu::syncpt::Host1x;
 use crate::mem::Memory;
-use crate::trace::{enabled, Trace};
+use crate::trace::{enabled, Level, Trace};
 use crate::vp9;
 use crate::Result;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// host1x's own class, for syncpoint waits and loads.
@@ -117,17 +117,63 @@ pub struct MmChannel {
     pub submits: u64,
     pub executes: u64,
     vp9: vp9::nvdec::Channel,
+    vp9_route: Vp9Route,
+    vp9_host: Option<Vp9Host>,
+}
+
+/// Which decoder a channel's VP9 stream goes to, chosen at a key frame.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Vp9Route {
+    /// No key frame yet: frames go to the software decoder.
+    #[default]
+    Undecided,
+    Host,
+    /// The host refused or lost a frame: nothing is decoded until the software decoder takes the
+    /// next key frame.
+    SoftwareFromKey,
+    Software,
+}
+
+/// A VP9 stream on the host's decoder.
+#[derive(Debug)]
+struct Vp9Host {
+    decoder: Box<dyn HostDecoder>,
+    rebuilder: vp9::rebuild::Rebuilder,
+    /// Surfaces given to the decoder and not handed back yet.
+    in_flight: HashSet<u64>,
 }
 
 /// Decoded frames by the CPU address of their luma plane: what nvdec "writes" and VIC reads. A
 /// device address can name another buffer on the next submit once the window is remapped.
 type Surfaces = HashMap<u64, Arc<vp9::Frame>>;
 
-/// A host's H.264 decoder. Pictures go in by the surface nvdec writes and come back in any
-/// order, `None` for one it could not decode.
-pub trait H264Decoder: std::fmt::Debug {
-    fn decode(&mut self, surface: u64, access_unit: &[u8], key: bool);
+/// A host's video decoder for one codec. Pictures go in by the surface nvdec writes and come
+/// back in any order, `None` for one it could not decode.
+pub trait HostDecoder: std::fmt::Debug {
+    fn decode(&mut self, surface: u64, chunk: &[u8], key: bool);
     fn take(&mut self) -> Vec<(u64, Option<vp9::Frame>)>;
+}
+
+/// Makes a host decoder for one VP9 stream, `None` where the host cannot decode VP9.
+pub type Vp9Factory = Box<dyn FnMut() -> Option<Box<dyn HostDecoder>>>;
+
+#[derive(Default)]
+struct HostVp9(Option<Vp9Factory>);
+
+impl HostVp9 {
+    fn make(&mut self) -> Option<Box<dyn HostDecoder>> {
+        self.0.as_mut().and_then(|factory| factory())
+    }
+}
+
+impl std::fmt::Debug for HostVp9 {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "HostVp9"
+        } else {
+            "NoHostVp9"
+        })
+    }
 }
 
 /// How many times VIC is asked again for one frame before it composes without it.
@@ -137,8 +183,9 @@ const WAIT_LIMIT: u32 = 1000;
 #[derive(Debug, Default)]
 struct Frames {
     surfaces: Surfaces,
-    h264: Option<Box<dyn H264Decoder>>,
-    /// Surfaces the H.264 decoder has yet to hand back, and how often VIC has waited for each.
+    h264: Option<Box<dyn HostDecoder>>,
+    vp9_host: HostVp9,
+    /// Surfaces a host decoder has yet to hand back, and how often VIC has waited for each.
     pending: HashMap<u64, u32>,
     /// The parameter sets the decoder was last given.
     parameter_sets: Vec<u8>,
@@ -168,7 +215,7 @@ impl Frames {
             return true;
         }
         self.pending.remove(&surface);
-        crate::traceln!("[video] the H.264 picture for surface {surface:#x} never came back");
+        crate::traceln!("[video] the picture for surface {surface:#x} never came back");
         false
     }
 }
@@ -191,6 +238,8 @@ impl MmChannel {
             submits: 0,
             executes: 0,
             vp9: Default::default(),
+            vp9_route: Vp9Route::default(),
+            vp9_host: None,
         }
     }
 
@@ -373,8 +422,14 @@ impl Video {
         self.channels.get(&id)
     }
 
-    pub fn set_h264(&mut self, decoder: Box<dyn H264Decoder>) {
+    pub fn set_h264(&mut self, decoder: Box<dyn HostDecoder>) {
         self.frames.h264 = Some(decoder);
+    }
+
+    /// Lets VP9 streams go to the host's decoder: `factory` makes one for each stream as it
+    /// reaches a key frame.
+    pub fn set_vp9(&mut self, factory: impl FnMut() -> Option<Box<dyn HostDecoder>> + 'static) {
+        self.frames.vp9_host = HostVp9(Some(Box::new(factory)));
     }
 
     /// `SUBMIT`: run the command buffers and write each increment's fence threshold
@@ -393,6 +448,11 @@ impl Video {
             device,
             ..
         } = self;
+        if channels.get(&id).is_some_and(|c| c.engine == Engine::Vic) {
+            for channel in channels.values_mut() {
+                channel.land_vp9(frames);
+            }
+        }
         let Some(channel) = channels.get_mut(&id) else {
             return Ok(Submitted::Refused);
         };
@@ -584,7 +644,7 @@ impl MmChannel {
             }
             match self.engine {
                 Engine::Nvdec if self.method(NVDEC_SET_APPLICATION_ID) == NVDEC_CODEC_VP9 => {
-                    self.decode_vp9(mem, &mut frames.surfaces, device)
+                    self.decode_vp9(mem, frames, device)
                 }
                 Engine::Nvdec if self.method(NVDEC_SET_APPLICATION_ID) == NVDEC_CODEC_H264 => {
                     self.decode_h264(mem, frames, device)
@@ -595,8 +655,9 @@ impl MmChannel {
         }
     }
 
-    /// Decodes the VP9 frame an nvdec `EXECUTE` describes and keeps it for VIC under its surface.
-    fn decode_vp9(&mut self, mem: &Memory, surfaces: &mut Surfaces, device: &DeviceSpace) {
+    /// Decodes the VP9 frame an nvdec `EXECUTE` describes, or hands it to the host's decoder, and
+    /// keeps it for VIC under its surface.
+    fn decode_vp9(&mut self, mem: &Memory, frames: &mut Frames, device: &DeviceSpace) {
         const SETUP_BYTES: usize = 0x100;
         const PROBABILITY_BYTES: usize = 3744;
         let read = |at: u64, len: usize| {
@@ -617,10 +678,37 @@ impl MmChannel {
             PROBABILITY_BYTES,
         );
         let slots = [0, 1, 2, 3].map(|i| self.address(NVDEC_SET_PICTURE_LUMA_OFFSET + i, device));
-        let refs = [0, 1, 2].map(|i| surfaces.get(&slots[i]).cloned());
+
+        self.land_vp9(frames);
+        let picture = vp9::nvdec::PicSetup::parse(&setup);
+        let key = picture.is_key_frame();
+        if key {
+            self.choose_vp9_route(frames, slots);
+        }
+        if self.vp9_route == Vp9Route::Host {
+            if self.send_vp9(picture, &bitstream, &probs, slots, frames) {
+                return;
+            }
+            // A key frame the host refused still decodes, in software.
+            if key {
+                self.choose_vp9_route(frames, slots);
+            }
+        }
+        if self.vp9_route == Vp9Route::SoftwareFromKey {
+            frames.surfaces.remove(&slots[3]);
+            if enabled(Trace::Video) {
+                crate::traceln!(
+                    "[video] nvdec VP9 frame {} dropped until the next key frame",
+                    self.executes
+                );
+            }
+            return;
+        }
+
+        let refs = [0, 1, 2].map(|i| frames.surfaces.get(&slots[i]).cloned());
         match self.vp9.decode(&setup, &bitstream, &probs, refs) {
             Ok(frame) => {
-                surfaces.insert(slots[3], frame);
+                frames.surfaces.insert(slots[3], frame);
             }
             Err(e) => {
                 if enabled(Trace::Video) {
@@ -628,6 +716,118 @@ impl MmChannel {
                         "[video] nvdec VP9 frame {} not decoded: {e:?}",
                         self.executes
                     );
+                }
+            }
+        }
+    }
+
+    /// At a key frame: a new stream goes to the host's decoder if there is one, and one the
+    /// host gave up on goes to the software decoder from here.
+    fn choose_vp9_route(&mut self, frames: &mut Frames, slots: [u64; 4]) {
+        match self.vp9_route {
+            Vp9Route::Undecided => match frames.vp9_host.make() {
+                Some(decoder) => {
+                    self.vp9_host = Some(Vp9Host {
+                        decoder,
+                        rebuilder: Default::default(),
+                        in_flight: HashSet::new(),
+                    });
+                    self.vp9_route = Vp9Route::Host;
+                    crate::trace::emit_at(
+                        Level::Info,
+                        &format!(
+                            "[video] a VP9 stream goes to the host's decoder from frame {}, \
+                             surfaces {slots:x?}",
+                            self.executes
+                        ),
+                    );
+                }
+                None => {
+                    self.vp9_route = Vp9Route::Software;
+                    crate::trace::emit_at(
+                        Level::Info,
+                        "[video] a VP9 stream decodes in software: the host has no VP9 decoder",
+                    );
+                }
+            },
+            Vp9Route::SoftwareFromKey => {
+                if let Some(host) = self.vp9_host.take() {
+                    for surface in host.in_flight {
+                        frames.pending.remove(&surface);
+                    }
+                }
+                self.vp9.reset();
+                self.vp9_route = Vp9Route::Software;
+            }
+            Vp9Route::Host | Vp9Route::Software => {}
+        }
+    }
+
+    /// Rebuilds the frame for the host's decoder and hands it over; false if it cannot go there.
+    fn send_vp9(
+        &mut self,
+        mut picture: vp9::nvdec::PicSetup,
+        bitstream: &[u8],
+        probs: &[u8],
+        slots: [u64; 4],
+        frames: &mut Frames,
+    ) -> bool {
+        let Some(host) = &mut self.vp9_host else {
+            return false;
+        };
+        vp9::nvdec::read_segmentation_probs(&mut picture.seg, probs);
+        let fc = vp9::nvdec::parse_prob_table(probs);
+        let tiles = &bitstream[..(picture.bitstream_size as usize).min(bitstream.len())];
+        frames.surfaces.remove(&slots[3]);
+        match host.rebuilder.frame(&picture, &fc, tiles, slots) {
+            Ok(chunk) => {
+                frames.pending.insert(slots[3], 0);
+                host.in_flight.insert(slots[3]);
+                host.decoder.decode(slots[3], &chunk.data, chunk.key);
+                true
+            }
+            Err(why) => {
+                crate::trace::emit_at(
+                    Level::Warn,
+                    &format!(
+                        "[video] nvdec VP9 frame {} cannot go to the host decoder: {why} \
+                         (surfaces {slots:x?}, the host's slots {:x?}); the software decoder \
+                         takes the next key frame",
+                        self.executes,
+                        host.rebuilder.slots()
+                    ),
+                );
+                self.vp9_route = Vp9Route::SoftwareFromKey;
+                false
+            }
+        }
+    }
+
+    /// Keeps the VP9 pictures the host's decoder has handed back. One it could not decode ends
+    /// the stream's time there.
+    fn land_vp9(&mut self, frames: &mut Frames) {
+        let Some(host) = &mut self.vp9_host else {
+            return;
+        };
+        for (surface, frame) in host.decoder.take() {
+            host.in_flight.remove(&surface);
+            frames.pending.remove(&surface);
+            match frame {
+                Some(frame) => {
+                    frames.surfaces.insert(surface, Arc::new(frame));
+                }
+                None => {
+                    frames.surfaces.remove(&surface);
+                    if self.vp9_route == Vp9Route::Host {
+                        crate::trace::emit_at(
+                            Level::Warn,
+                            &format!(
+                                "[video] the host decoder lost the VP9 picture for surface \
+                                 {surface:#x}; the software decoder takes the next key frame"
+                            ),
+                        );
+                        self.vp9_route = Vp9Route::SoftwareFromKey;
+                    }
                 }
             }
         }
@@ -643,6 +843,7 @@ impl MmChannel {
             pending,
             surfaces,
             parameter_sets,
+            ..
         } = frames
         else {
             return;
@@ -1021,7 +1222,7 @@ mod tests {
         ready: Shared<(u64, Option<vp9::Frame>)>,
     }
 
-    impl H264Decoder for Deferred {
+    impl HostDecoder for Deferred {
         fn decode(&mut self, surface: u64, access_unit: &[u8], key: bool) {
             self.given
                 .borrow_mut()
@@ -1172,6 +1373,140 @@ mod tests {
         assert_eq!(submitted, Submitted::Done);
         assert_eq!(fence, 1, "the wait reserved no increment");
         assert_eq!(mem.read_u8(u64::from(OUTPUT)).unwrap(), 0x5a);
+    }
+
+    /// A VP9 stream goes to the host's decoder from its first key frame, VIC waiting for each
+    /// picture. Once the host loses one, frames are dropped until the software decoder takes the
+    /// next key frame.
+    #[test]
+    fn a_vp9_stream_goes_to_the_host_until_it_loses_a_picture() {
+        const BASE: u32 = 0x1000_0000;
+        const SETUP: u32 = BASE + 0x1000;
+        const BITSTREAM: u32 = BASE + 0x2000;
+        const PROBS: u32 = BASE + 0x3000;
+        const CONFIG: u32 = BASE + 0x5000;
+        const OUTPUT: u32 = BASE + 0x6000;
+        const KEY: u32 = 1;
+        const LAST_SHOWN: u32 = 1 << 4;
+        // Each surface by its method word and by the memory it names, which keys the picture.
+        let surface = |i: u32| (BASE + 0x8000 + i * 0x1000) >> 8;
+        let memory_of = |i: u32| u64::from(BASE + 0x8000 + i * 0x1000);
+        let mem = Memory::new();
+        mem.map_zero(u64::from(BASE), 0x10000).unwrap();
+        let mut nvmap = NvMap::new();
+        let handle = nvmap.create(0x10000);
+        nvmap
+            .alloc(handle, 0, 0, 0x10000, 0, u64::from(BASE))
+            .unwrap();
+        let mut host1x = Host1x::new();
+        let mut video = Video::default();
+        let decoder = Deferred::default();
+        let (given, ready) = (decoder.given.clone(), decoder.ready.clone());
+        let mut handed = Some(decoder);
+        video.set_vp9(move || handed.take().map(|d| Box::new(d) as Box<dyn HostDecoder>));
+        let nvdec = video.open(Engine::Nvdec, &mut host1x).unwrap();
+        let vic = video.open(Engine::Vic, &mut host1x).unwrap();
+        let memory = (&mem, &nvmap, handle);
+
+        // A 64x64 frame at quantizer 60 with 32x32 transforms; any tile data decodes in software.
+        let tiles = [0u8; 64];
+        mem.write_bytes(u64::from(BITSTREAM), &tiles).unwrap();
+        mem.write_bytes(u64::from(PROBS), &vp9::nvdec::default_prob_table())
+            .unwrap();
+        let decode = |video: &mut Video, host1x: &mut Host1x, flags: u32, refs: u32, target| {
+            for (at, value) in [
+                (0x30, tiles.len() as u32),
+                (0x48, 64 | 64 << 16),
+                (0x60, 64 | 64 << 16),
+                (0x68, flags),
+                (0x70, 60 << 16),
+                (0x74, 3 << 24),
+            ] {
+                mem.write_u32(u64::from(SETUP + at), value).unwrap();
+            }
+            let syncpt = video.channel(nvdec).unwrap().syncpt;
+            let stream = method_stream(
+                &[
+                    (NVDEC_SET_APPLICATION_ID, NVDEC_CODEC_VP9),
+                    (NVDEC_SET_DRV_PIC_SETUP_OFFSET, SETUP >> 8),
+                    (NVDEC_SET_IN_BUF_BASE_OFFSET, BITSTREAM >> 8),
+                    (NVDEC_VP9_SET_PROB_TAB_BUF_OFFSET, PROBS >> 8),
+                    (NVDEC_SET_PICTURE_LUMA_OFFSET, refs),
+                    (NVDEC_SET_PICTURE_LUMA_OFFSET + 1, refs),
+                    (NVDEC_SET_PICTURE_LUMA_OFFSET + 2, refs),
+                    (NVDEC_SET_PICTURE_LUMA_OFFSET + 3, target),
+                    (NVDEC_EXECUTE, 0x100),
+                ],
+                syncpt,
+            );
+            submit_stream(video, nvdec, &stream, memory, host1x).0
+        };
+
+        assert_eq!(
+            decode(&mut video, &mut host1x, KEY, 0, surface(0)),
+            Submitted::Done
+        );
+        {
+            let given = given.borrow();
+            let [(at, chunk, key)] = given.as_slice() else {
+                panic!("{} frames reached the host", given.len());
+            };
+            assert_eq!((*at, *key), (memory_of(0), true));
+            assert!(chunk.ends_with(&tiles), "the tiles behind rebuilt headers");
+        }
+
+        mem.write_u32(
+            u64::from(CONFIG + VIC_CONFIG_OUTPUT_SURFACE),
+            VIC_PIXEL_FORMAT_NV12,
+        )
+        .unwrap();
+        mem.write_u32(
+            u64::from(CONFIG + VIC_CONFIG_OUTPUT_SURFACE + 8),
+            63 | 63 << 14,
+        )
+        .unwrap();
+        let syncpt = video.channel(vic).unwrap().syncpt;
+        let compose = method_stream(
+            &[
+                (VIC_SET_CONFIG_STRUCT_OFFSET, CONFIG >> 8),
+                (VIC_SLOT0_LUMA_OFFSET, surface(0)),
+                (VIC_SET_OUTPUT_LUMA_OFFSET, OUTPUT >> 8),
+                (VIC_SET_OUTPUT_CHROMA_OFFSET, (OUTPUT + 0x1000) >> 8),
+                (VIC_EXECUTE, 0),
+            ],
+            syncpt,
+        );
+        assert_eq!(
+            submit_stream(&mut video, vic, &compose, memory, &mut host1x).0,
+            Submitted::Waiting
+        );
+        let mut frame = vp9::Frame::new(64, 64);
+        frame.planes[0].data[0] = 0x5a;
+        ready.borrow_mut().push((memory_of(0), Some(frame)));
+        assert_eq!(
+            submit_stream(&mut video, vic, &compose, memory, &mut host1x).0,
+            Submitted::Done
+        );
+        assert_eq!(mem.read_u8(u64::from(OUTPUT)).unwrap(), 0x5a);
+
+        decode(&mut video, &mut host1x, LAST_SHOWN, surface(0), surface(1));
+        assert_eq!(given.borrow().len(), 2);
+        assert!(!given.borrow()[1].2, "an inter frame");
+        ready.borrow_mut().push((memory_of(1), None));
+
+        decode(&mut video, &mut host1x, LAST_SHOWN, surface(1), surface(2));
+        assert_eq!(given.borrow().len(), 2, "nothing more goes to the host");
+        assert!(!video.frames.surfaces.contains_key(&memory_of(2)));
+
+        decode(&mut video, &mut host1x, KEY, 0, surface(3));
+        assert_eq!(given.borrow().len(), 2);
+        let decoded = video
+            .frames
+            .surfaces
+            .get(&memory_of(3))
+            .expect("decoded in software");
+        assert_eq!((decoded.width, decoded.height), (64, 64));
+        assert!(video.frames.pending.is_empty());
     }
 
     /// A title above 4 GiB has its buffers mapped into the window for each submit, so one device

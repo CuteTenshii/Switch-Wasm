@@ -38,4 +38,4 @@ Each stage builds, passes `cargo test --workspace` and clippy, keeps every title
 
 - Mario Kart 8 Deluxe's menu movie still shows black: its H.264 pictures decode, VIC composes them and the title copies each frame into a texture at `0x204490000`, but no draw samples that texture.
 - H.264 with Chrome's software decoder drops pictures that arrive out of display order, since the rebuilt SPS asks for no reordering (`docs/video.md`).
-- JD2022's intro video decodes and plays; see `docs/video.md` for what is still missing: counter output for streams that adapt probabilities, nvdec surfaces in guest memory, VIC pitch alignment, and VP9 decoder speed in the browser.
+- JD2022's intro video decodes and plays; see `docs/video.md` for what is still missing: counter output for streams that adapt probabilities (which also cannot go to the browser's decoder, so they decode in software), nvdec surfaces in guest memory, and VIC pitch alignment.

@@ -1,6 +1,6 @@
 # Video decoding
 
-Titles decode video on the console's nvdec engine and hand the frames to VIC. `gpu/multimedia.rs` models both; `vp9/` is the VP9 decoder behind nvdec, and H.264 (codec 3) goes to the browser's decoder (`gpu/h264.rs`, `switch-wasm/src/video.rs`). Other codecs, and H.264 in a native build, only retire their syncpoints.
+Titles decode video on the console's nvdec engine and hand the frames to VIC. `gpu/multimedia.rs` models both. VP9 (codec 9) goes to the browser's decoder as frames rebuilt from what nvdec is given (`vp9/rebuild.rs`), with `vp9/` as the software decoder where the browser has none or gives up; H.264 (codec 3) goes to the browser's decoder (`gpu/h264.rs`). Both browser decoders are `WebDecoder` in `switch-wasm/src/video.rs`. Other codecs, and H.264 in a native build, only retire their syncpoints.
 
 ## The decoder
 
@@ -29,13 +29,26 @@ An `EXECUTE` (method 0xC0) with codec 9 in method 0x80 decodes one frame. The dr
 
 The decoded frame is kept by its slot 3 luma plane in `Video::surfaces`; nothing is written to the surface itself.
 
+## VP9 on the browser's decoder
+
+nvdec gets the tiles alone, so `vp9::rebuild::Rebuilder` writes each frame's uncompressed and compressed headers back from the picture setup and the probability table, and the browser decodes the result (`vp09.00.61.08`, no hardware preference: libvpx in Chrome where there is no hardware decoder). A channel picks the browser at its first key frame if `VideoDecoder.isConfigSupported` said yes at startup, and the software decoder otherwise.
+
+- The rebuilt stream never saves a probability context (`refresh_frame_context` 0), so the browser's saved contexts stay at their defaults and each compressed header codes the table as updates from them. No update reaches the chroma mode probabilities, which only backward adaptation moves, or an even motion vector probability (updates are seven bits, `v << 1 | 1`). A stream that adapts its probabilities makes both, and such a frame is refused.
+- Loop filter deltas and segmentation features are sent in full every frame, so no frame depends on what an earlier rebuilt one left behind.
+- The browser has eight reference slots where nvdec names surfaces. The rebuilder keeps the surface in each slot; a frame refreshes the slots still holding the surface it overwrites, or else the least recently used slot none of its references is in.
+- Every frame is shown, hidden ones included, so its picture comes back for its surface. That changes one thing in the decoder's state: it predicts from the previous frame's motion vectors only when that frame was shown. When the setup says the previous frame was hidden and the browser would predict from it, a filler goes first in a superframe: a hidden inter frame whose all-zero tile data decodes to DC blocks with no coefficients, refreshing no slot.
+- An intra-only frame can only be hidden. It goes hidden, with a `show_existing_frame` of its slot behind it in the same superframe.
+- A frame the rebuilder refuses, or a picture the browser hands back as `None`, ends the stream's time in the browser. Frames are dropped until the next key frame, which the software decoder takes after `Channel::reset`, and keeps from then on.
+- `cargo run --release -p switch-core --example vp9_rebuild_check -- <dir> [--out <dir>]` hands every frame of each `x.ivf` to the rebuilder as nvdec would get it and compares each rebuilt picture, hidden ones included, with the original's. `--out` writes `x.rebuilt.ivf` and the `x.rebuilt.yuv` it must decode to; `vpxdec --i420` and `node tools/vp9_webcodecs_check.mjs <dir>` (Chromium's WebCodecs) decode them to the same bytes. The clips, from vpxenc, covered altref frames, tiles, cyclic-refresh and variance segmentation, compound prediction, error-resilient and lossless streams and odd sizes. One without frame-parallel mode was refused at its first frame whose chroma mode probabilities had adapted.
+- Not checked: intra-only frames against libvpx (vpxenc writes none; the unit tests decode them with `vp9/`), and a hardware VP9 decoder (Playwright's Chromium decodes in software).
+
 ## H.264
 
 The driver keeps a stream's parameter sets and gives nvdec only slice data: Annex B slices with their start codes, then two end-of-stream units, `stream_len` covering both, and the picture setup (`nvdec_h264_pic_s` in NVIDIA's `nvdec_drv.h`, whose offsets match Mario Kart 8 Deluxe's setups). The decoded picture's surface is picture index `CurrPicIdx`'s luma address (method `0x10c + i`).
 
 - `h264::parameter_sets` writes an SPS and PPS back from the setup: High profile at level 5.1, the PPS numbered as the first slice asks, scaling matrices in the PPS when they are not flat. What the setup does not carry is set to what any stream allows: 16 reference frames, no cropping. Picture order count type 1 keeps its cycle in the SPS alone and is refused.
 - The SPS's VUI asks for no reordering (`max_num_reorder_frames` 0). Chrome's hardware decoder then hands every picture back as soon as it is decoded, in decode order and with the same bytes; nvdec writes each picture to its surface at once, so the order does not matter. Without it the decoder held up to four pictures for display order.
-- The browser's decoder (`WebH264`, WebCodecs on the system worker, which runs every SVC) is asynchronous, so a picture lands between slices. A VIC submit whose slot 0 surface is still decoding is asked again (`Submitted::Waiting`, the ioctl retried 1 ms later), before it reserves any syncpoint, and composes without it after 1000 asks.
+- The browser's decoder (`WebDecoder`, WebCodecs on the system worker, which runs every SVC) is asynchronous, so a picture lands between slices. A VIC submit whose slot 0 surface is still decoding is asked again (`Submitted::Waiting`, the ioctl retried 1 ms later), before it reserves any syncpoint, and composes without it after 1000 asks.
 - `~/Perso/nvdec-h264` (outside the repository) is a homebrew that drives nvdec and VIC as a title's driver does over an x264 clip with CABAC, 8x8 transforms and B-frames, and prints a hash of each composed frame's planes. In Chrome all 24 match ffmpeg's decode.
 - Chrome's software decoder (ffmpeg, where there is no hardware H.264) takes no reordering literally and drops pictures that arrive out of display order: half of the test clip's.
 
