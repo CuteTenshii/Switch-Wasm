@@ -15,56 +15,7 @@ impl Emitter<'_> {
     /// Everything that is not control flow.
     pub(super) fn emit_alu(&mut self, at: usize, op: Op) -> Result<(), Unsupported> {
         match op {
-            // ---- attribute space ----
-            Op::Ld {
-                dst,
-                offset,
-                idx,
-                size,
-            } => {
-                self.loads.extend(generic_slot(offset));
-                let base = self.attr_base(offset, idx);
-                for i in 0..size.regs() {
-                    let word = i as u32 * 4;
-                    self.set_f(dst.wrapping_add(i), &format!("attrIn({base} + {word}u)"));
-                }
-            }
-            Op::St {
-                offset,
-                idx,
-                src,
-                size,
-            } => {
-                self.stores.extend(varying_slot(offset));
-                let base = self.attr_base(offset, idx);
-                for i in 0..size.regs() {
-                    let word = i as u32 * 4;
-                    let value = self.f(src.wrapping_add(i));
-                    self.line(&format!("attrOut({base} + {word}u, {value});"));
-                }
-            }
-            Op::Ipa {
-                dst,
-                offset,
-                mul,
-                perspective,
-                sat,
-                centroid,
-            } => {
-                self.loads.extend(varying_slot(offset));
-                if centroid {
-                    self.centroid_loads.extend(varying_slot(offset));
-                }
-                let mut value = format!("attrIn({offset}u)");
-                if perspective {
-                    if let Some(mul) = mul {
-                        let factor = self.f(mul);
-                        value = format!("({value} * {factor})");
-                    }
-                }
-                let value = self.saturate(sat, value);
-                self.set_f(dst, &value);
-            }
+            Op::Ld { .. } | Op::St { .. } | Op::Ipa { .. } => self.emit_attribute(op),
 
             Op::Fcmp { .. }
             | Op::Rro { .. }
@@ -121,30 +72,145 @@ impl Emitter<'_> {
             | Op::Csetp { .. }
             | Op::Cset { .. } => self.emit_conversion(at, op)?,
 
-            // ---- memory ----
-            Op::Ldc {
+            Op::Ldc { .. } => self.emit_constant_load(op),
+
+            Op::Texs { .. }
+            | Op::Tlds { .. }
+            | Op::Tld { .. }
+            | Op::Tex { .. }
+            | Op::Tmml { .. }
+            | Op::Txq { .. }
+            | Op::Tld4 { .. }
+            | Op::Tld4s { .. } => self.emit_texture_op(at, op)?,
+
+            Op::Shfl { .. } | Op::Fswzadd { .. } | Op::Vote { .. } => self.emit_lane(at, op),
+
+            Op::Nop | Op::Inert => {}
+
+            Op::Ldg { .. } | Op::Stg { .. } | Op::Atom { .. } => self.emit_global(at, op)?,
+            Op::Ldl { .. } | Op::Stl { .. } => self.emit_local(op),
+            Op::Sust { .. } | Op::Sured { .. } => self.emit_surface(at, op)?,
+
+            Op::Lds { .. }
+            | Op::Sts { .. }
+            | Op::Bar { .. }
+            | Op::Suld { .. }
+            | Op::Unimplemented { .. } => return Err(Unsupported::Op { at, op }),
+
+            // Handled by `emit_terminator` and `emit_instruction`.
+            Op::Bra { .. }
+            | Op::Brx { .. }
+            | Op::Ssy { .. }
+            | Op::Pbk { .. }
+            | Op::Pcnt { .. }
+            | Op::Sync
+            | Op::Brk
+            | Op::Cont
+            | Op::Exit
+            | Op::Kil => unreachable!("control flow is emitted by emit_instruction"),
+        }
+        Ok(())
+    }
+
+    /// Attribute space: `ld`, `st` and `ipa`.
+    fn emit_attribute(&mut self, op: Op) {
+        match op {
+            Op::Ld {
                 dst,
-                bank,
                 offset,
                 idx,
                 size,
             } => {
-                self.note_bank(
-                    bank,
-                    (idx == RZ).then(|| offset as u32 + size.regs() as u32 * 4),
-                );
-                let index = self.r(idx);
-                let base = self.bind(&format!("{}u + {index}", offset as u32));
+                self.loads.extend(generic_slot(offset));
+                let base = self.attr_base(offset, idx);
                 for i in 0..size.regs() {
                     let word = i as u32 * 4;
-                    self.set_r(
-                        dst.wrapping_add(i),
-                        &format!("cbRead({bank}u, ({base} + {word}u) & 0xffffu)"),
-                    );
+                    self.set_f(dst.wrapping_add(i), &format!("attrIn({base} + {word}u)"));
                 }
             }
+            Op::St {
+                offset,
+                idx,
+                src,
+                size,
+            } => {
+                self.stores.extend(varying_slot(offset));
+                let base = self.attr_base(offset, idx);
+                for i in 0..size.regs() {
+                    let word = i as u32 * 4;
+                    let value = self.f(src.wrapping_add(i));
+                    self.line(&format!("attrOut({base} + {word}u, {value});"));
+                }
+            }
+            Op::Ipa {
+                dst,
+                offset,
+                mul,
+                perspective,
+                sat,
+                centroid,
+            } => {
+                self.loads.extend(varying_slot(offset));
+                if centroid {
+                    self.centroid_loads.extend(varying_slot(offset));
+                }
+                let mut value = format!("attrIn({offset}u)");
+                if perspective {
+                    if let Some(mul) = mul {
+                        let factor = self.f(mul);
+                        value = format!("({value} * {factor})");
+                    }
+                }
+                let value = self.saturate(sat, value);
+                self.set_f(dst, &value);
+            }
+            _ => unreachable!("emit_alu sorts ops by group"),
+        }
+    }
 
-            // ---- texture ----
+    fn emit_constant_load(&mut self, op: Op) {
+        let Op::Ldc {
+            dst,
+            bank,
+            offset,
+            idx,
+            size,
+        } = op
+        else {
+            unreachable!("emit_alu sorts ops by group")
+        };
+        self.note_bank(
+            bank,
+            (idx == RZ).then(|| offset as u32 + size.regs() as u32 * 4),
+        );
+        let index = self.r(idx);
+        let base = self.bind(&format!("{}u + {index}", offset as u32));
+        for i in 0..size.regs() {
+            let word = i as u32 * 4;
+            self.set_r(
+                dst.wrapping_add(i),
+                &format!("cbRead({bank}u, ({base} + {word}u) & 0xffffu)"),
+            );
+        }
+    }
+
+    /// The slot a texture instruction names: its immediate, or a bindless handle's.
+    fn texture_slot(
+        &mut self,
+        at: usize,
+        handle: u16,
+        handle_reg: Option<u8>,
+    ) -> Result<TextureSlot, Unsupported> {
+        match handle_reg {
+            None => Ok(TextureSlot::Bound(handle)),
+            Some(reg) => self
+                .bindless_slot(at, reg)
+                .ok_or(Unsupported::UntracedHandle { at }),
+        }
+    }
+
+    fn emit_texture_op(&mut self, at: usize, op: Op) -> Result<(), Unsupported> {
+        match op {
             // A `texs` array keeps its layer in the third coordinate register.
             Op::Texs {
                 coords,
@@ -199,12 +265,7 @@ impl Emitter<'_> {
                 {
                     return Err(Unsupported::Op { at, op });
                 }
-                let slot = match handle_reg {
-                    None => TextureSlot::Bound(handle),
-                    Some(reg) => self
-                        .bindless_slot(at, reg)
-                        .ok_or(Unsupported::UntracedHandle { at })?,
-                };
+                let slot = self.texture_slot(at, handle, handle_reg)?;
                 let fetch = Fetch {
                     slot,
                     dim,
@@ -227,12 +288,7 @@ impl Emitter<'_> {
                 dim,
                 ..
             } => {
-                let slot = match handle_reg {
-                    None => TextureSlot::Bound(handle),
-                    Some(reg) => self
-                        .bindless_slot(at, reg)
-                        .ok_or(Unsupported::UntracedHandle { at })?,
-                };
+                let slot = self.texture_slot(at, handle, handle_reg)?;
                 match offset {
                     None => self.sample_texture(at, slot, dim, dref, coords, layer)?,
                     Some(reg) => {
@@ -247,12 +303,7 @@ impl Emitter<'_> {
                 handle_reg,
                 ..
             } => {
-                let slot = match handle_reg {
-                    None => TextureSlot::Bound(handle),
-                    Some(reg) => self
-                        .bindless_slot(at, reg)
-                        .ok_or(Unsupported::UntracedHandle { at })?,
-                };
+                let slot = self.texture_slot(at, handle, handle_reg)?;
                 self.query_texture(at, slot, lod);
             }
             Op::Tld4 {
@@ -268,12 +319,7 @@ impl Emitter<'_> {
                 component,
                 ..
             } => {
-                let slot = match handle_reg {
-                    None => TextureSlot::Bound(handle),
-                    Some(reg) => self
-                        .bindless_slot(at, reg)
-                        .ok_or(Unsupported::UntracedHandle { at })?,
-                };
+                let slot = self.texture_slot(at, handle, handle_reg)?;
                 self.set_p(sparse, "false");
                 self.gather_texture(
                     at,
@@ -310,67 +356,15 @@ impl Emitter<'_> {
                     component,
                 },
             )?,
+            _ => unreachable!("emit_alu sorts ops by group"),
+        }
+        Ok(())
+    }
 
-            // `shfl` maps onto `quadSwapX`/`Y`/`Diagonal`, mirroring `interp::shuffle_source`.
-            Op::Shfl {
-                dst,
-                pred,
-                src,
-                index,
-                mask,
-                mode,
-            } => {
-                let value = self.r(src);
-                let here = self.bind(&value);
-                let lane = if self.warp_caps {
-                    self.warp.get_or_insert(at);
-                    self.bind("i32(sr_lane)")
-                } else {
-                    self.quad.get_or_insert(at);
-                    self.quad_swap.get_or_insert(at);
-                    self.bind("i32(quadLane())")
-                };
-                let index = self.operand(index);
-                let index = self.bind(&format!("i32({index})"));
-                let mask = self.operand(mask);
-                let mask = self.bind(&format!("i32({mask})"));
-                let clamp = self.bind(&format!("({mask} & 31)"));
-                let segment = self.bind(&format!("(({mask} >> 8) & 31)"));
-                let floor = self.bind(&format!("({lane} & {segment})"));
-                let ceiling = self.bind(&format!("({floor} | ({clamp} & ~{segment}))"));
-                let from = match mode {
-                    ShflMode::Idx => format!("(({index} & ~{segment}) | {floor})"),
-                    ShflMode::Up => format!("({lane} - {index})"),
-                    ShflMode::Down => format!("({lane} + {index})"),
-                    ShflMode::Bfly => format!("({lane} ^ {index})"),
-                };
-                let from = self.bind(&from);
-                // `up` is the one mode whose bound holds from below.
-                let within = match mode {
-                    ShflMode::Up => format!("({from} >= {ceiling})"),
-                    _ => format!("({from} <= {ceiling})"),
-                };
-                let ok = self.bind(&format!("({within} && {from} >= 0)"));
-                if self.warp_caps {
-                    let peer = self.bind(&format!(
-                        "subgroupShuffle({here}, u32(clamp({from}, 0, 31)))"
-                    ));
-                    self.set_r(dst, &format!("select({here}, {peer}, {ok})"));
-                    self.set_p(pred, &ok);
-                    return Ok(());
-                }
-                let x = self.bind(&format!("quadSwapX({here})"));
-                let y = self.bind(&format!("quadSwapY({here})"));
-                let d = self.bind(&format!("quadSwapDiagonal({here})"));
-                let sel = self.bind(&format!("u32(({from} ^ {lane}) & 3)"));
-                let peer = format!(
-                    "select(select(select({here}, {x}, {sel} == 1u), {y}, {sel} == 2u), {d}, {sel} == 3u)"
-                );
-                // Out-of-quad lanes keep their own value.
-                let reachable = format!("({ok} && {from} < 4)");
-                self.set_r(dst, &format!("select({here}, {peer}, {reachable})"));
-                self.set_p(pred, &ok);
-            }
+    /// Instructions that see other lanes of the warp, or this lane's place in it.
+    fn emit_lane(&mut self, at: usize, op: Op) {
+        match op {
+            Op::Shfl { .. } => self.emit_shfl(at, op),
 
             // `fswzadd` needs only this lane's index, not another lane's value: in a warp, its place in its quad.
             Op::Fswzadd {
@@ -447,11 +441,79 @@ impl Emitter<'_> {
                 self.set_r(dst, &ballot);
                 self.set_p(pred, &format!("({verdict})"));
             }
+            _ => unreachable!("emit_alu sorts ops by group"),
+        }
+    }
 
-            Op::Nop | Op::Inert => {}
+    /// `shfl` maps onto `quadSwapX`/`Y`/`Diagonal`, mirroring `interp::shuffle_source`.
+    fn emit_shfl(&mut self, at: usize, op: Op) {
+        let Op::Shfl {
+            dst,
+            pred,
+            src,
+            index,
+            mask,
+            mode,
+        } = op
+        else {
+            unreachable!("emit_lane sorts ops by kind")
+        };
+        let value = self.r(src);
+        let here = self.bind(&value);
+        let lane = if self.warp_caps {
+            self.warp.get_or_insert(at);
+            self.bind("i32(sr_lane)")
+        } else {
+            self.quad.get_or_insert(at);
+            self.quad_swap.get_or_insert(at);
+            self.bind("i32(quadLane())")
+        };
+        let index = self.operand(index);
+        let index = self.bind(&format!("i32({index})"));
+        let mask = self.operand(mask);
+        let mask = self.bind(&format!("i32({mask})"));
+        let clamp = self.bind(&format!("({mask} & 31)"));
+        let segment = self.bind(&format!("(({mask} >> 8) & 31)"));
+        let floor = self.bind(&format!("({lane} & {segment})"));
+        let ceiling = self.bind(&format!("({floor} | ({clamp} & ~{segment}))"));
+        let from = match mode {
+            ShflMode::Idx => format!("(({index} & ~{segment}) | {floor})"),
+            ShflMode::Up => format!("({lane} - {index})"),
+            ShflMode::Down => format!("({lane} + {index})"),
+            ShflMode::Bfly => format!("({lane} ^ {index})"),
+        };
+        let from = self.bind(&from);
+        // `up` is the one mode whose bound holds from below.
+        let within = match mode {
+            ShflMode::Up => format!("({from} >= {ceiling})"),
+            _ => format!("({from} <= {ceiling})"),
+        };
+        let ok = self.bind(&format!("({within} && {from} >= 0)"));
+        if self.warp_caps {
+            let peer = self.bind(&format!(
+                "subgroupShuffle({here}, u32(clamp({from}, 0, 31)))"
+            ));
+            self.set_r(dst, &format!("select({here}, {peer}, {ok})"));
+            self.set_p(pred, &ok);
+            return;
+        }
+        let x = self.bind(&format!("quadSwapX({here})"));
+        let y = self.bind(&format!("quadSwapY({here})"));
+        let d = self.bind(&format!("quadSwapDiagonal({here})"));
+        let sel = self.bind(&format!("u32(({from} ^ {lane}) & 3)"));
+        let peer = format!(
+            "select(select(select({here}, {x}, {sel} == 1u), {y}, {sel} == 2u), {d}, {sel} == 3u)"
+        );
+        // Out-of-quad lanes keep their own value.
+        let reachable = format!("({ok} && {from} < 4)");
+        self.set_r(dst, &format!("select({here}, {peer}, {reachable})"));
+        self.set_p(pred, &ok);
+    }
 
-            // Global memory is reachable only through a constant bank descriptor, which
-            // binds a buffer; shared memory and barriers have no compute stage to run in.
+    /// Global memory is reachable only through a constant bank descriptor, which
+    /// binds a buffer; shared memory and barriers have no compute stage to run in.
+    fn emit_global(&mut self, at: usize, op: Op) -> Result<(), Unsupported> {
+        match op {
             Op::Ldg {
                 dst,
                 addr,
@@ -556,7 +618,14 @@ impl Emitter<'_> {
                     self.set_r(dst, &call);
                 }
             }
+            Op::Atom { .. } => return Err(Unsupported::Op { at, op }),
+            _ => unreachable!("emit_alu sorts ops by group"),
+        }
+        Ok(())
+    }
 
+    fn emit_local(&mut self, op: Op) {
+        match op {
             Op::Ldl {
                 dst,
                 addr,
@@ -615,6 +684,12 @@ impl Emitter<'_> {
                 self.indent -= 1;
                 self.line("}");
             }
+            _ => unreachable!("emit_alu sorts ops by group"),
+        }
+    }
+
+    fn emit_surface(&mut self, at: usize, op: Op) -> Result<(), Unsupported> {
+        match op {
             // A store outside the image is dropped, as the interpreter drops it.
             Op::Sust {
                 src,
@@ -624,12 +699,7 @@ impl Emitter<'_> {
                 dim: dim @ (SurfaceDim::D2 | SurfaceDim::Array2d),
                 data: SurfaceData::Formatted([true, true, true, true]),
             } => {
-                let slot = match handle_reg {
-                    Some(reg) => self
-                        .bindless_slot(at, reg)
-                        .ok_or(Unsupported::UntracedHandle { at })?,
-                    None => TextureSlot::Bound(handle),
-                };
+                let slot = self.texture_slot(at, handle, handle_reg)?;
                 self.bind_image(at, slot)?;
                 let (x, y) = (self.r(coords), self.r(coords.wrapping_add(1)));
                 let layer = match dim {
@@ -656,12 +726,7 @@ impl Emitter<'_> {
                 ty,
             } => {
                 let code = atom_code(reduce, ty).ok_or(Unsupported::Op { at, op })?;
-                let slot = match handle_reg {
-                    Some(reg) => self
-                        .bindless_slot(at, reg)
-                        .ok_or(Unsupported::UntracedHandle { at })?,
-                    None => TextureSlot::Bound(handle),
-                };
+                let slot = self.texture_slot(at, handle, handle_reg)?;
                 self.bind_image(at, slot)?;
                 if !self.reduced_images.contains(&slot) {
                     self.reduced_images.push(slot);
@@ -679,26 +744,8 @@ impl Emitter<'_> {
                     slot.key()
                 ));
             }
-            Op::Lds { .. }
-            | Op::Sts { .. }
-            | Op::Atom { .. }
-            | Op::Bar { .. }
-            | Op::Suld { .. }
-            | Op::Sust { .. }
-            | Op::Sured { .. }
-            | Op::Unimplemented { .. } => return Err(Unsupported::Op { at, op }),
-
-            // Handled by `emit_terminator` and `emit_instruction`.
-            Op::Bra { .. }
-            | Op::Brx { .. }
-            | Op::Ssy { .. }
-            | Op::Pbk { .. }
-            | Op::Pcnt { .. }
-            | Op::Sync
-            | Op::Brk
-            | Op::Cont
-            | Op::Exit
-            | Op::Kil => unreachable!("control flow is emitted by emit_instruction"),
+            Op::Sust { .. } | Op::Sured { .. } => return Err(Unsupported::Op { at, op }),
+            _ => unreachable!("emit_alu sorts ops by group"),
         }
         Ok(())
     }

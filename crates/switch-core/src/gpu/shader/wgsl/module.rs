@@ -83,6 +83,40 @@ pub fn module(
     layout: &Layout,
 ) -> Result<String, Unsupported> {
     let mut out = String::new();
+    check_stage(translated, stage, layout)?;
+    directives(&mut out, translated, stage);
+    let (stores, reductions) = bindings(&mut out, layout)?;
+    image_functions(&mut out, layout, &stores, &reductions);
+    global_functions(&mut out, layout);
+    attribute_and_constant_functions(&mut out, layout);
+    tex_sample(&mut out, layout)?;
+    tex_sample_compare(&mut out, layout)?;
+    tex_sample_offset(&mut out, layout)?;
+    tex_dims(&mut out, layout);
+    tex_step(&mut out, layout);
+    tex_gather(&mut out, layout);
+    tex_fetch_level(&mut out, layout);
+    tex_fetch(&mut out, layout);
+    tex_gather_compare(&mut out, layout);
+
+    out.push_str(&special_registers(
+        stage,
+        layout,
+        in_quad(translated, stage),
+    ));
+
+    out.push_str(&translated.source);
+    out.push('\n');
+    out.push_str(&match stage {
+        Stage::Vertex => vertex_entry(layout),
+        Stage::Fragment => fragment_entry(translated, layout),
+        Stage::Compute => compute_entry(layout, translated.warp.is_some()),
+    });
+    Ok(out)
+}
+
+/// What a stage cannot run, refused before anything is written.
+fn check_stage(translated: &Translation, stage: Stage, layout: &Layout) -> Result<(), Unsupported> {
     // A quad outside the fragment stage is unsupported.
     if let Some(at) = translated.quad {
         if stage != Stage::Fragment {
@@ -108,7 +142,11 @@ pub fn module(
             return Err(Unsupported::PackedSpecialRegister { sr });
         }
     }
-    // Directives first, then the lane index.
+    Ok(())
+}
+
+/// Directives first, then the lane index.
+fn directives(out: &mut String, translated: &Translation, stage: Stage) {
     if translated.warp.is_some() && translated.subgroup_enable {
         out.push_str("enable subgroups;\n\n");
     }
@@ -130,6 +168,10 @@ pub fn module(
         out.push_str(QUAD_SWAP);
         out.push_str("\n\n");
     }
+}
+
+/// Every binding's declaration, returning the `imgStore` and `imgReduce` cases their images need.
+fn bindings(out: &mut String, layout: &Layout) -> Result<(String, String), Unsupported> {
     if !layout.const_banks.is_empty() {
         out.push_str(&format!(
             "@group({}) @binding({CONSTANTS_BINDING}) var<storage, read> cbs: array<u32>;\n",
@@ -173,61 +215,25 @@ pub fn module(
             GLOBAL_BINDING + slot as u32
         ));
     }
-    // Each layer of an image is its own binding, so a store picks one by its layer; a layer
-    // past the image's is out of range.
+    let cases = image_bindings(out, layout)?;
+    if !layout.const_banks.is_empty()
+        || !layout.textures.is_empty()
+        || !layout.globals.is_empty()
+        || !layout.images.is_empty()
+    {
+        out.push('\n');
+    }
+    Ok(cases)
+}
+
+/// Each layer of an image is its own binding, so a store picks one by its layer; a layer
+/// past the image's is out of range.
+fn image_bindings(out: &mut String, layout: &Layout) -> Result<(String, String), Unsupported> {
     let mut stores = String::new();
     let mut reductions = String::new();
     for (index, image) in layout.images.iter().enumerate() {
         if let Some(words) = image.words {
-            let WordImage {
-                width,
-                height,
-                row_words,
-                pack,
-            } = words;
-            let word = match pack {
-                WordPack::Word => "value.x",
-                WordPack::Rg11b10 => "packRg11b10(bitcast<vec4<f32>>(value))",
-            };
-            let (mut layers, mut reduced) = (String::new(), String::new());
-            for layer in 0..image.layers {
-                let array = format!("img{index}_{layer}");
-                out.push_str(&format!(
-                    "@group({}) @binding({}) var<storage, read_write> {array}: array<atomic<u32>>;\n",
-                    layout.group,
-                    layout.image_binding(index, layer),
-                ));
-                let at = format!("y * {row_words}u + x");
-                layers.push_str(&format!(
-                    "        case {layer}u: {{ if (x < {width}u && y < {height}u) {{ \
-                     atomicStore(&{array}[{at}], {word}); }} }}\n"
-                ));
-                reduced.push_str(&format!(
-                    "        case {layer}u: {{\n          if (x < {width}u && y < {height}u) {{\n            \
-                     let word = {at};\n            switch (op) {{\n"
-                ));
-                for (code, (_, _, update)) in ATOMS.iter().enumerate() {
-                    match update {
-                        Update::Direct(function) => reduced.push_str(&format!(
-                            "              case {code}u: {{ {function}(&{array}[word], value); }}\n"
-                        )),
-                        Update::Loop(next) => reduced.push_str(&format!(
-                            "              case {code}u: {{\n{}              }}\n",
-                            compare_exchange(&array, "word", next, "                ")
-                        )),
-                    }
-                }
-                reduced.push_str(
-                    "              default: { }\n            }\n          }\n        }\n",
-                );
-            }
-            let key = image.slot.key();
-            stores.push_str(&format!(
-                "    case {key}u: {{\n      switch (layer) {{\n{layers}        default: {{ }}\n      }}\n    }}\n"
-            ));
-            reductions.push_str(&format!(
-                "    case {key}u: {{\n      switch (layer) {{\n{reduced}        default: {{ }}\n      }}\n    }}\n"
-            ));
+            word_image_binding(out, layout, index, words, &mut stores, &mut reductions);
             continue;
         }
         if image.reduced {
@@ -257,13 +263,70 @@ pub fn module(
             image.slot.key()
         ));
     }
-    if !layout.const_banks.is_empty()
-        || !layout.textures.is_empty()
-        || !layout.globals.is_empty()
-        || !layout.images.is_empty()
-    {
-        out.push('\n');
+    Ok((stores, reductions))
+}
+
+/// An image bound as a buffer of words: one array per layer, with its store and reduction cases.
+fn word_image_binding(
+    out: &mut String,
+    layout: &Layout,
+    index: usize,
+    words: WordImage,
+    stores: &mut String,
+    reductions: &mut String,
+) {
+    let image = &layout.images[index];
+    let WordImage {
+        width,
+        height,
+        row_words,
+        pack,
+    } = words;
+    let word = match pack {
+        WordPack::Word => "value.x",
+        WordPack::Rg11b10 => "packRg11b10(bitcast<vec4<f32>>(value))",
+    };
+    let (mut layers, mut reduced) = (String::new(), String::new());
+    for layer in 0..image.layers {
+        let array = format!("img{index}_{layer}");
+        out.push_str(&format!(
+            "@group({}) @binding({}) var<storage, read_write> {array}: array<atomic<u32>>;\n",
+            layout.group,
+            layout.image_binding(index, layer),
+        ));
+        let at = format!("y * {row_words}u + x");
+        layers.push_str(&format!(
+            "        case {layer}u: {{ if (x < {width}u && y < {height}u) {{ \
+             atomicStore(&{array}[{at}], {word}); }} }}\n"
+        ));
+        reduced.push_str(&format!(
+            "        case {layer}u: {{\n          if (x < {width}u && y < {height}u) {{\n            \
+             let word = {at};\n            switch (op) {{\n"
+        ));
+        for (code, (_, _, update)) in ATOMS.iter().enumerate() {
+            match update {
+                Update::Direct(function) => reduced.push_str(&format!(
+                    "              case {code}u: {{ {function}(&{array}[word], value); }}\n"
+                )),
+                Update::Loop(next) => reduced.push_str(&format!(
+                    "              case {code}u: {{\n{}              }}\n",
+                    compare_exchange(&array, "word", next, "                ")
+                )),
+            }
+        }
+        reduced.push_str("              default: { }\n            }\n          }\n        }\n");
     }
+    let key = image.slot.key();
+    stores.push_str(&format!(
+        "    case {key}u: {{\n      switch (layer) {{\n{layers}        default: {{ }}\n      }}\n    }}\n"
+    ));
+    reductions.push_str(&format!(
+        "    case {key}u: {{\n      switch (layer) {{\n{reduced}        default: {{ }}\n      }}\n    }}\n"
+    ));
+}
+
+/// `imgReduce` and `imgStore`, with the packing a word image needs.
+fn image_functions(out: &mut String, layout: &Layout, stores: &str, reductions: &str) {
     if layout
         .images
         .iter()
@@ -280,6 +343,10 @@ pub fn module(
         "fn imgStore(key: u32, x: u32, y: u32, layer: u32, value: vec4<u32>) {{\n  switch (key) {{\n{stores}    \
          default: {{ }}\n  }}\n}}\n\n"
     ));
+}
+
+/// `gRead`, and for written buffers `gWrite` and `gAtom`.
+fn global_functions(out: &mut String, layout: &Layout) {
     if !layout.globals.is_empty() {
         out.push_str("fn gRead(slot: u32, offset: u32) -> u32 {\n  let word = offset >> 2u;\n  switch (slot) {\n");
         for (slot, global) in layout.globals.iter().enumerate() {
@@ -341,7 +408,10 @@ pub fn module(
         // Out of range, or no such slot, changes nothing and reads zero.
         out.push_str("    default: { }\n  }\n  return 0u;\n}\n\n");
     }
+}
 
+/// Attribute space, `cbRead`, and `cropped` when a binding is cropped.
+fn attribute_and_constant_functions(out: &mut String, layout: &Layout) {
     // `a[]` in and out are separate so they do not alias.
     out.push_str(&format!(
         "var<private> attr_in: array<f32, {ATTRIBUTE_WORDS}>;\n"
@@ -375,8 +445,10 @@ pub fn module(
     if layout.textures.iter().any(|t| t.crop.is_some()) {
         out.push_str(CROPPED);
     }
+}
 
-    // `dim` is unused here but part of `HOST_INTERFACE`.
+/// `dim` is unused here but part of `HOST_INTERFACE`.
+fn tex_sample(out: &mut String, layout: &Layout) -> Result<(), Unsupported> {
     out.push_str(
         "fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32, w: f32) -> vec4<f32> {\n\
          \x20 switch (imm) {\n",
@@ -426,8 +498,11 @@ pub fn module(
         out.push_str(&format!("    case {key}u: {{ {body} }}\n"));
     }
     out.push_str("    default: { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }\n  }\n}\n\n");
+    Ok(())
+}
 
-    // Shadow samples: alpha one, the comparison in the rest, as Eden's `Extract`.
+/// Shadow samples: alpha one, the comparison in the rest, as Eden's `Extract`.
+fn tex_sample_compare(out: &mut String, layout: &Layout) -> Result<(), Unsupported> {
     out.push_str(
         "fn texSampleCompare(imm: u32, dim: u32, u: f32, v: f32, layer: u32, dref: f32)\
          \x20-> vec4<f32> {\n\
@@ -452,8 +527,11 @@ pub fn module(
         ));
     }
     out.push_str("    default: { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }\n  }\n}\n\n");
+    Ok(())
+}
 
-    // One case per binding and offset: offsets must be constants.
+/// One case per binding and offset: offsets must be constants.
+fn tex_sample_offset(out: &mut String, layout: &Layout) -> Result<(), Unsupported> {
     out.push_str(
         "fn texSampleOffset(imm: u32, offset: u32, u: f32, v: f32, layer: u32, w: f32) \
          -> vec4<f32> {\n  \
@@ -528,8 +606,11 @@ pub fn module(
         out.push_str("        default: { return vec4<f32>(0.0); }\n      }\n    }\n");
     }
     out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
+    Ok(())
+}
 
-    // `txq` sizes, as `interp`'s `run_txq` answers.
+/// `txq` sizes, as `interp`'s `run_txq` answers.
+fn tex_dims(out: &mut String, layout: &Layout) {
     out.push_str("fn texDims(imm: u32, lod: u32) -> vec4<u32> {\n  switch (imm) {\n");
     for (index, texture) in layout.textures.iter().enumerate() {
         let depth = match texture.dim {
@@ -554,8 +635,10 @@ pub fn module(
         ));
     }
     out.push_str("    default: { return vec4<u32>(1u, 1u, 1u, 1u); }\n  }\n}\n\n");
+}
 
-    // One texel in normalized coordinates, as `TextureSource::texel_step` answers.
+/// One texel in normalized coordinates, as `TextureSource::texel_step` answers.
+fn tex_step(out: &mut String, layout: &Layout) {
     out.push_str("fn texStep(imm: u32) -> vec2<f32> {\n  switch (imm) {\n");
     for (index, texture) in layout.textures.iter().enumerate() {
         let height = match texture.fold {
@@ -569,8 +652,10 @@ pub fn module(
         ));
     }
     out.push_str("    default: { return vec2<f32>(1.0, 1.0); }\n  }\n}\n\n");
+}
 
-    // One call per gather channel, through the descriptor's swizzle.
+/// One call per gather channel, through the descriptor's swizzle.
+fn tex_gather(out: &mut String, layout: &Layout) {
     out.push_str(
         "fn texGather(imm: u32, component: u32, u: f32, v: f32, w: f32, layer: u32) -> vec4<f32> {\n  \
          switch (imm) {\n",
@@ -626,9 +711,11 @@ pub fn module(
         out.push_str("        default: { return vec4<f32>(0.0); }\n      }\n    }\n");
     }
     out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
+}
 
-    // A `tlds` naming its level: each level binds as a texture of its own; past the levels
-    // bound, zero.
+/// A `tlds` naming its level: each level binds as a texture of its own; past the levels
+/// bound, zero.
+fn tex_fetch_level(out: &mut String, layout: &Layout) {
     out.push_str(
         "fn texFetchLevel(imm: u32, level: u32, x: u32, y: u32, z: u32) -> vec4<f32> {\n  \
          switch (imm) {\n",
@@ -658,8 +745,10 @@ pub fn module(
         out.push_str("        default: { return vec4<f32>(0.0); }\n      }\n    }\n");
     }
     out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
+}
 
-    // `tlds`: the texel at integer coordinates, zero outside the image.
+/// `tlds`: the texel at integer coordinates, zero outside the image.
+fn tex_fetch(out: &mut String, layout: &Layout) {
     out.push_str(
         "fn texFetch(imm: u32, x: u32, y: u32, z: u32) -> vec4<f32> {\n  switch (imm) {\n",
     );
@@ -712,8 +801,10 @@ pub fn module(
         ));
     }
     out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
+}
 
-    // A shadow gather: each texel's comparison, unswizzled like `texSampleCompare`.
+/// A shadow gather: each texel's comparison, unswizzled like `texSampleCompare`.
+fn tex_gather_compare(out: &mut String, layout: &Layout) {
     out.push_str(
         "fn texGatherCompare(imm: u32, u: f32, v: f32, w: f32, layer: u32, dref: f32) -> vec4<f32> {\n  \
          switch (imm) {\n",
@@ -733,21 +824,6 @@ pub fn module(
         ));
     }
     out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
-
-    out.push_str(&special_registers(
-        stage,
-        layout,
-        in_quad(translated, stage),
-    ));
-
-    out.push_str(&translated.source);
-    out.push('\n');
-    out.push_str(&match stage {
-        Stage::Vertex => vertex_entry(layout),
-        Stage::Fragment => fragment_entry(translated, layout),
-        Stage::Compute => compute_entry(layout, translated.warp.is_some()),
-    });
-    Ok(out)
 }
 
 /// Coordinates into a [`Crop`]'s image, moved by `offset` texels, as coordinates into the texture

@@ -7,7 +7,25 @@ use crate::gpu::shader::isa::{FMod, HPrecision, MufuOp, Op};
 impl Emitter<'_> {
     pub(super) fn emit_float(&mut self, op: Op) -> Result<(), Unsupported> {
         match op {
-            // ---- float ----
+            Op::Rro { .. }
+            | Op::Fadd { .. }
+            | Op::Fmul { .. }
+            | Op::Ffma { .. }
+            | Op::Fmnmx { .. }
+            | Op::Mufu { .. } => self.emit_float_arithmetic(op),
+            Op::Hadd2 { .. }
+            | Op::Hmul2 { .. }
+            | Op::Hfma2 { .. }
+            | Op::Hset2 { .. }
+            | Op::Hsetp2 { .. } => self.emit_half(op),
+            Op::Fcmp { .. } | Op::Fsetp { .. } | Op::Fset { .. } => self.emit_float_compare(op),
+            _ => unreachable!("emit_alu sorts ops by group"),
+        }
+        Ok(())
+    }
+
+    fn emit_float_arithmetic(&mut self, op: Op) {
+        match op {
             Op::Rro { dst, src, sm } => {
                 let x = self.operand_f(src);
                 let x = self.fmod(sm, x);
@@ -131,7 +149,13 @@ impl Emitter<'_> {
                 let value = self.saturate(sat, value);
                 self.set_f(dst, &value);
             }
-            // ---- half-precision ----
+            _ => unreachable!("emit_float sorts ops by family"),
+        }
+    }
+
+    /// Half-precision pairs, two lanes to a register.
+    fn emit_half(&mut self, op: Op) {
+        match op {
             Op::Hadd2 {
                 dst,
                 a,
@@ -278,7 +302,12 @@ impl Emitter<'_> {
                     self.set_p(p1, &high);
                 }
             }
+            _ => unreachable!("emit_float sorts ops by family"),
+        }
+    }
 
+    fn emit_float_compare(&mut self, op: Op) {
+        match op {
             Op::Fcmp {
                 dst,
                 a,
@@ -344,8 +373,7 @@ impl Emitter<'_> {
                     self.set_flags(&value);
                 }
             }
-            _ => unreachable!("emit_alu sorts ops by group"),
+            _ => unreachable!("emit_float sorts ops by family"),
         }
-        Ok(())
     }
 }

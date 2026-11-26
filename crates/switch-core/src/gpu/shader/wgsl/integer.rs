@@ -9,7 +9,36 @@ use crate::gpu::shader::isa::{
 impl Emitter<'_> {
     pub(super) fn emit_integer(&mut self, op: Op) -> Result<(), Unsupported> {
         match op {
-            // ---- integer ----
+            Op::Iadd { .. } | Op::Iadd3 { .. } | Op::Iscadd { .. } | Op::Lea { .. } => {
+                self.emit_add(op)
+            }
+            Op::Vmad { .. }
+            | Op::Vmnmx { .. }
+            | Op::Imnmx { .. }
+            | Op::Imul { .. }
+            | Op::Xmad { .. } => self.emit_multiply(op),
+            Op::Vsetp { .. }
+            | Op::Isetp { .. }
+            | Op::Iset { .. }
+            | Op::Icmp { .. }
+            | Op::Sel { .. } => self.emit_int_compare(op),
+            Op::P2r { .. } | Op::R2p { .. } => self.emit_predicate_move(op),
+            Op::Lop { .. } | Op::Lop3 { .. } => self.emit_logic(op),
+            Op::Bfi { .. }
+            | Op::Shl { .. }
+            | Op::Shr { .. }
+            | Op::Shf { .. }
+            | Op::Bfe { .. }
+            | Op::Popc { .. }
+            | Op::Flo { .. } => self.emit_bits(op),
+            _ => unreachable!("emit_alu sorts ops by group"),
+        }
+        Ok(())
+    }
+
+    /// Additions, with their carries and overflow.
+    fn emit_add(&mut self, op: Op) {
+        match op {
             Op::Iadd {
                 dst,
                 a,
@@ -158,32 +187,18 @@ impl Emitter<'_> {
                 let y = self.operand(b);
                 self.set_r(dst, &format!("({offset}) + ({y})"));
             }
+            _ => unreachable!("emit_integer sorts ops by family"),
+        }
+    }
+
+    /// Video-operand arithmetic, minimum and maximum, and multiplication.
+    fn emit_multiply(&mut self, op: Op) {
+        match op {
             Op::Vmad { dst, a, b, c } => {
                 let x = self.video(a);
                 let y = self.video(b);
                 let z = self.r(c);
                 self.set_r(dst, &format!("(({x}) * ({y}) + {z})"));
-            }
-            Op::Vsetp {
-                p0,
-                p1,
-                a,
-                b,
-                cmp,
-                signed,
-                bop,
-                src,
-            } => {
-                let x = self.video(a);
-                let y = self.video(b);
-                let taken = self.int_compare(cmp, &x, &y, signed);
-                let taken = self.bind(&taken);
-                let guard = self.holds(src);
-                let guard = self.bind(&guard);
-                let set = self.combine(bop, &taken, &guard);
-                self.set_p(p0, &set);
-                let clear = self.combine(bop, &format!("!{taken}"), &guard);
-                self.set_p(p1, &clear);
             }
             Op::Vmnmx {
                 dst,
@@ -289,6 +304,34 @@ impl Emitter<'_> {
                 };
                 self.set_r(dst, &value);
             }
+            _ => unreachable!("emit_integer sorts ops by family"),
+        }
+    }
+
+    /// Comparisons, and the selects and predicates they feed.
+    fn emit_int_compare(&mut self, op: Op) {
+        match op {
+            Op::Vsetp {
+                p0,
+                p1,
+                a,
+                b,
+                cmp,
+                signed,
+                bop,
+                src,
+            } => {
+                let x = self.video(a);
+                let y = self.video(b);
+                let taken = self.int_compare(cmp, &x, &y, signed);
+                let taken = self.bind(&taken);
+                let guard = self.holds(src);
+                let guard = self.bind(&guard);
+                let set = self.combine(bop, &taken, &guard);
+                self.set_p(p0, &set);
+                let clear = self.combine(bop, &format!("!{taken}"), &guard);
+                self.set_p(p1, &clear);
+            }
             Op::Isetp {
                 p0,
                 p1,
@@ -358,18 +401,19 @@ impl Emitter<'_> {
                 let y = self.operand(b);
                 self.set_r(dst, &format!("select({y}, {x}, {taken})"));
             }
-            Op::Bfi {
-                dst,
-                insert,
-                src,
-                base,
-            } => {
-                self.need("bfi");
-                let insert = self.r(insert);
-                let src = self.operand(src);
-                let base = self.operand(base);
-                self.set_r(dst, &format!("bfi({insert}, {src}, {base})"));
+            Op::Sel { dst, a, b, pred } => {
+                let x = self.r(a);
+                let y = self.operand(b);
+                let taken = self.holds(pred);
+                self.set_r(dst, &format!("select({y}, {x}, {taken})"));
             }
+            _ => unreachable!("emit_integer sorts ops by family"),
+        }
+    }
+
+    /// Moves between predicates or condition codes and a register.
+    fn emit_predicate_move(&mut self, op: Op) {
+        match op {
             Op::P2r {
                 dst,
                 src,
@@ -433,6 +477,12 @@ impl Emitter<'_> {
                     self.line("}");
                 }
             }
+            _ => unreachable!("emit_integer sorts ops by family"),
+        }
+    }
+
+    fn emit_logic(&mut self, op: Op) {
+        match op {
             Op::Lop {
                 dst,
                 a,
@@ -479,6 +529,25 @@ impl Emitter<'_> {
                 if let Some((p, test)) = pred {
                     self.set_p(p, &lop_test(test, &value));
                 }
+            }
+            _ => unreachable!("emit_integer sorts ops by family"),
+        }
+    }
+
+    /// Shifts, bit fields and bit counts.
+    fn emit_bits(&mut self, op: Op) {
+        match op {
+            Op::Bfi {
+                dst,
+                insert,
+                src,
+                base,
+            } => {
+                self.need("bfi");
+                let insert = self.r(insert);
+                let src = self.operand(src);
+                let base = self.operand(base);
+                self.set_r(dst, &format!("bfi({insert}, {src}, {base})"));
             }
             Op::Shl { dst, a, b, wrap } => {
                 self.need("shl32");
@@ -568,15 +637,8 @@ impl Emitter<'_> {
                 let value = self.inv(inv, value);
                 self.set_r(dst, &format!("flo({value}, {signed}, {shift})"));
             }
-            Op::Sel { dst, a, b, pred } => {
-                let x = self.r(a);
-                let y = self.operand(b);
-                let taken = self.holds(pred);
-                self.set_r(dst, &format!("select({y}, {x}, {taken})"));
-            }
-            _ => unreachable!("emit_alu sorts ops by group"),
+            _ => unreachable!("emit_integer sorts ops by family"),
         }
-        Ok(())
     }
 }
 
