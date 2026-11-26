@@ -44,7 +44,65 @@ impl Emitter<'_> {
     pub(super) fn op(&mut self, op: &Op, retired: usize) -> bool {
         match *op {
             Op::Nop => true,
+            Op::MovConst { .. }
+            | Op::Mov32 { .. }
+            | Op::Mov64 { .. }
+            | Op::MovK { .. }
+            | Op::AddSubImm { .. }
+            | Op::AddSubReg { .. }
+            | Op::AddSubShifted { .. }
+            | Op::AddSubExtended { .. } => self.op_move_add_sub(op),
+            Op::LogicalImm { .. }
+            | Op::LogicalReg { .. }
+            | Op::LogicalShifted { .. }
+            | Op::Extract { .. }
+            | Op::Bitfield { .. }
+            | Op::Extr { .. } => self.op_logical_bitfield(op),
+            Op::ShiftVar { .. } | Op::Divide { .. } | Op::Madd { .. } | Op::MaddLong { .. } => {
+                self.op_shift_multiply(op)
+            }
+            Op::CondSel { .. } | Op::CondCmp { .. } => self.op_conditional(op),
+            Op::LoadExclusive { .. }
+            | Op::StoreExclusive { .. }
+            | Op::LoadExclusivePair { .. }
+            | Op::StoreExclusivePair { .. }
+            | Op::Load64 { .. }
+            | Op::Load32 { .. }
+            | Op::Load8 { .. }
+            | Op::Store64 { .. }
+            | Op::Store32 { .. }
+            | Op::Store8 { .. }
+            | Op::LoadStoreImm { .. }
+            | Op::LoadStoreReg { .. }
+            | Op::PairLoad64 { .. }
+            | Op::PairStore64 { .. }
+            | Op::Pair { .. }
+            | Op::LoadLiteral { .. }
+            | Op::Ordered { .. } => self.op_memory(op, retired),
+            Op::Fp { insn, scalar, form } => {
+                if scalar {
+                    self.fp(insn, form, retired)
+                } else {
+                    self.simd(insn)
+                }
+            }
+            Op::SimdLoadStore { insn } | Op::VecImm { insn, .. } | Op::VecPair { insn, .. } => {
+                self.simd_load_store(insn, retired)
+            }
+            Op::Sys { .. } => self.op_sys(op),
+            Op::Mulh { rd, rn, rm, signed } => {
+                self.mulh(rd, rn, rm, signed);
+                true
+            }
+            Op::OneSource { rd, rn, opcode, sf } => self.one_source(rd, rn, opcode, sf),
 
+            _ => false,
+        }
+    }
+
+    #[inline(always)]
+    fn op_move_add_sub(&mut self, op: &Op) -> bool {
+        match *op {
             Op::MovConst { rd, val } => {
                 self.f.i64_const(val as i64);
                 self.store_reg(rd);
@@ -152,7 +210,13 @@ impl Emitter<'_> {
                 self.add_sub(rd, carry, set_flags, sf);
                 true
             }
+            _ => false,
+        }
+    }
 
+    #[inline(always)]
+    fn op_logical_bitfield(&mut self, op: &Op) -> bool {
+        match *op {
             Op::LogicalImm {
                 rd,
                 rn,
@@ -297,7 +361,13 @@ impl Emitter<'_> {
                 self.store_reg(rd);
                 true
             }
+            _ => false,
+        }
+    }
 
+    #[inline(always)]
+    fn op_shift_multiply(&mut self, op: &Op) -> bool {
+        match *op {
             Op::ShiftVar {
                 rd,
                 rn,
@@ -416,7 +486,13 @@ impl Emitter<'_> {
                 });
                 true
             }
+            _ => false,
+        }
+    }
 
+    #[inline(always)]
+    fn op_conditional(&mut self, op: &Op) -> bool {
+        match *op {
             Op::CondSel {
                 rd,
                 rn,
@@ -473,7 +549,13 @@ impl Emitter<'_> {
                 self.store_nzcv();
                 true
             }
+            _ => false,
+        }
+    }
 
+    #[inline(always)]
+    fn op_memory(&mut self, op: &Op, retired: usize) -> bool {
+        match *op {
             Op::LoadExclusive { rt, rn, sz } => {
                 self.load_exclusive(rt, rn, sz, retired);
                 true
@@ -602,16 +684,6 @@ impl Emitter<'_> {
                 self.write_back(rn, wb);
                 true
             }
-            Op::Fp { insn, scalar, form } => {
-                if scalar {
-                    self.fp(insn, form, retired)
-                } else {
-                    self.simd(insn)
-                }
-            }
-            Op::SimdLoadStore { insn } | Op::VecImm { insn, .. } | Op::VecPair { insn, .. } => {
-                self.simd_load_store(insn, retired)
-            }
             Op::LoadLiteral { rt, addr, acc } => {
                 self.f.i32_const(addr as i32);
                 self.set_addr32();
@@ -625,6 +697,13 @@ impl Emitter<'_> {
                 self.f.atomic_fence();
                 true
             }
+            _ => false,
+        }
+    }
+
+    #[inline(always)]
+    fn op_sys(&mut self, op: &Op) -> bool {
+        match *op {
             Op::Sys { op: SysOp::Barrier } => {
                 self.f.atomic_fence();
                 true
@@ -664,12 +743,6 @@ impl Emitter<'_> {
                 }
                 _ => false,
             },
-            Op::Mulh { rd, rn, rm, signed } => {
-                self.mulh(rd, rn, rm, signed);
-                true
-            }
-            Op::OneSource { rd, rn, opcode, sf } => self.one_source(rd, rn, opcode, sf),
-
             _ => false,
         }
     }
