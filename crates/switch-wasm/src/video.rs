@@ -17,9 +17,9 @@ use web_sys::{
 /// High profile at level 5.1, past anything the console decodes.
 const CODEC: &str = "avc1.640033";
 
-type Landed = Rc<RefCell<Vec<(u32, Option<Frame>)>>>;
+type Landed = Rc<RefCell<Vec<(u64, Option<Frame>)>>>;
 /// The surface each chunk in flight decodes to, by its timestamp.
-type InFlight = Rc<RefCell<HashMap<i32, u32>>>;
+type InFlight = Rc<RefCell<HashMap<i32, u64>>>;
 
 #[derive(Debug, Default)]
 pub struct WebH264 {
@@ -35,7 +35,7 @@ impl WebH264 {
         let (in_flight, landed) = (self.in_flight.clone(), self.landed.clone());
         let error = Closure::<dyn FnMut(JsValue)>::new(move |why: JsValue| {
             switch_core::traceln!("[video] the H.264 decoder failed: {why:?}");
-            let lost: Vec<u32> = in_flight.borrow_mut().drain().map(|(_, s)| s).collect();
+            let lost: Vec<u64> = in_flight.borrow_mut().drain().map(|(_, s)| s).collect();
             landed
                 .borrow_mut()
                 .extend(lost.into_iter().map(|s| (s, None)));
@@ -65,7 +65,7 @@ impl WebH264 {
         Ok(decoder)
     }
 
-    fn send(&mut self, surface: u32, access_unit: &[u8], key: bool) -> Result<(), JsValue> {
+    fn send(&mut self, surface: u64, access_unit: &[u8], key: bool) -> Result<(), JsValue> {
         let open = self
             .decoder
             .as_ref()
@@ -95,14 +95,14 @@ impl WebH264 {
 }
 
 impl H264Decoder for WebH264 {
-    fn decode(&mut self, surface: u32, access_unit: &[u8], key: bool) {
+    fn decode(&mut self, surface: u64, access_unit: &[u8], key: bool) {
         if let Err(why) = self.send(surface, access_unit, key) {
             switch_core::traceln!("[video] H.264 picture for {surface:#x} not decoded: {why:?}");
             self.landed.borrow_mut().push((surface, None));
         }
     }
 
-    fn take(&mut self) -> Vec<(u32, Option<Frame>)> {
+    fn take(&mut self) -> Vec<(u64, Option<Frame>)> {
         std::mem::take(&mut self.landed.borrow_mut())
     }
 }

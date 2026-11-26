@@ -119,15 +119,15 @@ pub struct MmChannel {
     vp9: vp9::nvdec::Channel,
 }
 
-/// Decoded frames by their luma surface, as the method word naming it (its address >> 8):
-/// what nvdec "writes" and VIC reads.
-type Surfaces = HashMap<u32, Arc<vp9::Frame>>;
+/// Decoded frames by the CPU address of their luma plane: what nvdec "writes" and VIC reads. A
+/// device address can name another buffer on the next submit once the window is remapped.
+type Surfaces = HashMap<u64, Arc<vp9::Frame>>;
 
 /// A host's H.264 decoder. Pictures go in by the surface nvdec writes and come back in any
 /// order, `None` for one it could not decode.
 pub trait H264Decoder: std::fmt::Debug {
-    fn decode(&mut self, surface: u32, access_unit: &[u8], key: bool);
-    fn take(&mut self) -> Vec<(u32, Option<vp9::Frame>)>;
+    fn decode(&mut self, surface: u64, access_unit: &[u8], key: bool);
+    fn take(&mut self) -> Vec<(u64, Option<vp9::Frame>)>;
 }
 
 /// How many times VIC is asked again for one frame before it composes without it.
@@ -139,7 +139,7 @@ struct Frames {
     surfaces: Surfaces,
     h264: Option<Box<dyn H264Decoder>>,
     /// Surfaces the H.264 decoder has yet to hand back, and how often VIC has waited for each.
-    pending: HashMap<u32, u32>,
+    pending: HashMap<u64, u32>,
     /// The parameter sets the decoder was last given.
     parameter_sets: Vec<u8>,
 }
@@ -159,7 +159,7 @@ impl Frames {
     }
 
     /// Whether VIC should wait for `surface`, counting the wait.
-    fn waiting_for(&mut self, surface: u32) -> bool {
+    fn waiting_for(&mut self, surface: u64) -> bool {
         let Some(waits) = self.pending.get_mut(&surface) else {
             return false;
         };
@@ -460,6 +460,7 @@ impl Video {
             let source = streams
                 .iter()
                 .find_map(|stream| slot_luma(stream, channel.method));
+            let source = source.map(|word| device.cpu_address(u64::from(word) << 8));
             if source.is_some_and(|surface| frames.waiting_for(surface)) {
                 return Ok(Submitted::Waiting);
             }
@@ -615,7 +616,7 @@ impl MmChannel {
             self.address(NVDEC_VP9_SET_PROB_TAB_BUF_OFFSET, device),
             PROBABILITY_BYTES,
         );
-        let slots = [0, 1, 2, 3].map(|i| self.method(NVDEC_SET_PICTURE_LUMA_OFFSET + i));
+        let slots = [0, 1, 2, 3].map(|i| self.address(NVDEC_SET_PICTURE_LUMA_OFFSET + i, device));
         let refs = [0, 1, 2].map(|i| surfaces.get(&slots[i]).cloned());
         match self.vp9.decode(&setup, &bitstream, &probs, refs) {
             Ok(frame) => {
@@ -659,7 +660,10 @@ impl MmChannel {
             self.address(NVDEC_SET_IN_BUF_BASE_OFFSET, device),
             picture.stream_len.min(MAX_STREAM) as usize,
         );
-        let surface = self.method(NVDEC_SET_PICTURE_LUMA_OFFSET + picture.current_index);
+        let surface = self.address(
+            NVDEC_SET_PICTURE_LUMA_OFFSET + picture.current_index,
+            device,
+        );
         let refused = |why: &str| {
             if enabled(Trace::Video) {
                 crate::traceln!(
@@ -699,7 +703,7 @@ impl MmChannel {
         let block_kind = word(out) >> 11 & 0xf;
         let width = (word(out + 8) & 0x3fff) + 1;
         let height = (word(out + 8) >> 14 & 0x3fff) + 1;
-        let Some(frame) = surfaces.get(&self.method(VIC_SLOT0_LUMA_OFFSET)) else {
+        let Some(frame) = surfaces.get(&self.address(VIC_SLOT0_LUMA_OFFSET, device)) else {
             return;
         };
         if format != VIC_PIXEL_FORMAT_NV12 || block_kind != 0 {
@@ -1013,18 +1017,18 @@ mod tests {
     /// A decoder whose pictures come back only when the test lands them.
     #[derive(Debug, Default)]
     struct Deferred {
-        given: Shared<(u32, Vec<u8>, bool)>,
-        ready: Shared<(u32, Option<vp9::Frame>)>,
+        given: Shared<(u64, Vec<u8>, bool)>,
+        ready: Shared<(u64, Option<vp9::Frame>)>,
     }
 
     impl H264Decoder for Deferred {
-        fn decode(&mut self, surface: u32, access_unit: &[u8], key: bool) {
+        fn decode(&mut self, surface: u64, access_unit: &[u8], key: bool) {
             self.given
                 .borrow_mut()
                 .push((surface, access_unit.to_vec(), key));
         }
 
-        fn take(&mut self) -> Vec<(u32, Option<vp9::Frame>)> {
+        fn take(&mut self) -> Vec<(u64, Option<vp9::Frame>)> {
             std::mem::take(&mut self.ready.borrow_mut())
         }
     }
@@ -1131,7 +1135,7 @@ mod tests {
             let [(surface, unit, key)] = given.as_slice() else {
                 panic!("{} pictures reached the decoder", given.len());
             };
-            assert_eq!((*surface, *key), (SURFACE >> 8, true));
+            assert_eq!((*surface, *key), (u64::from(SURFACE), true));
             assert_eq!(&unit[..5], &[0, 0, 0, 1, 0x67], "the SPS first");
             assert!(unit.ends_with(&slice), "then the slice, without the tail");
         }
@@ -1163,11 +1167,115 @@ mod tests {
         );
         let mut frame = vp9::Frame::new(16, 32);
         frame.planes[0].data[0] = 0x5a;
-        ready.borrow_mut().push((SURFACE >> 8, Some(frame)));
+        ready.borrow_mut().push((u64::from(SURFACE), Some(frame)));
         let (submitted, fence) = submit_stream(&mut video, vic, &compose, memory, &mut host1x);
         assert_eq!(submitted, Submitted::Done);
         assert_eq!(fence, 1, "the wait reserved no increment");
         assert_eq!(mem.read_u8(u64::from(OUTPUT)).unwrap(), 0x5a);
+    }
+
+    /// A title above 4 GiB has its buffers mapped into the window for each submit, so one device
+    /// address names a different surface from one frame to the next: a picture stays with its
+    /// memory.
+    #[test]
+    fn a_picture_stays_with_its_memory_when_the_window_is_remapped() {
+        const BASE: u32 = 0x1000_0000;
+        const SETUP: u32 = BASE + 0x1000;
+        const BITSTREAM: u32 = BASE + 0x2000;
+        const PROBS: u32 = BASE + 0x3000;
+        const CONFIG: u32 = BASE + 0x5000;
+        const OUTPUT: u32 = BASE + 0x6000;
+        const DECODED: u64 = 0x20_0000_0000;
+        const OTHER: u64 = 0x21_0000_0000;
+        let mem = Memory::new();
+        mem.map_zero(u64::from(BASE), 0x10000).unwrap();
+        let mut nvmap = NvMap::new();
+        let handle = nvmap.create(0x10000);
+        nvmap
+            .alloc(handle, 0, 0, 0x10000, 0, u64::from(BASE))
+            .unwrap();
+        let decoded = nvmap.create(0x2000);
+        nvmap.alloc(decoded, 0, 0, 0x1000, 0, DECODED).unwrap();
+        let other = nvmap.create(0x2000);
+        nvmap.alloc(other, 0, 0, 0x1000, 0, OTHER).unwrap();
+        let mut host1x = Host1x::new();
+        let mut video = Video::default();
+        let nvdec = video.open(Engine::Nvdec, &mut host1x).unwrap();
+        let vic = video.open(Engine::Vic, &mut host1x).unwrap();
+        let memory = (&mem, &nvmap, handle);
+
+        // A 64x64 key frame the software decoder takes, into the buffer above 4 GiB.
+        mem.write_bytes(u64::from(BITSTREAM), &[0; 64]).unwrap();
+        mem.write_bytes(u64::from(PROBS), &vp9::nvdec::default_prob_table())
+            .unwrap();
+        for (at, value) in [
+            (0x30, 64),
+            (0x60, 64 | 64 << 16),
+            (0x68, 1),
+            (0x70, 60 << 16),
+            (0x74, 3 << 24),
+        ] {
+            mem.write_u32(u64::from(SETUP + at), value).unwrap();
+        }
+        let first = map_one(&mut video, &nvmap, decoded, true);
+        let syncpt = video.channel(nvdec).unwrap().syncpt;
+        let decode = method_stream(
+            &[
+                (NVDEC_SET_APPLICATION_ID, NVDEC_CODEC_VP9),
+                (NVDEC_SET_DRV_PIC_SETUP_OFFSET, SETUP >> 8),
+                (NVDEC_SET_IN_BUF_BASE_OFFSET, BITSTREAM >> 8),
+                (NVDEC_VP9_SET_PROB_TAB_BUF_OFFSET, PROBS >> 8),
+                (NVDEC_SET_PICTURE_LUMA_OFFSET + 3, first >> 8),
+                (NVDEC_EXECUTE, 0x100),
+            ],
+            syncpt,
+        );
+        submit_stream(&mut video, nvdec, &decode, memory, &mut host1x);
+        map_one(&mut video, &nvmap, decoded, false);
+        assert_eq!(
+            map_one(&mut video, &nvmap, other, true),
+            first,
+            "the other buffer gets the freed room"
+        );
+        let again = map_one(&mut video, &nvmap, decoded, true);
+        assert_ne!(again, first);
+
+        mem.write_u32(
+            u64::from(CONFIG + VIC_CONFIG_OUTPUT_SURFACE),
+            VIC_PIXEL_FORMAT_NV12,
+        )
+        .unwrap();
+        mem.write_u32(
+            u64::from(CONFIG + VIC_CONFIG_OUTPUT_SURFACE + 8),
+            63 | 63 << 14,
+        )
+        .unwrap();
+        let compose_from = |video: &mut Video, host1x: &mut Host1x, source: u32| {
+            mem.write_bytes(u64::from(OUTPUT), &[0xee]).unwrap();
+            let syncpt = video.channel(vic).unwrap().syncpt;
+            let compose = method_stream(
+                &[
+                    (VIC_SET_CONFIG_STRUCT_OFFSET, CONFIG >> 8),
+                    (VIC_SLOT0_LUMA_OFFSET, source >> 8),
+                    (VIC_SET_OUTPUT_LUMA_OFFSET, OUTPUT >> 8),
+                    (VIC_SET_OUTPUT_CHROMA_OFFSET, (OUTPUT + 0x1000) >> 8),
+                    (VIC_EXECUTE, 0),
+                ],
+                syncpt,
+            );
+            submit_stream(video, vic, &compose, memory, host1x);
+            mem.read_u8(u64::from(OUTPUT)).unwrap()
+        };
+        assert_eq!(
+            compose_from(&mut video, &mut host1x, first),
+            0xee,
+            "the old address names the other buffer, which holds no picture"
+        );
+        assert_ne!(
+            compose_from(&mut video, &mut host1x, again),
+            0xee,
+            "the picture is found at its buffer's new address"
+        );
     }
 
     #[test]

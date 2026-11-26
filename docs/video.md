@@ -16,7 +16,7 @@ Titles decode video on the console's nvdec engine and hand the frames to VIC. `g
 ## Device addresses
 
 - Engine methods hold a device address shifted right by 8, which `MAP_BUFFER` hands out 32 bits wide. A buffer below 4 GiB is named by its own address; one above (a 64-bit title's heap and alias regions are at 64 GiB and up) gets room in `DEVICE_WINDOW`, a 64-bit process's unused low heap region, and `DeviceSpace` turns method addresses back into CPU addresses. Relocations patch device addresses too. `UNMAP_BUFFER` frees the room.
-- Decoded surfaces are keyed by the method word naming their luma plane, which is lossless.
+- Decoded surfaces are keyed by the CPU address of their luma plane, not the method word naming it. Just Dance 2022 unmaps its buffers after each submit and maps them again for the next, so the room the window hands out is reused: its nvdec output is `0x302900` on every frame, a different buffer each time, and the key frame a later frame references is named by another word.
 
 ## nvdec
 
@@ -27,7 +27,7 @@ An `EXECUTE` (method 0xC0) with codec 9 in method 0x80 decodes one frame. The dr
 - The probability table (`SET_PROB_TAB_BUF_OFFSET`, 0x170), already holding the frame's final probabilities. Offsets are in `vp9/nvdec.rs`: the segmentation tree and prediction probabilities are ten bytes at +903 (a stream without segmentation leaves them zero), the intra mode tables keep their ninth probability apart, three-probability rows are padded to four bytes, coefficients are `[tx][plane][ref][band][6 contexts][4]` from `+0x5a0`.
 - Luma surface addresses in slots 0 to 2 (last, golden, altref) and 3 (the frame written), at `SET_PICTURE_LUMA_OFFSET + i` (0x10c).
 
-The decoded frame is kept by its slot 3 luma address in `Video::surfaces`; nothing is written to the surface itself.
+The decoded frame is kept by its slot 3 luma plane in `Video::surfaces`; nothing is written to the surface itself.
 
 ## H.264
 
