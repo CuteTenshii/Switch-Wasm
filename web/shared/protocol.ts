@@ -206,6 +206,9 @@ export interface JitStats {
   retiredEmitted?: number;
   // Compiled blocks dropped for handing their first instruction back too often.
   dropped?: number;
+  // Instructions run on the interpreter in blocks not yet hot, and in blocks never to be compiled.
+  retiredCold?: number;
+  retiredNever?: number;
 }
 
 // Firmware NCA kind: 0 program, 1 data archive, 2 other.

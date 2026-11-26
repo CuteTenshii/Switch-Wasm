@@ -86,6 +86,8 @@ pub(in crate::cpu) struct Jit {
     pub(super) retired: u64,
     pub(super) retired_emitted: u64,
     pub(super) dropped: u64,
+    pub(super) retired_cold: u64,
+    pub(super) retired_never: u64,
     pub(super) chain: Chain,
     pub(super) a32: a32::Cache,
     /// Whether emitted code tests the watchpoints: one was armed when it was written.
@@ -117,6 +119,11 @@ pub struct JitStats {
     pub retired_emitted: u64,
     /// Compiled blocks dropped for handing their first instruction back `MAX_MISSES` times running.
     pub dropped: u64,
+    /// Of `retired`, instructions of blocks still counting towards `HOT`, all on the op walk.
+    pub retired_cold: u64,
+    /// Of `retired`, instructions of blocks that will not be compiled: refused by the
+    /// emitter, a failed install, dropped code, or a build without an emitter.
+    pub retired_never: u64,
 }
 
 impl Default for Jit {
@@ -138,6 +145,8 @@ impl Default for Jit {
             retired: 0,
             retired_emitted: 0,
             dropped: 0,
+            retired_cold: 0,
+            retired_never: 0,
             chain: Chain::default(),
             a32: a32::Cache::default(),
             watches: false,
@@ -336,6 +345,18 @@ impl Jit {
             retired: self.retired,
             retired_emitted: self.retired_emitted,
             dropped: self.dropped,
+            retired_cold: self.retired_cold,
+            retired_never: self.retired_never,
+        }
+    }
+
+    /// Charge what a block that was not compiled when entered retired to why it was not.
+    #[inline(always)]
+    pub(super) fn count_walked(&mut self, code: Code, ran: u64) {
+        match code {
+            Code::Cold(_) => self.retired_cold += ran,
+            Code::Never => self.retired_never += ran,
+            Code::Ready { .. } => {}
         }
     }
 }

@@ -37,6 +37,7 @@ impl Cpu {
                 break;
             }
             let mut block = self.a32_block_at(self.pc);
+            let code = block.code.get();
             let ran = match self.exec_a32_block(&mut block, max_steps - steps) {
                 Ok(ran) => ran,
                 Err(e) => {
@@ -44,6 +45,7 @@ impl Cpu {
                     return Err(e);
                 }
             };
+            self.jit.count_walked(code, ran);
             self.slice_used += ran;
             steps += ran;
         }

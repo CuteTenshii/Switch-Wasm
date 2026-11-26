@@ -173,6 +173,7 @@ impl Cpu {
             // Straight on to a linked successor while nothing it checks has changed.
             let mut block = block;
             loop {
+                let code = block.code.get();
                 let ran = match self.exec_block(&mut block, max_steps - steps) {
                     Ok(ran) => ran,
                     Err(e) => {
@@ -182,6 +183,7 @@ impl Cpu {
                         return Err(e);
                     }
                 };
+                self.jit.count_walked(code, ran);
                 self.slice_used += ran;
                 steps += ran;
                 let next = if ran == 0

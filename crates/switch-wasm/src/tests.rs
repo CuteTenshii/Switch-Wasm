@@ -629,7 +629,7 @@ fn the_translator_and_gpu_reports_are_the_json_the_page_reads() {
             r#"{"enabled":true,"blocks":0,"translated":0,"executed":0,"linked":0,"#,
             r#""invalidated":0,"interpreted":0,"interpretedGroups":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"#,
             r#""emitted":0,"enteredEmitted":0,"chained":0,"retired":0,"retiredEmitted":0,"#,
-            r#""dropped":0}"#
+            r#""dropped":0,"retiredCold":0,"retiredNever":0}"#
         )
     );
     let memory = crate::stats::switch_memory_json();

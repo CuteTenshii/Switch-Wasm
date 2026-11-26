@@ -30,7 +30,9 @@ pub fn switch_jit_stats_json() -> String {
             .field("chained", stats.chained)
             .field("retired", stats.retired)
             .field("retiredEmitted", stats.retired_emitted)
-            .field("dropped", stats.dropped);
+            .field("dropped", stats.dropped)
+            .field("retiredCold", stats.retired_cold)
+            .field("retiredNever", stats.retired_never);
     })
 }
 

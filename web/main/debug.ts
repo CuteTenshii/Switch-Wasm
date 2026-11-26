@@ -80,9 +80,11 @@ async function updateJitDebug(): Promise<void> {
   $('jit-entered-emitted').textContent = ofEntries(s.enteredEmitted ?? 0);
   $('jit-chained').textContent = ofEntries(s.chained ?? 0);
   const retired = s.retired ?? 0;
-  const ran = s.retiredEmitted ?? 0;
-  $('jit-retired-emitted').textContent =
-    fmtCount(ran) + (retired ? ` (${((100 * ran) / retired).toFixed(1)}%)` : '');
+  const ofRetired = (part: number) =>
+    fmtCount(part) + (retired ? ` (${((100 * part) / retired).toFixed(1)}%)` : '');
+  $('jit-retired-emitted').textContent = ofRetired(s.retiredEmitted ?? 0);
+  $('jit-retired-cold').textContent = ofRetired(s.retiredCold ?? 0);
+  $('jit-retired-never').textContent = ofRetired(s.retiredNever ?? 0);
   $('jit-dropped').textContent = fmtCount(s.dropped ?? 0);
 }
 
