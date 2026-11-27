@@ -320,10 +320,14 @@ impl Gpu {
     pub(super) fn keep_textures(&mut self, ctx: &ExecCtx, uploads: &[TextureUpload]) {
         for upload in uploads {
             let key = upload.key;
+            // Left unread, so there is nothing to keep.
+            let Some(bytes) = upload.bytes() else {
+                continue;
+            };
             if self.space.texture_cache.contains_key(&key) {
                 continue;
             }
-            self.uploaded.add_texture(upload.bytes.len());
+            self.uploaded.add_texture(bytes.len());
             self.texture_misses += 1;
             // `source_len` is an upper bound that can exceed the mapping, so stop where the mapping does.
             let pages = guest_pages(ctx, key.addr, upload.source_len);
@@ -332,7 +336,7 @@ impl Gpu {
                 continue;
             }
             // Whole-cache eviction, every address space's: the limit is shared.
-            let len = upload.bytes.len() as u64;
+            let len = bytes.len() as u64;
             if self.cached_bytes + len > TEXTURE_CACHE_BYTES {
                 self.submit_batch();
                 for space in std::iter::once(&mut self.space).chain(self.parked.values_mut()) {
@@ -351,7 +355,7 @@ impl Gpu {
                 self.texture_pages_to_watch.push(page);
                 self.space.page_owners.entry(page).or_default().push(key);
             }
-            self.space.texture_cache.insert(key, upload.bytes.clone());
+            self.space.texture_cache.insert(key, bytes.clone());
             self.cached_bytes += len;
         }
     }

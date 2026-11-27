@@ -129,8 +129,7 @@ pub struct TextureUpload {
     pub row_bytes: u32,
     /// Rows per layer, in texels or blocks.
     pub rows: u32,
-    /// The layers back to back, shared so a cache hit costs a refcount.
-    pub bytes: std::sync::Arc<[u8]>,
+    pub texels: Texels,
     pub key: TextureKey,
     /// How far past `key.addr` the read reached, for page watching.
     pub source_len: u64,
@@ -140,6 +139,26 @@ pub struct TextureUpload {
     /// Mip levels dropped to fit [`MAX_UPLOAD`]: the bytes are the guest's level `shrink`,
     /// so the image is this many halvings smaller than the shader expects.
     pub shrink: u32,
+}
+
+/// A texture's layers back to back, or the image to read them from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Texels {
+    /// Shared, so a cache hit costs a refcount.
+    Read(std::sync::Arc<[u8]>),
+    /// Left in guest memory, as [`Cached::Defer`] asked; [`TextureUpload::read_texels`] reads them.
+    Unread(Texture),
+}
+
+/// What a reader of textures already has for a key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cached {
+    /// The bytes, read before and current.
+    Bytes(std::sync::Arc<[u8]>),
+    /// Nothing it will read: it has the texels elsewhere, so reading them now is wasted.
+    Defer,
+    /// Nothing; read them now.
+    Read,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -155,7 +174,11 @@ impl Uploads {
         self.vertex.iter().map(|v| v.bytes.len()).sum::<usize>()
             + self.index.as_ref().map_or(0, |i| i.bytes.len())
             + self.constants.iter().map(|c| c.bytes.len()).sum::<usize>()
-            + self.textures.iter().map(|t| t.bytes.len()).sum::<usize>()
+            + self
+                .textures
+                .iter()
+                .map(|t| t.bytes().map_or(0, |b| b.len()))
+                .sum::<usize>()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -171,7 +194,7 @@ impl Uploads {
         banks: Banks<'_>,
         slots: &[(ShaderStage, TextureSlot)],
     ) -> Result<Uploads> {
-        Uploads::of_cached(engine, pipeline, ctx, banks, slots, &mut |_| None)
+        Uploads::of_cached(engine, pipeline, ctx, banks, slots, &mut |_| Cached::Read)
     }
 
     /// [`Uploads::of`], with `cached` answering for textures already read.
@@ -181,7 +204,7 @@ impl Uploads {
         ctx: &ExecCtx,
         banks: Banks<'_>,
         slots: &[(ShaderStage, TextureSlot)],
-        cached: &mut dyn FnMut(&TextureKey) -> Option<std::sync::Arc<[u8]>>,
+        cached: &mut dyn FnMut(&TextureKey) -> Cached,
     ) -> Result<Uploads> {
         let call = engine.last_draw;
         let index = if call.indexed {
@@ -694,7 +717,7 @@ pub fn read_textures(
     pools: TexturePools<'_>,
     ctx: &ExecCtx,
     slots: &[TextureSlot],
-    cached: &mut dyn FnMut(&TextureKey) -> Option<std::sync::Arc<[u8]>>,
+    cached: &mut dyn FnMut(&TextureKey) -> Cached,
 ) -> Result<Vec<TextureUpload>> {
     let mut textures: Vec<TextureUpload> = Vec::new();
     for &slot in slots {
@@ -762,7 +785,7 @@ fn read_texture(
     pools: TexturePools<'_>,
     ctx: &ExecCtx,
     slot: TextureSlot,
-    cached: &mut dyn FnMut(&TextureKey) -> Option<std::sync::Arc<[u8]>>,
+    cached: &mut dyn FnMut(&TextureKey) -> Cached,
 ) -> Result<TextureUpload> {
     let stage = pools.stage;
     let handle = pools.handle(ctx, slot)?;
@@ -796,7 +819,6 @@ fn read_texture(
     let (format, row_bytes, rows) = copy.shape(&image);
     let source_row_bytes = copy.source_row_bytes(row_bytes);
     let layers = image.layers.max(1);
-    let total = u64::from(row_bytes) * u64::from(rows) * u64::from(layers);
     let key = TextureKey {
         addr: image.addr,
         width: image.width,
@@ -822,26 +844,37 @@ fn read_texture(
         last + GOB_BYTES + u64::from(image.layer_stride) * u64::from(layers.saturating_sub(1));
     let source_len = dense.max(strided);
 
-    if let Some(bytes) = cached(&key) {
-        return Ok(TextureUpload {
-            stage,
-            slot,
-            handle,
-            format,
-            width: image.width,
-            height: image.height,
-            layers,
-            row_bytes,
-            rows,
-            bytes,
-            key,
-            source_len,
-            swizzle: image.swizzle,
-            sampler: descriptors.sampler,
-            shrink,
-        });
-    }
+    let texels = match cached(&key) {
+        Cached::Bytes(bytes) => Texels::Read(bytes),
+        Cached::Defer => Texels::Unread(image),
+        Cached::Read => Texels::Read(std::sync::Arc::from(read_image(ctx, &image)?)),
+    };
+    Ok(TextureUpload {
+        stage,
+        slot,
+        handle,
+        format,
+        width: image.width,
+        height: image.height,
+        layers,
+        row_bytes,
+        rows,
+        texels,
+        key,
+        source_len,
+        swizzle: image.swizzle,
+        sampler: descriptors.sampler,
+        shrink,
+    })
+}
 
+/// Every layer of `image` as linear rows, back to back, in the units [`image_copy`] chose.
+fn read_image(ctx: &ExecCtx, image: &Texture) -> Result<Vec<u8>> {
+    let copy = image_copy(image)?;
+    let (_, row_bytes, rows) = copy.shape(image);
+    let source_row_bytes = copy.source_row_bytes(row_bytes);
+    let layers = image.layers.max(1);
+    let total = u64::from(row_bytes) * u64::from(rows) * u64::from(layers);
     let mut bytes = Vec::with_capacity(total as usize);
     for layer in 0..layers {
         // A volume's slices interleave inside a block, so read through `Texture::texel`.
@@ -922,26 +955,10 @@ fn read_texture(
                     ]);
                 }
             }
-            Copy::Decode { codec } => decode_blocks(ctx, &image, base, codec, &mut bytes)?,
+            Copy::Decode { codec } => decode_blocks(ctx, image, base, codec, &mut bytes)?,
         }
     }
-    Ok(TextureUpload {
-        stage,
-        slot,
-        handle,
-        format,
-        width: image.width,
-        height: image.height,
-        layers,
-        row_bytes,
-        rows,
-        bytes: std::sync::Arc::from(bytes),
-        key,
-        source_len,
-        swizzle: image.swizzle,
-        sampler: descriptors.sampler,
-        shrink,
-    })
+    Ok(bytes)
 }
 
 /// The image's bytes once copied out, as many as the device texture takes.
@@ -976,6 +993,22 @@ fn fitting_level(image: &Texture) -> Result<(Texture, u32)> {
 }
 
 impl TextureUpload {
+    /// The texels, unless [`Cached::Defer`] left them in guest memory.
+    pub fn bytes(&self) -> Option<&std::sync::Arc<[u8]>> {
+        match &self.texels {
+            Texels::Read(bytes) => Some(bytes),
+            Texels::Unread(_) => None,
+        }
+    }
+
+    /// The texels, read from guest memory now if they were left there.
+    pub fn read_texels(&self, ctx: &ExecCtx) -> Result<std::sync::Arc<[u8]>> {
+        match &self.texels {
+            Texels::Read(bytes) => Ok(bytes.clone()),
+            Texels::Unread(image) => Ok(std::sync::Arc::from(read_image(ctx, image)?)),
+        }
+    }
+
     /// Whether this stands in for a null image.
     pub fn is_null(&self) -> bool {
         self.key.addr == 0
@@ -988,7 +1021,7 @@ impl TextureUpload {
         upload.layers = layers;
         upload.key.layers = layers;
         upload.key.layer_stride = 4;
-        upload.bytes = std::sync::Arc::from(vec![0u8; 4 * layers as usize]);
+        upload.texels = Texels::Read(std::sync::Arc::from(vec![0u8; 4 * layers as usize]));
         upload
     }
 }
@@ -1011,7 +1044,7 @@ fn null_texture(
         layers: 1,
         row_bytes: 4,
         rows: 1,
-        bytes: std::sync::Arc::from([0u8; 4]),
+        texels: Texels::Read(std::sync::Arc::from([0u8; 4])),
         key: TextureKey {
             addr: 0,
             width: 1,

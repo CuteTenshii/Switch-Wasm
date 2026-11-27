@@ -3283,6 +3283,67 @@ fn a_held_surface_stands_in_for_a_smaller_texture_laid_out_the_same_way() {
     assert_eq!(got, want, "the colour surface differs");
 }
 
+/// A texture the device holds whole is sampled from there with its guest memory left unread,
+/// and draws what the rasterizer draws. Breath of the Wild samples its targets every frame.
+#[test]
+fn a_texture_held_whole_on_the_device_is_not_read_from_guest_memory() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let build = |gpu: Option<&mut super::Gpu>| {
+        let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
+        h.bindless_texture();
+        // The fixture's image descriptor, pointed at the whole colour target.
+        let tic = h.base + 0x1400 + 32;
+        let target = h.base;
+        let mut ctx = h.ctx();
+        for (word, value) in [
+            (1, target as u32),
+            (2, (target >> 32) as u32 | (2 << 21)),
+            (3, testing::TARGET_WIDTH * 4 / 32),
+            (4, (testing::TARGET_WIDTH - 1) | (1 << 23)),
+            (5, testing::TARGET_HEIGHT - 1),
+        ] {
+            ctx.write_u32(tic + word * 4, value).unwrap();
+        }
+        h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+        // No half anywhere: see the clear test.
+        for (i, value) in [0.0f32, 0.2, 0.6, 1.0].into_iter().enumerate() {
+            h.engine.regs.set(0x360 + i as u32, value.to_bits());
+        }
+        match gpu {
+            Some(gpu) => {
+                h.clear_with(gpu, [true; 4]).expect("the clear");
+                h.draw_with(gpu).expect("the draw");
+                h.flush_with(gpu);
+            }
+            None => {
+                h.clear_with(&mut Software, [true; 4]).expect("the clear");
+                h.draw_with(&mut Software).expect("the draw");
+            }
+        }
+        h.target()
+    };
+    let want = build(None);
+    let (fallbacks, drawn, misses) = (gpu.fallbacks, gpu.drawn, gpu.texture_misses);
+    let got = build(Some(&mut gpu));
+    assert_eq!(
+        gpu.fallbacks, fallbacks,
+        "the draw fell back: {:?}",
+        gpu.last_fallback
+    );
+    assert_eq!(gpu.drawn, drawn + 1, "the draw did not run on the device");
+    assert_eq!(
+        gpu.texture_misses, misses,
+        "the held texture was read from guest memory"
+    );
+    let _ = gpu.device.poll(wgpu::PollType::Poll);
+    assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+    assert_eq!(got, want, "the colour surface differs");
+}
+
 /// A held colour surface sampled as an `S8D24` image of the same size gives its bytes as the
 /// words, converted as guest memory's would be. Echoes of Wisdom reads a `B8G8R8A8` target so.
 #[test]

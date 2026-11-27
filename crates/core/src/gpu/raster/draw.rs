@@ -546,7 +546,7 @@ fn trace_uploads(engine: &Engine3D, ctx: &ExecCtx, vs_program: &Compiled, fs_pro
             uploads
                 .textures
                 .iter()
-                .map(|t| t.bytes.len())
+                .map(|t| t.bytes().map_or(0, |b| b.len()))
                 .sum::<usize>(),
             uploads.textures.len(),
         ),

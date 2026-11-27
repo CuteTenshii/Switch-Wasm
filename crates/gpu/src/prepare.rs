@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::convert::{held_attachment_format, Widen};
-use crate::held::{spans_overlap, surface_span};
+use crate::held::{every_layer_held, spans_overlap, surface_span};
 use crate::{
     CachedShader, Checked, Gpu, Prepared, Render, PAGE_BITS, SEQUENTIAL_INDEX_LISTS,
     SHADER_CACHE_ENTRIES,
@@ -14,7 +14,7 @@ use switch_core::gpu::pipeline::{self as state, AttributeBase, Pipeline};
 use switch_core::gpu::shader::compiled::Compiled;
 use switch_core::gpu::shader::wgsl::{self, Coverage, Layout, Stage, Translation};
 use switch_core::gpu::texture::TextureSlot;
-use switch_core::gpu::upload::{Banks, Target, Targets, TexturePools, Uploads};
+use switch_core::gpu::upload::{Banks, Cached, Target, Targets, TexturePools, Uploads};
 
 impl Gpu {
     /// Decide whether a draw can run here, without uploading anything.
@@ -284,8 +284,9 @@ impl Gpu {
                     .map(|(&b, &extent)| (stage, u32::from(b), extent)),
             );
         }
-        // Taken out of `self` because the closure holds it while `timed!` borrows `self`.
+        // Taken out of `self` because the closure holds them while `timed!` borrows `self`.
         let cache = std::mem::take(&mut self.space.texture_cache);
+        let held = std::mem::take(&mut self.space.held);
         let mut hits = 0u64;
         let uploads = timed!(self, upload, {
             Uploads::of_cached(
@@ -295,13 +296,20 @@ impl Gpu {
                 Banks::Read(&banks),
                 &slots,
                 &mut |key| {
-                    let hit = cache.get(key).cloned();
-                    hits += u64::from(hit.is_some());
-                    hit
+                    if let Some(bytes) = cache.get(key) {
+                        hits += 1;
+                        Cached::Bytes(bytes.clone())
+                    } else if every_layer_held(&held, key) {
+                        // Sampled from the device; `bind_texture` reads them if it needs them after all.
+                        Cached::Defer
+                    } else {
+                        Cached::Read
+                    }
                 },
             )
         });
         self.space.texture_cache = cache;
+        self.space.held = held;
         self.texture_hits += hits;
         let uploads = uploads.map_err(|e| format!("{e:?}"))?;
         for upload in &uploads.textures {

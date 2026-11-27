@@ -12,7 +12,7 @@ use switch_core::gpu::engine::compute::EngineCompute;
 use switch_core::gpu::engine::threed::ShaderStage;
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::shader::wgsl::{self, ComputeShape, Layout, Stage};
-use switch_core::gpu::upload::{self, ConstantUpload, Target, TexturePools, TextureUpload};
+use switch_core::gpu::upload::{self, Cached, ConstantUpload, Target, TexturePools, TextureUpload};
 use switch_core::Result;
 
 /// What a store to a null image is declared as.
@@ -275,6 +275,7 @@ impl Gpu {
                 wgpu::ShaderStages::COMPUTE,
                 &stored,
                 (&mut entries, &mut resources),
+                ctx,
             )?;
         }
         let mut image_views = Vec::new();
@@ -580,10 +581,12 @@ impl Gpu {
         let slots: Vec<_> = layout.textures.iter().map(|b| b.slot).collect();
         let cache = std::mem::take(&mut self.space.texture_cache);
         let mut hits = 0u64;
-        let textures = upload::read_textures(pools, ctx, &slots, &mut |key| {
-            let hit = cache.get(key).cloned();
-            hits += u64::from(hit.is_some());
-            hit
+        let textures = upload::read_textures(pools, ctx, &slots, &mut |key| match cache.get(key) {
+            Some(bytes) => {
+                hits += 1;
+                Cached::Bytes(bytes.clone())
+            }
+            None => Cached::Read,
         });
         self.space.texture_cache = cache;
         self.texture_hits += hits;

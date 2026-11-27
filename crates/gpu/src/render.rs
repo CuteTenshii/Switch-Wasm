@@ -249,9 +249,12 @@ impl Gpu {
             })
             .collect();
         let (vs_group_layout, vs_group, vs_offsets, vs_constants) =
-            timed!(self, bind, self.bind_group(p, ShaderStage::VertexB, 0))?;
-        let (fs_group_layout, fs_group, fs_offsets, fs_constants) =
-            timed!(self, bind, self.bind_group(p, ShaderStage::Fragment, 1))?;
+            timed!(self, bind, self.bind_group(p, ShaderStage::VertexB, 0, ctx))?;
+        let (fs_group_layout, fs_group, fs_offsets, fs_constants) = timed!(
+            self,
+            bind,
+            self.bind_group(p, ShaderStage::Fragment, 1, ctx)
+        )?;
         let groups = Groups {
             vs: vs_group,
             fs: fs_group,

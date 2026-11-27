@@ -2967,7 +2967,11 @@ fn a_draw_sampling_its_own_target_updates_the_copy_only_past_a_barrier() {
         layers: 1,
         row_bytes: SIDE * 4,
         rows: SIDE,
-        bytes: std::sync::Arc::from(vec![0u8; (SIDE * SIDE * 4) as usize]),
+        texels: switch_core::gpu::upload::Texels::Read(std::sync::Arc::from(vec![
+            0u8;
+            (SIDE * SIDE * 4)
+                as usize
+        ])),
         key: TextureKey {
             addr: 0x1_0000,
             width: SIDE,
@@ -3076,7 +3080,11 @@ fn a_kept_copy_of_a_held_array_takes_only_the_layer_written_since() {
         layers: 2,
         row_bytes: SIDE * 4,
         rows: SIDE,
-        bytes: std::sync::Arc::from(vec![0u8; (SIDE * SIDE * 4 * 2) as usize]),
+        texels: switch_core::gpu::upload::Texels::Read(std::sync::Arc::from(vec![
+            0u8;
+            (SIDE * SIDE * 4 * 2)
+                as usize
+        ])),
         key: TextureKey {
             addr: 0x1_0000,
             width: SIDE,

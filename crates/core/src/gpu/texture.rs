@@ -257,7 +257,7 @@ impl DepthTexel {
 }
 
 /// A parsed TIC.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Texture {
     pub addr: u64,
     /// Extent in texels, not blocks.

@@ -14,8 +14,8 @@ use switch_core::gpu::shader::wgsl::{self, Layout};
 use switch_core::gpu::surface::{
     block_linear_volume_offset, Layout as SurfaceLayout, GOB_HEIGHT, GOB_WIDTH,
 };
-use switch_core::gpu::upload::TextureKey;
 use switch_core::gpu::upload::{ConstantUpload, Uploads};
+use switch_core::gpu::upload::{Texels, TextureKey, TextureUpload};
 
 /// A sampled texture's held layers, and each one's surface's write count.
 type HeldLayers = (Vec<(u32, HeldLayer)>, Vec<u64>);
@@ -136,7 +136,30 @@ type StageBinding = (
     Vec<(wgpu::Buffer, Vec<Patch>)>,
 );
 
+/// An upload's texels; `bind_texture` reads those `prepare` left in guest memory before they are wanted.
+fn texels(upload: &TextureUpload) -> std::result::Result<&std::sync::Arc<[u8]>, String> {
+    upload
+        .bytes()
+        .ok_or_else(|| "texels left in guest memory with no held surface standing in".into())
+}
+
 impl Gpu {
+    /// `upload` with the texels `prepare` left in guest memory read after all, and kept as
+    /// any texels read are.
+    fn read_unread(
+        &mut self,
+        upload: &TextureUpload,
+        ctx: &ExecCtx,
+    ) -> std::result::Result<TextureUpload, String> {
+        let bytes = upload.read_texels(ctx).map_err(|e| format!("{e:?}"))?;
+        let read = TextureUpload {
+            texels: Texels::Read(bytes),
+            ..upload.clone()
+        };
+        self.keep_textures(ctx, std::slice::from_ref(&read));
+        Ok(read)
+    }
+
     /// One stage's bindings: constant banks, and textures with their samplers. With them, the
     /// group's dynamic offsets, and the constant buffer and the copies of what compute launches
     /// wrote, to record before the draw.
@@ -145,6 +168,7 @@ impl Gpu {
         p: &Prepared,
         stage: ShaderStage,
         group: u32,
+        ctx: &ExecCtx,
     ) -> std::result::Result<StageBinding, String> {
         // The layout's dimensionality, as the module declared it.
         let declared = if stage == ShaderStage::VertexB {
@@ -246,6 +270,7 @@ impl Gpu {
                 own,
                 &drawn,
                 (&mut entries, &mut resources),
+                ctx,
             )? {
                 persistent = false;
                 why[reason] = true;
@@ -434,6 +459,7 @@ impl Gpu {
     /// Bind one texture and its sampler at `TEXTURE_BINDING + 2 * index`, never sampling in
     /// place a surface in `drawn`. Answers why the binding does not outlive the work, if it
     /// does not, as an index into [`Gpu::bind_uncached_why`].
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn bind_texture(
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
@@ -442,6 +468,7 @@ impl Gpu {
         own: wgpu::ShaderStages,
         drawn: &[u64],
         (entries, resources): (&mut Vec<wgpu::BindGroupLayoutEntry>, &mut Vec<Resource>),
+        ctx: &ExecCtx,
     ) -> std::result::Result<Option<usize>, String> {
         use switch_core::gpu::shader::isa::TexDim;
         let compare = declared_texture.compare;
@@ -555,6 +582,19 @@ impl Gpu {
                 Some(surface)
             }
             None => self.directly_sampled(drawn, upload, view_dimension, compare, &held)?,
+        };
+        // As `texture_over_held` decides it: held layers that are the whole image need no texels.
+        let covered = held.len() == layers as usize
+            && !held
+                .iter()
+                .any(|(_, surface)| matches!(surface, HeldLayer::PackedDepth(_)));
+        let read;
+        let upload = match upload.texels {
+            Texels::Unread(_) if direct.is_none() && !covered => {
+                read = self.read_unread(upload, ctx)?;
+                &read
+            }
+            _ => upload,
         };
         let mut reason = None;
         let texture = if let Some(surface) = direct {
@@ -1010,7 +1050,11 @@ impl Gpu {
             .zip(writes)
             .map(|((layer, surface), &writes)| (*layer, surface.surface().clone(), writes))
             .collect();
-        let guest = (!covered).then(|| upload.bytes.clone());
+        let guest = if covered {
+            None
+        } else {
+            Some(texels(upload)?.clone())
+        };
         let depths: Vec<(u32, wgpu::Texture)> = held
             .iter()
             .filter_map(|(layer, surface)| match surface {
@@ -1610,7 +1654,7 @@ impl Gpu {
         }
         // Stale texels answer a size query as well as current ones.
         if reads_texels {
-            self.note_read_of(upload.key.addr..upload.key.addr + upload.bytes.len() as u64);
+            self.note_read_of(upload.key.addr..upload.key.addr + texels(upload)?.len() as u64);
         }
         let (texture, len) = self.upload_texture(upload, view, fold, &[])?;
         // Kept only alongside its cached bytes, which a guest write evicts, or as a null image.
@@ -1642,11 +1686,12 @@ impl Gpu {
             return Err("samples a packed depth image as a volume".into());
         }
         // Formats the device lacks are widened first. See [`convert::Widen`].
+        let texels = texels(upload)?;
         let widened = (!matches!(widening, Widen::None | Widen::PackedDepth))
-            .then(|| widen(&upload.bytes, widening));
+            .then(|| widen(texels, widening));
         let (bytes, row_bytes) = match &widened {
             Some(bytes) => (bytes.as_slice(), upload.row_bytes * 2),
-            None => (&*upload.bytes, upload.row_bytes),
+            None => (&**texels, upload.row_bytes),
         };
         // Each tile's rows, the image's last repeated past its end. See [`wgsl::Fold`].
         let folded = fold.map(|fold| {
@@ -2069,8 +2114,9 @@ impl Gpu {
     ) -> std::result::Result<Vec<u8>, String> {
         use switch_core::gpu::pipeline::Format;
         // (bytes per texel, where red starts in one, how wide red is).
+        let texels = texels(upload)?;
         let (unit, at, red) = match upload.format {
-            Format::R32Float => return Ok(upload.bytes.to_vec()),
+            Format::R32Float => return Ok(texels.to_vec()),
             Format::R16Unorm => (2, 0, Red::Unorm16),
             Format::R16Float => (2, 0, Red::Float16),
             Format::R8Unorm => (1, 0, Red::Unorm8),
@@ -2082,8 +2128,8 @@ impl Gpu {
             Format::PackedDepth => (4, 0, Red::StencilBits),
             other => return Err(format!("a shadow map stored as {other:?}")),
         };
-        let mut out = Vec::with_capacity(upload.bytes.len() / unit * 4);
-        for texel in upload.bytes.chunks_exact(unit) {
+        let mut out = Vec::with_capacity(texels.len() / unit * 4);
+        for texel in texels.chunks_exact(unit) {
             let b = &texel[at..];
             let value = match red {
                 Red::Unorm8 => f32::from(b[0]) / 255.0,

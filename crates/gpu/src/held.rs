@@ -7,7 +7,7 @@ use crate::resources::guest_pages;
 use crate::{Gpu, Space, COPY_ALIGNMENT, MAX_FRAMES_IN_FLIGHT};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::renderer::{Flush, Submit};
-use switch_core::gpu::upload::{DepthKind, Target};
+use switch_core::gpu::upload::{DepthKind, Target, TextureKey};
 use switch_core::mem::PAGE_BITS;
 use switch_core::{Error, Result};
 
@@ -19,6 +19,19 @@ pub(super) fn surface_span(target: &Target) -> std::ops::Range<u64> {
     let len =
         u64::from(target.layout.layer_stride(target.row_bytes, target.rows)).max(target.len());
     target.addr..target.addr + len
+}
+
+/// Whether a surface is held at every layer of `key`, so sampling it takes the device's
+/// texels rather than guest memory's. A volume's interleaved slices are no surfaces of their own.
+pub(super) fn every_layer_held(
+    held: &std::collections::HashMap<u64, Held>,
+    key: &TextureKey,
+) -> bool {
+    key.addr != 0
+        && key.block_depth_gobs <= 1
+        && (0..key.layers.max(1)).all(|layer| {
+            held.contains_key(&(key.addr + u64::from(layer) * u64::from(key.layer_stride)))
+        })
 }
 
 /// Whether two targets are one depth surface, one cropped from the other.
