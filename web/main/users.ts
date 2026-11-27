@@ -54,8 +54,17 @@ function toRecord({ uid, nickname, editedAt, picture }: Profile): UserRecord {
   return { uid, nickname, editedAt, picture };
 }
 
+// At most `NICKNAME_MAX` characters, counted as the console does, by code point.
+function clampNickname(name: string): string {
+  return [...name.trim()].slice(0, NICKNAME_MAX).join('');
+}
+
+function newProfile(nickname: string, editedAt: number): Profile {
+  return { uid: newUid(), nickname, editedAt, picture: null, created: Date.now() };
+}
+
 function firstProfile(): Profile {
-  return { uid: newUid(), nickname: 'Player', editedAt: 0, picture: null, created: Date.now() };
+  return newProfile('Player', 0);
 }
 
 async function readProfiles(): Promise<void> {
@@ -139,17 +148,18 @@ const dialogEl = $<HTMLDialogElement>('profiles');
 const listEl = $('profile-list');
 const addForm = $<HTMLFormElement>('profile-add');
 const addName = $<HTMLInputElement>('profile-add-name');
+const addSubmit = $<HTMLButtonElement>('profile-add-submit');
 const addNote = $('profile-add-note');
 const runningNote = $('profile-running-note');
+addName.maxLength = NICKNAME_MAX;
 
-let confirming: string | null = null;
-let renaming: string | null = null;
-let editingUid: string | null = null;
+// The one row being renamed, given a new UID, or asked to confirm its deletion.
+type Mode = { kind: 'rename' | 'uid' | 'confirm'; uid: string } | null;
+let mode: Mode = null;
 
-function closeForms(): void {
-  confirming = null;
-  renaming = null;
-  editingUid = null;
+function setMode(next: Mode): void {
+  mode = next;
+  renderProfiles();
 }
 
 function button(label: string, className: string, glyph?: IconNode): HTMLButtonElement {
@@ -192,7 +202,7 @@ function renderProfiles(): void {
   listEl.replaceChildren(...rows);
   const full = profiles.length >= MAX_PROFILES;
   addName.disabled = full;
-  $<HTMLButtonElement>('profile-add-submit').disabled = full;
+  addSubmit.disabled = full;
   addNote.hidden = !full;
   runningNote.hidden = !titleBooted();
 }
@@ -221,52 +231,39 @@ function renderRow(profile: Profile): HTMLElement {
     }
   });
 
+  const own = mode?.uid === profile.uid ? mode.kind : null;
   const main = el('div', 'profile-main');
-  const editing = renaming === profile.uid || editingUid === profile.uid;
-  if (renaming === profile.uid) {
-    main.append(renameForm(profile));
-  } else if (editingUid === profile.uid) {
-    main.append(uidForm(profile));
-  } else {
-    main.append(el('span', 'profile-name', profile.nickname));
-    if (isPlaying) main.append(el('span', 'profile-playing', 'Playing'));
-  }
-
   const actions = el('div', 'profile-actions');
-  if (confirming === profile.uid) {
+  if (own === 'rename') {
+    main.append(renameForm(profile));
+  } else if (own === 'uid') {
+    main.append(uidForm(profile));
+  } else if (own === 'confirm') {
     row.classList.add('is-confirming');
-    main.replaceChildren(el('span', 'profile-confirm', `Delete ${profile.nickname} and their saves?`));
+    main.append(el('span', 'profile-confirm', `Delete ${profile.nickname} and their saves?`));
     const yes = button('Delete', 'btn small danger-solid');
     yes.addEventListener('click', () => void removeProfile(profile));
     const no = button('Keep', 'btn small ghost');
-    no.addEventListener('click', () => {
-      confirming = null;
-      renderProfiles();
-    });
+    no.addEventListener('click', () => setMode(null));
     actions.append(yes, no);
     queueMicrotask(() => no.focus());
-  } else if (!editing) {
-    if (!isPlaying) {
+  } else {
+    main.append(el('span', 'profile-name', profile.nickname));
+    if (isPlaying) {
+      main.append(el('span', 'profile-playing', 'Playing'));
+    } else {
       const play = button('Play as', 'btn small', UserCheck);
       play.addEventListener('click', () => void choose(profile));
       actions.append(play);
     }
     const rename = button('Rename', 'btn small ghost', Pencil);
-    rename.addEventListener('click', () => {
-      closeForms();
-      renaming = profile.uid;
-      renderProfiles();
-    });
+    rename.addEventListener('click', () => setMode({ kind: 'rename', uid: profile.uid }));
     actions.append(rename);
     // The running title committed the user list, and its saves sit in the core under these UIDs.
     const editUid = button('Edit UID', 'btn small ghost', Fingerprint);
     editUid.disabled = titleBooted();
     if (editUid.disabled) editUid.title = 'Stop the title to change a UID';
-    editUid.addEventListener('click', () => {
-      closeForms();
-      editingUid = profile.uid;
-      renderProfiles();
-    });
+    editUid.addEventListener('click', () => setMode({ kind: 'uid', uid: profile.uid }));
     actions.append(editUid);
     if (profile.picture) {
       const clear = button('Remove picture', 'btn small ghost', ImageOff);
@@ -279,16 +276,12 @@ function renderRow(profile: Profile): HTMLElement {
       const del = button('Delete', 'btn small ghost danger', Trash2);
       del.disabled = locked;
       if (locked) del.title = 'Stop the title to delete the profile the running title is playing as';
-      del.addEventListener('click', () => {
-        closeForms();
-        confirming = profile.uid;
-        renderProfiles();
-      });
+      del.addEventListener('click', () => setMode({ kind: 'confirm', uid: profile.uid }));
       actions.append(del);
     }
   }
   row.append(picture, main, actions);
-  if (!editing && confirming !== profile.uid) {
+  if (!own) {
     const uid = el('span', 'profile-uid', profile.uid);
     uid.title = 'UID';
     row.append(uid);
@@ -296,31 +289,29 @@ function renderRow(profile: Profile): HTMLElement {
   return row;
 }
 
-function renameForm(profile: Profile): HTMLFormElement {
-  const form = el('form', 'profile-rename');
-  const input = el('input', 'text');
-  input.value = profile.nickname;
-  input.maxLength = NICKNAME_MAX;
+// A row's form of `input` with Save and Cancel; Escape cancels too, and the input takes the focus.
+function inlineForm(
+  className: string,
+  input: HTMLInputElement,
+  onSubmit: (save: HTMLButtonElement) => void,
+): HTMLFormElement {
+  const form = el('form', className);
   input.required = true;
-  input.setAttribute('aria-label', `New name for ${profile.nickname}`);
   const save = el('button', 'btn small', 'Save');
   save.type = 'submit';
   const cancel = button('Cancel', 'btn small ghost');
-  cancel.addEventListener('click', () => {
-    renaming = null;
-    renderProfiles();
+  cancel.addEventListener('click', () => setMode(null));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      // The dialog would close on it too.
+      e.preventDefault();
+      e.stopPropagation();
+      setMode(null);
+    }
   });
   form.addEventListener('submit', (e) => {
     e.preventDefault();
-    void rename(profile, input.value);
-  });
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      renaming = null;
-      renderProfiles();
-    }
+    onSubmit(save);
   });
   form.append(input, save, cancel);
   queueMicrotask(() => {
@@ -330,12 +321,18 @@ function renameForm(profile: Profile): HTMLFormElement {
   return form;
 }
 
+function renameForm(profile: Profile): HTMLFormElement {
+  const input = el('input', 'text');
+  input.value = profile.nickname;
+  input.maxLength = NICKNAME_MAX;
+  input.setAttribute('aria-label', `New name for ${profile.nickname}`);
+  return inlineForm('profile-rename', input, () => void rename(profile, input.value));
+}
+
 function uidForm(profile: Profile): HTMLFormElement {
-  const form = el('form', 'profile-rename profile-uid-form');
   const input = el('input', 'text mono');
   input.value = profile.uid;
   input.maxLength = 32;
-  input.required = true;
   input.spellcheck = false;
   input.autocomplete = 'off';
   input.setAttribute('aria-label', `UID for ${profile.nickname}`);
@@ -344,27 +341,11 @@ function uidForm(profile: Profile): HTMLFormElement {
   error.setAttribute('role', 'alert');
   error.hidden = true;
   input.setAttribute('aria-describedby', error.id);
-  const save = el('button', 'btn small', 'Save');
-  save.type = 'submit';
-  const cancel = button('Cancel', 'btn small ghost');
-  const close = () => {
-    editingUid = null;
-    renderProfiles();
-  };
-  cancel.addEventListener('click', close);
   input.addEventListener('input', () => {
     error.hidden = true;
     input.removeAttribute('aria-invalid');
   });
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      close();
-    }
-  });
-  form.addEventListener('submit', (e) => {
-    e.preventDefault();
+  const form = inlineForm('profile-rename profile-uid-form', input, (save) => {
     save.disabled = true;
     void changeUid(profile, input.value).then((why) => {
       save.disabled = false;
@@ -375,11 +356,7 @@ function uidForm(profile: Profile): HTMLFormElement {
       input.focus();
     });
   });
-  form.append(input, save, cancel, error);
-  queueMicrotask(() => {
-    input.focus();
-    input.select();
-  });
+  form.append(error);
   return form;
 }
 
@@ -409,10 +386,10 @@ async function choose(profile: Profile): Promise<void> {
 }
 
 async function rename(profile: Profile, name: string): Promise<void> {
-  const nickname = name.trim();
+  const nickname = clampNickname(name);
   if (!nickname) return;
-  profile.nickname = [...nickname].slice(0, NICKNAME_MAX).join('');
-  renaming = null;
+  profile.nickname = nickname;
+  mode = null;
   await update(profile);
 }
 
@@ -420,8 +397,7 @@ async function rename(profile: Profile, name: string): Promise<void> {
 async function changeUid(profile: Profile, text: string): Promise<string | null> {
   const uid = text.trim().toLowerCase();
   if (uid === profile.uid) {
-    editingUid = null;
-    renderProfiles();
+    setMode(null);
     return null;
   }
   if (!/^[0-9a-f]{32}$/.test(uid)) return 'A UID is 32 hex digits, 0-9 and a-f.';
@@ -445,7 +421,7 @@ async function changeUid(profile: Profile, text: string): Promise<string | null>
   profile.uid = uid;
   profile.editedAt = now();
   if (current === old) current = uid;
-  editingUid = null;
+  mode = null;
   try {
     await call('usersStore', [[old, null], [uid, profile], [CURRENT_KEY, current]]);
   } catch (err) {
@@ -473,7 +449,7 @@ async function clearPicture(profile: Profile): Promise<void> {
 }
 
 async function removeProfile(profile: Profile): Promise<void> {
-  confirming = null;
+  mode = null;
   profiles = profiles.filter((p) => p.uid !== profile.uid);
   const entry = pictureUrls.get(profile.uid);
   if (entry) URL.revokeObjectURL(entry.url);
@@ -493,28 +469,16 @@ async function removeProfile(profile: Profile): Promise<void> {
 
 addForm.addEventListener('submit', (e) => {
   e.preventDefault();
-  const nickname = addName.value.trim();
+  const nickname = clampNickname(addName.value);
   if (!nickname || profiles.length >= MAX_PROFILES) return;
-  const profile: Profile = {
-    uid: newUid(),
-    nickname: [...nickname].slice(0, NICKNAME_MAX).join(''),
-    editedAt: now(),
-    picture: null,
-    created: Date.now(),
-  };
+  const profile = newProfile(nickname, now());
   profiles.push(profile);
   addName.value = '';
-  void call('usersStore', [[profile.uid, profile]])
-    .catch((err: Error) => log('Profiles: could not be saved (' + err.message + ')', 'error'))
-    .then(() => {
-      renderProfiles();
-      return stageIfIdle();
-    });
+  void update(profile);
 });
 
 buttonEl.addEventListener('click', () => {
-  closeForms();
-  renderProfiles();
+  setMode(null);
   dialogEl.showModal();
 });
 $('btn-profiles-close').addEventListener('click', () => dialogEl.close());
@@ -522,4 +486,6 @@ $('btn-profiles-close').addEventListener('click', () => dialogEl.close());
 dialogEl.addEventListener('click', (e) => {
   if (e.target === dialogEl) dialogEl.close();
 });
-dialogEl.addEventListener('close', closeForms);
+dialogEl.addEventListener('close', () => {
+  mode = null;
+});
