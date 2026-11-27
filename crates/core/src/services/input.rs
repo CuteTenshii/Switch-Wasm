@@ -137,6 +137,8 @@ pub(crate) mod hid_shmem {
     /// dual left and right, joy left, joy right.
     pub const SIX_AXIS_FULL_KEY_LIFO: u32 = 0x1758;
     pub const SIX_AXIS_LIFO_SIZE: u32 = 0x708;
+    /// `sizeof(HidSixAxisSensorStateAtomicStorage)`, the stride of its 17 entries.
+    pub const SIX_AXIS_STORAGE_SIZE: u32 = 0x68;
     pub const SIX_AXIS_HANDHELD: u32 = 1;
     pub const SIX_AXIS_JOY_DUAL_LEFT: u32 = 2;
     pub const SIX_AXIS_JOY_DUAL_RIGHT: u32 = 3;
@@ -153,12 +155,22 @@ pub(crate) mod hid_shmem {
     pub const SIX_AXIS_ATTR_CONNECTED: u32 = 1 << 0;
 }
 
-/// The host's motion sensor: accelerometer in G, gyroscope in revolutions per second.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Samples the sensor may run ahead of the 200 Hz publish by, two reports' worth, before the
+/// oldest are dropped so a core running slow does not fall ever further behind.
+const MOTION_BACKLOG: usize = 6;
+
+/// One sensor sample: accelerometer in G, gyroscope in revolutions per second.
+type MotionSample = ([f32; 3], [f32; 3]);
+
+/// The host's motion sensor and the pose integrated from it.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Motion {
-    pub accel: [f32; 3],
-    pub gyro: [f32; 3],
-    pub connected: bool,
+    /// The sample last published.
+    accel: [f32; 3],
+    gyro: [f32; 3],
+    connected: bool,
+    /// Samples not yet published, oldest first.
+    backlog: std::collections::VecDeque<MotionSample>,
     /// Gyro integrated since the sensor connected, in revolutions.
     rotation: [f32; 3],
     /// The sensor's axes as unit rows, in the frame it connected in.
@@ -176,6 +188,7 @@ impl Default for Motion {
             accel: [0.0; 3],
             gyro: [0.0; 3],
             connected: false,
+            backlog: std::collections::VecDeque::new(),
             rotation: [0.0; 3],
             orientation: IDENTITY,
             sample: 0,
@@ -375,11 +388,21 @@ impl Cpu {
         }
     }
 
-    /// Take the host's motion sensor reading; it is published on the next `hid` sample.
-    pub fn set_motion_state(&mut self, accel: [f32; 3], gyro: [f32; 3], connected: bool) {
-        self.motion.accel = accel;
-        self.motion.gyro = gyro;
-        self.motion.connected = connected;
+    /// Queue a sample from the host's motion sensor: accelerometer in G, gyroscope in
+    /// revolutions per second. Each `hid` sample publishes the next, 5 ms of sensor time apart.
+    pub fn push_motion_sample(&mut self, accel: [f32; 3], gyro: [f32; 3]) {
+        let motion = &mut self.motion;
+        if motion.backlog.len() == MOTION_BACKLOG {
+            motion.backlog.pop_front();
+        }
+        motion.backlog.push_back((accel, gyro));
+        motion.connected = true;
+    }
+
+    /// The host's motion sensor is gone; the next `hid` sample publishes it disconnected.
+    pub fn disconnect_motion(&mut self) {
+        self.motion.connected = false;
+        self.motion.backlog.clear();
     }
 
     /// Publish the sensor into the six-axis LIFOs of the style the title can use.
@@ -387,6 +410,11 @@ impl Cpu {
         use hid_shmem as h;
         if !self.hid_mapped || !(self.motion.connected || self.motion.published) {
             return;
+        }
+        // An empty backlog holds the last sample, as a sensor between reports would read.
+        if let Some((accel, gyro)) = self.motion.backlog.pop_front() {
+            self.motion.accel = accel;
+            self.motion.gyro = gyro;
         }
         let period = HID_SAMPLE_PERIOD_CYCLES as f32 / 1_020_000_000.0;
         self.motion.integrate(period);
@@ -406,43 +434,61 @@ impl Cpu {
         }
     }
 
+    /// Add the current state to a six-axis LIFO's ring, after the entry it last took.
     fn write_six_axis_lifo(&mut self, lifo: u32) {
         use hid_shmem as h;
-        let m = self.motion;
+        let m = &self.motion;
+        let floats: Vec<u32> = m
+            .accel
+            .iter()
+            .chain(&m.gyro)
+            .chain(&m.rotation)
+            .chain(m.orientation.iter().flatten())
+            .map(|value| value.to_bits())
+            .collect();
+        let sample = m.sample;
+        let attributes = if m.connected {
+            h::SIX_AXIS_ATTR_CONNECTED
+        } else {
+            0
+        };
+        let capacity = h::LIFO_CAPACITY as u32;
+        // Both stay below the capacity, so their low words are the whole value.
+        let count = self.hid_shmem.read_u32(lifo + h::LIFO_COUNT).unwrap_or(0);
+        let tail = match count {
+            0 => 0,
+            _ => (self.hid_shmem.read_u32(lifo + h::LIFO_TAIL).unwrap_or(0) + 1) % capacity,
+        };
+
+        let entry = lifo + h::LIFO_STORAGE + tail * h::SIX_AXIS_STORAGE_SIZE;
         let _ = self
             .hid_shmem
-            .write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
-        let _ = self.hid_shmem.write_u64(lifo + h::LIFO_TAIL, 0);
-        let _ = self.hid_shmem.write_u64(lifo + h::LIFO_COUNT, 1);
-        let entry = lifo + h::LIFO_STORAGE;
-        let _ = self
-            .hid_shmem
-            .write_u64(entry + h::STORAGE_SAMPLING_NUMBER, m.sample << 1);
+            .write_u64(entry + h::STORAGE_SAMPLING_NUMBER, sample << 1);
         let state = entry + h::SIX_AXIS_STATE;
         let _ = self
             .hid_shmem
             .write_u64(state + h::SIX_AXIS_DELTA_TIME, SIX_AXIS_DELTA_NS);
         let _ = self
             .hid_shmem
-            .write_u64(state + h::SIX_AXIS_SAMPLING_NUMBER, m.sample);
-        let floats = m
-            .accel
-            .iter()
-            .chain(&m.gyro)
-            .chain(&m.rotation)
-            .chain(m.orientation.iter().flatten());
-        for (i, value) in floats.enumerate() {
+            .write_u64(state + h::SIX_AXIS_SAMPLING_NUMBER, sample);
+        for (i, bits) in floats.into_iter().enumerate() {
             let at = state + h::SIX_AXIS_FLOATS + 4 * i as u32;
-            let _ = self.hid_shmem.write_u32(at, value.to_bits());
+            let _ = self.hid_shmem.write_u32(at, bits);
         }
-        let attributes = if m.connected {
-            h::SIX_AXIS_ATTR_CONNECTED
-        } else {
-            0
-        };
         let _ = self
             .hid_shmem
             .write_u32(state + h::SIX_AXIS_ATTRIBUTES, attributes);
+
+        // The header last, so a reader never finds the tail on an entry still being written.
+        let _ = self
+            .hid_shmem
+            .write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
+        let _ = self
+            .hid_shmem
+            .write_u64(lifo + h::LIFO_TAIL, u64::from(tail));
+        let _ = self
+            .hid_shmem
+            .write_u64(lifo + h::LIFO_COUNT, u64::from((count + 1).min(capacity)));
     }
 
     /// Publish a fresh `hid` sample when the 200 Hz timer comes round.

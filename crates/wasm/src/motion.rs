@@ -84,16 +84,17 @@ const IMU: usize = 12;
 const IMU_SAMPLES: usize = 3;
 const SAMPLE_BYTES: usize = 12;
 
-/// Acceleration in G and angular velocity in revolutions per second, averaged over the three
-/// samples of a report. The report's x and y axes are swapped.
-fn sample(report: &[u8], kind: Kind, cal: &Calibration) -> Option<([f32; 3], [f32; 3])> {
+/// One IMU sample: acceleration in G, angular velocity in revolutions per second.
+type Reading = ([f32; 3], [f32; 3]);
+
+/// The three samples of a report, oldest first and 5 ms apart. The report's x and y axes are
+/// swapped.
+fn samples(report: &[u8], kind: Kind, cal: &Calibration) -> Option<[Reading; IMU_SAMPLES]> {
     if report.len() < IMU + IMU_SAMPLES * SAMPLE_BYTES {
         return None;
     }
     let (accel_signs, gyro_signs) = kind.signs();
-    let mut accel = [0.0; 3];
-    let mut gyro = [0.0; 3];
-    for s in 0..IMU_SAMPLES {
+    Some(std::array::from_fn(|s| {
         let at = IMU + s * SAMPLE_BYTES;
         let raw = |i: usize| {
             f32::from(i16::from_le_bytes([
@@ -101,22 +102,29 @@ fn sample(report: &[u8], kind: Kind, cal: &Calibration) -> Option<([f32; 3], [f3
                 report[at + i * 2 + 1],
             ]))
         };
+        let mut accel = [0.0; 3];
+        let mut gyro = [0.0; 3];
         for (i, axis) in [1, 0, 2].into_iter().enumerate() {
             let a = cal.accel[axis];
             let g = cal.gyro[axis];
-            accel[i] += raw(axis) / (a.scale - a.offset) * 4.0 * accel_signs[i];
-            gyro[i] +=
+            accel[i] = raw(axis) / (a.scale - a.offset) * 4.0 * accel_signs[i];
+            gyro[i] =
                 (raw(3 + axis) - g.offset) * (936.0 / (g.scale - g.offset)) / 360.0 * gyro_signs[i];
         }
-    }
-    let n = IMU_SAMPLES as f32;
-    Some((accel.map(|v| v / n), gyro.map(|v| v / n)))
+        (accel, gyro)
+    }))
 }
 
-/// Hand the core a reading, or the loss of the sensor.
-pub(crate) fn publish(cpu: &mut Cpu, reading: Option<([f32; 3], [f32; 3])>) {
-    let (accel, gyro) = reading.unwrap_or_default();
-    cpu.set_motion_state(accel, gyro, reading.is_some());
+/// Hand the core a report's samples, or the loss of the sensor.
+pub(crate) fn publish(cpu: &mut Cpu, readings: Option<&[Reading]>) {
+    match readings {
+        Some(readings) => {
+            for &(accel, gyro) in readings {
+                cpu.push_motion_sample(accel, gyro);
+            }
+        }
+        None => cpu.disconnect_motion(),
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -138,20 +146,29 @@ mod tests {
     fn a_report_at_rest_reads_one_g() {
         // A left Joy-Con lying flat reports gravity on its z axis.
         let at_rest = [0, 0, 4096, 0, 0, 0];
-        let (accel, gyro) =
-            sample(&report([at_rest; 3]), Kind::Left, &Calibration::default()).unwrap();
+        let [(accel, gyro), ..] =
+            samples(&report([at_rest; 3]), Kind::Left, &Calibration::default()).unwrap();
         assert_eq!(accel, [0.0, 0.0, -1.0]);
         assert_eq!(gyro, [0.0; 3]);
     }
 
     #[test]
+    fn each_sample_of_a_report_is_kept_in_order() {
+        let tilt = |z: i16| [0, 0, z, 0, 0, 0];
+        let read = samples(
+            &report([tilt(1024), tilt(2048), tilt(4096)]),
+            Kind::Left,
+            &Calibration::default(),
+        )
+        .unwrap();
+        assert_eq!(read.map(|(accel, _)| accel[2]), [-0.25, -0.5, -1.0]);
+    }
+
+    #[test]
     fn x_and_y_swap_and_each_kind_flips_its_own_axes() {
         let moving = [100, 200, 300, 400, 500, 600];
-        let accel_of = |kind| {
-            sample(&report([moving; 3]), kind, &Calibration::default())
-                .unwrap()
-                .0
-        };
+        let accel_of =
+            |kind| samples(&report([moving; 3]), kind, &Calibration::default()).unwrap()[0].0;
         let g = 4.0 / 16384.0;
         assert_eq!(accel_of(Kind::Left), [200.0 * g, -100.0 * g, -300.0 * g]);
         assert_eq!(accel_of(Kind::Right), [-200.0 * g, -100.0 * g, 300.0 * g]);
@@ -160,13 +177,14 @@ mod tests {
     #[test]
     fn the_gyro_is_scaled_to_revolutions_per_second() {
         let spin = [0, 0, 0, 0, 0, 15335];
-        let (_, gyro) = sample(&report([spin; 3]), Kind::Left, &Calibration::default()).unwrap();
+        let [(_, gyro), ..] =
+            samples(&report([spin; 3]), Kind::Left, &Calibration::default()).unwrap();
         assert!((gyro[2] - 936.0 / 360.0).abs() < 1e-5, "{gyro:?}");
     }
 
     #[test]
     fn a_short_report_is_no_sample() {
-        assert!(sample(&[0; 30], Kind::Pro, &Calibration::default()).is_none());
+        assert!(samples(&[0; 30], Kind::Pro, &Calibration::default()).is_none());
     }
 
     #[test]

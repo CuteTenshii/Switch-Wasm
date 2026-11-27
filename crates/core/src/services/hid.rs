@@ -531,7 +531,7 @@ mod tests {
         let mut cpu = Cpu::new();
         map_hid(&mut cpu, SHMEM);
         cpu.cycles = crate::kernel::sched::HID_SAMPLE_PERIOD_CYCLES + 1;
-        cpu.set_motion_state([0.0, 0.0, -1.0], [0.0, 0.0, 1.0], true);
+        cpu.push_motion_sample([0.0, 0.0, -1.0], [0.0, 0.0, 1.0]);
         cpu.hid_tick();
 
         let lifo = SHMEM
@@ -569,15 +569,115 @@ mod tests {
         assert_eq!(float(68), 1.0, "orientation zz");
         assert!(float(36) > 0.99 && float(40) > 0.0, "orientation x row");
 
-        cpu.set_motion_state([0.0; 3], [0.0; 3], false);
+        cpu.disconnect_motion();
         cpu.cycles += crate::kernel::sched::HID_SAMPLE_PERIOD_CYCLES;
         cpu.hid_tick();
+        let newest = newest_six_axis_state(&cpu, lifo);
         assert_eq!(
             cpu.mem
-                .read_u32(state + u64::from(h::SIX_AXIS_ATTRIBUTES))
+                .read_u32(newest + u64::from(h::SIX_AXIS_ATTRIBUTES))
                 .unwrap(),
             0
         );
+    }
+
+    /// The state behind a six-axis LIFO's tail.
+    fn newest_six_axis_state(cpu: &Cpu, lifo: u64) -> u64 {
+        use crate::cpu::hid_shmem as h;
+        let tail = cpu.mem.read_u64(lifo + u64::from(h::LIFO_TAIL)).unwrap();
+        lifo + u64::from(h::LIFO_STORAGE + h::SIX_AXIS_STATE)
+            + tail * u64::from(h::SIX_AXIS_STORAGE_SIZE)
+    }
+
+    #[test]
+    fn each_motion_sample_is_its_own_entry_in_the_six_axis_ring() {
+        use crate::cpu::hid_shmem as h;
+        const SHMEM: u64 = 0x3000_0000;
+        let period = crate::kernel::sched::HID_SAMPLE_PERIOD_CYCLES;
+
+        let mut cpu = Cpu::new();
+        map_hid(&mut cpu, SHMEM);
+        let lifo = SHMEM
+            + u64::from(
+                h::NPAD
+                    + h::HANDHELD_SLOT * h::ENTRY_SIZE
+                    + h::SIX_AXIS_FULL_KEY_LIFO
+                    + h::SIX_AXIS_HANDHELD * h::SIX_AXIS_LIFO_SIZE,
+            );
+        let accel_x = |cpu: &Cpu, state: u64| {
+            f32::from_bits(
+                cpu.mem
+                    .read_u32(state + u64::from(h::SIX_AXIS_FLOATS))
+                    .unwrap(),
+            )
+        };
+        let sampling_number = |cpu: &Cpu, state: u64| {
+            cpu.mem
+                .read_u64(state + u64::from(h::SIX_AXIS_SAMPLING_NUMBER))
+                .unwrap()
+        };
+
+        for x in [0.1, 0.2, 0.3] {
+            cpu.push_motion_sample([x, 0.0, -1.0], [0.0; 3]);
+        }
+        let mut published = Vec::new();
+        for _ in 0..4 {
+            cpu.cycles += period + 1;
+            cpu.hid_tick();
+            let state = newest_six_axis_state(&cpu, lifo);
+            published.push((accel_x(&cpu, state), sampling_number(&cpu, state)));
+        }
+        // The fourth tick finds the backlog empty and holds the last sample.
+        assert_eq!(
+            published.iter().map(|&(x, _)| x).collect::<Vec<_>>(),
+            [0.1, 0.2, 0.3, 0.3]
+        );
+        assert!(published.windows(2).all(|w| w[1].1 == w[0].1 + 1));
+        assert_eq!(
+            cpu.mem.read_u64(lifo + u64::from(h::LIFO_COUNT)).unwrap(),
+            4
+        );
+
+        // The ring keeps the 17 newest and wraps its tail.
+        for _ in 0..20 {
+            cpu.push_motion_sample([0.5, 0.0, -1.0], [0.0; 3]);
+            cpu.cycles += period + 1;
+            cpu.hid_tick();
+        }
+        assert_eq!(
+            cpu.mem.read_u64(lifo + u64::from(h::LIFO_COUNT)).unwrap(),
+            17
+        );
+        assert!(cpu.mem.read_u64(lifo + u64::from(h::LIFO_TAIL)).unwrap() < 17);
+    }
+
+    #[test]
+    fn a_motion_backlog_drops_its_oldest_samples_once_full() {
+        use crate::cpu::hid_shmem as h;
+        const SHMEM: u64 = 0x3000_0000;
+
+        let mut cpu = Cpu::new();
+        map_hid(&mut cpu, SHMEM);
+        let lifo = SHMEM
+            + u64::from(
+                h::NPAD
+                    + h::HANDHELD_SLOT * h::ENTRY_SIZE
+                    + h::SIX_AXIS_FULL_KEY_LIFO
+                    + h::SIX_AXIS_HANDHELD * h::SIX_AXIS_LIFO_SIZE,
+            );
+        // Far more than the core keeps between ticks.
+        for i in 0..100 {
+            cpu.push_motion_sample([i as f32, 0.0, -1.0], [0.0; 3]);
+        }
+        cpu.cycles += crate::kernel::sched::HID_SAMPLE_PERIOD_CYCLES + 1;
+        cpu.hid_tick();
+        let state = newest_six_axis_state(&cpu, lifo);
+        let first = f32::from_bits(
+            cpu.mem
+                .read_u32(state + u64::from(h::SIX_AXIS_FLOATS))
+                .unwrap(),
+        );
+        assert!(first > 90.0, "published {first}, an old sample");
     }
 
     #[test]

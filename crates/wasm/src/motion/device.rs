@@ -7,7 +7,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::WorkerGlobalScope;
 
-use super::{publish, sample, Calibration, Kind, VENDOR};
+use super::{publish, samples, Calibration, Kind, VENDOR};
 use crate::post::post;
 use crate::session_if_live;
 
@@ -119,12 +119,12 @@ fn on_report(event: HidInputReportEvent) {
             }
         }
         REPORT_FULL => {
-            let reading = ACTIVE.with_borrow(|active| {
+            let readings = ACTIVE.with_borrow(|active| {
                 let active = active.as_ref()?;
-                sample(&data, active.kind, &active.calibration)
+                samples(&data, active.kind, &active.calibration)
             });
-            if let (Some(reading), Some(s)) = (reading, session_if_live()) {
-                publish(&mut s.cpu, Some(reading));
+            if let (Some(readings), Some(s)) = (readings, session_if_live()) {
+                publish(&mut s.cpu, Some(&readings));
             }
         }
         _ => {}
