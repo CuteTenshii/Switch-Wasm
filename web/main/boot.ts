@@ -14,7 +14,7 @@ import { onChainLoad, run, updateReadouts } from './runloop';
 import { endTitle, noteBooted, refuseBootWhileNandBusy } from './session';
 import { dropveilEl, setState, showScreen, stageEl } from './shell';
 import { runningIconUrl, setRunning } from './title';
-import type { RunningTitle } from './title';
+import { knownTitle, type KnownTitle } from './titles';
 
 export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<boolean> {
   if (refuseBootWhileNandBusy(file.name)) return false;
@@ -61,21 +61,19 @@ async function loadWith(name: string, load: () => Promise<number>): Promise<bool
 }
 
 // An NRO's icon and name from its asset section, falling back to the file name.
-async function homebrewTitle(filename: string): Promise<RunningTitle> {
+async function homebrewTitle(filename: string): Promise<KnownTitle> {
   let control: ControlData;
   try {
     control = await call('control');
   } catch (err) {
     log('No homebrew details: ' + (err as Error).message, 'debug');
-    return { name: filename, publisher: '', icon: null, version: '' };
+    return { id: '', name: filename, publisher: '', version: '', iconUrl: null };
   }
   const { info, icon } = control;
-  return {
-    name: info.name || filename,
-    publisher: info.publisher || '',
-    icon: icon && icon.length ? new Blob([icon], { type: info.icon_mime }) : null,
-    version: info.version || '',
-  };
+  const title = knownTitle(
+    { id: info.title_id, name: info.name, publisher: info.publisher, version: info.version },
+    icon, info.icon_mime);
+  return { ...title, name: title.name || filename };
 }
 
 export async function bootFile(file: File): Promise<void> {

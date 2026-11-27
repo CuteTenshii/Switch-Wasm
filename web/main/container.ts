@@ -15,20 +15,8 @@ import { call } from './rpc';
 import { run, updateReadouts } from './runloop';
 import { endTitle, noteBooted, refuseBootWhileNandBusy } from './session';
 import { openPanel, setNote, setState, showScreen } from './shell';
-import { holdUrl, releaseUrl } from './objecturl';
 import { setRunning } from './title';
-
-// What a launch puts on the loading screen.
-export interface LaunchIdentity {
-  name: string;
-  publisher: string;
-  titleId: string;
-  iconUrl: string | null;
-  // Kept so the top bar can make its own URL after this one is revoked.
-  icon: Blob | null;
-  // The NACP display version ("1.0.1"); may be empty.
-  version: string;
-}
+import { knownTitle, type KnownTitle } from './titles';
 
 const nspDrop = $('nsp-drop');
 nspDrop.addEventListener('dragover', (e) => {
@@ -326,22 +314,13 @@ export function clearNsp(): void {
   holdTitle(null, null);
 }
 
-let heldTitle: LaunchIdentity | null = null;
+// The open container's title, which its launch puts on the loading screen.
+let heldTitle: KnownTitle | null = null;
 
-function holdTitle(info: ControlInfo | null, icon: Bytes | null): LaunchIdentity | null {
-  if (heldTitle?.icon) releaseUrl(heldTitle.icon);
-  const blob = info && icon && icon.length
-    ? new Blob([icon], { type: info.icon_mime })
-    : null;
+function holdTitle(info: ControlInfo | null, icon: Bytes | null): KnownTitle | null {
   heldTitle = info
-    ? {
-        name: info.name,
-        publisher: info.publisher || '',
-        titleId: info.title_id,
-        iconUrl: blob ? holdUrl(blob) : null,
-        icon: blob,
-        version: info.version || '',
-      }
+    ? knownTitle({ id: info.title_id, name: info.name, publisher: info.publisher, version: info.version },
+        icon, info.icon_mime)
     : null;
   return heldTitle;
 }
@@ -370,7 +349,6 @@ function renderTitleCard(info: ControlInfo, iconUrl: string | null): HTMLElement
   if (iconUrl) {
     const img = el('img', 'title-icon');
     img.alt = info.name;
-    // The URL belongs to `heldTitle`, which revokes it.
     img.src = iconUrl;
     card.appendChild(img);
   }
@@ -538,10 +516,10 @@ function launchStandaloneNca(file: File): Promise<void> {
 }
 
 // The log's first line: title, publisher, id, version and file.
-function describeLaunch(file: string, identity?: LaunchIdentity | null): string {
+function describeLaunch(file: string, identity?: KnownTitle | null): string {
   if (!identity) return 'Launching ' + file;
   const parts = [identity.name + (identity.publisher ? ' by ' + identity.publisher : '')];
-  if (identity.titleId) parts.push(identity.titleId.toUpperCase());
+  if (identity.id) parts.push(identity.id.toUpperCase());
   if (identity.version) parts.push('version ' + identity.version);
   const container = openContainer?.file.name;
   parts.push('from ' + (container && container !== file ? container + ', ' + file : file));
@@ -562,7 +540,7 @@ onKeysChanged(() => {
 export async function doLaunchNca(
   name: string,
   loadFn: () => Promise<number>,
-  identity?: LaunchIdentity | null,
+  identity?: KnownTitle | null,
   note?: string,
   relaunch?: () => Promise<void>,
 ): Promise<void> {
@@ -602,10 +580,11 @@ export async function doLaunchNca(
     return;
   }
   setRunning({
+    id: identity?.id || '',
     name: identity?.name || name,
     publisher: identity?.publisher || '',
-    icon: identity?.icon ?? null,
     version: identity?.version || '',
+    iconUrl: identity?.iconUrl ?? null,
   });
   noteBooted();
   setState('loaded');

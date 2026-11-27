@@ -1,14 +1,6 @@
 // The running title, shown on the top bar and in the tab.
 import { $ } from './dom';
-import { holdUrl, releaseUrl } from './objecturl';
-
-export interface RunningTitle {
-  name: string;
-  publisher: string;
-  icon: Blob | null;
-  // NACP version, or the applied update's; empty when none.
-  version: string;
-}
+import type { KnownTitle } from './titles';
 
 const rootEl = $('running');
 const iconEl = $<HTMLImageElement>('running-icon');
@@ -18,14 +10,11 @@ const versionEl = $('running-version');
 const PAGE_TITLE = document.title;
 const SHORT_TITLE = PAGE_TITLE.split(' - ')[0];
 
-let icon: Blob | null = null;
 let iconUrl: string | null = null;
 
-// Pass `null` when the session is discarded.
-export function setRunning(title: RunningTitle | null): void {
-  if (icon) releaseUrl(icon);
-  icon = title?.icon ?? null;
-  iconUrl = icon ? holdUrl(icon) : null;
+// `version` is the applied update when there is one. Pass `null` when the session is discarded.
+export function setRunning(title: KnownTitle | null): void {
+  iconUrl = title?.iconUrl ?? null;
   rootEl.hidden = !title;
   rootEl.title = title
     ? title.name + (title.version ? ' - v' + title.version : '')
@@ -45,7 +34,6 @@ export function setRunning(title: RunningTitle | null): void {
     : PAGE_TITLE;
 }
 
-// Revoked when the next title replaces it, so don't keep it.
 export function runningIconUrl(): string | null {
   return iconUrl;
 }

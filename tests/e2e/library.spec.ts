@@ -76,6 +76,42 @@ test('a picked folder lists its games, a homebrew by its own name, and launches 
   await page.locator('#btn-clear-console').click();
 });
 
+test('each icon keeps one URL while the rest of the folder is read', async ({ page }) => {
+  const folder = join(mkdtempSync(join(tmpdir(), 'library-')), 'Games');
+  mkdirSync(folder, { recursive: true });
+  ['a', 'b', 'c'].forEach((name, i) => {
+    const icon = Buffer.concat([ICON, Buffer.from([i])]);
+    writeFileSync(join(folder, name + '.nro'), nroWithAssets(icon, nacp('App ' + name, 'Team', '1.0.0')));
+  });
+
+  await openPage(page);
+  await page.evaluate(() => {
+    const seen = new Set<string>();
+    (window as unknown as { iconUrls: Set<string> }).iconUrls = seen;
+    new MutationObserver(() => {
+      for (const img of document.querySelectorAll<HTMLImageElement>('#library-list img.library-icon')) {
+        seen.add(img.src);
+      }
+    }).observe(document.getElementById('library-list')!, { childList: true, subtree: true });
+  });
+  await page.locator('#library-dir').setInputFiles(folder);
+
+  const icons = page.locator('#library .library-row img.library-icon');
+  await expect(icons).toHaveCount(3);
+  await expect(page.locator('#library-status')).not.toContainText('Reading game details');
+  const urls = await page.evaluate(() => [...(window as unknown as { iconUrls: Set<string> }).iconUrls]);
+  expect(urls).toHaveLength(3);
+
+  const listed = await icons.nth(0).getAttribute('src');
+  await page.locator('#library .library-row').nth(0).click();
+  await expect(page.locator('#running-icon')).toHaveAttribute('src', listed!);
+  await expect(icons.nth(0)).toHaveAttribute('src', listed!);
+
+  // The fixture has no code, so it faults on its first instruction.
+  await openPanel(page, 'Console');
+  await page.locator('#btn-clear-console').click();
+});
+
 // The browser's private file system stands in for the folder picker: it hands back the same
 // kind of handle, which is what the page keeps.
 test('a folder picked through the browser comes back after a reload, until it is closed', async ({ page }) => {

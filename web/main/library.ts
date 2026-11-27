@@ -8,8 +8,8 @@ import { holdForLaunch } from './container';
 import { $, el } from './dom';
 import { hasProdKeys, onKeysChanged, revealKeys } from './keys';
 import { log } from './log';
-import { holdUrl, releaseUrl } from './objecturl';
 import { call } from './rpc';
+import { knownTitle } from './titles';
 
 const LISTED = /\.(nsp|nsz|xci|nro)$/i;
 
@@ -18,7 +18,7 @@ interface Found {
   // Inside the folder: two files of one name in different sub-folders stay apart.
   path: string;
   peek: PeekedTitle | null;
-  icon: Blob | null;
+  iconUrl: string | null;
   // Peeked, whether or not that found anything.
   read: boolean;
   // Peeked with keys loaded and found nothing; read again when the keys change.
@@ -51,7 +51,6 @@ const dirInput = $<HTMLInputElement>('library-dir');
 let folder: Folder | null = null;
 // The folder whose files are being peeked, so a second pass does not start beside it.
 let peeking: Folder | null = null;
-let shownIcons: Blob[] = [];
 
 const canPickFolder = 'showDirectoryPicker' in window || 'webkitdirectory' in dirInput;
 openButton.hidden = !canPickFolder;
@@ -139,11 +138,10 @@ function renderRow(row: Row): HTMLElement {
   const button = el('button', 'library-row');
   button.type = 'button';
   button.dataset.path = row.found.path;
-  if (row.found.icon) {
+  if (row.found.iconUrl) {
     const img = el('img', 'library-icon');
     img.alt = '';
-    shownIcons.push(row.found.icon);
-    img.src = holdUrl(row.found.icon);
+    img.src = row.found.iconUrl;
     button.appendChild(img);
   } else {
     button.appendChild(el('span', 'library-icon blank'));
@@ -171,8 +169,6 @@ function statusLine(text: string, action?: { label: string; run: () => void }): 
 
 function render(): void {
   const focused = (document.activeElement as HTMLElement | null)?.dataset?.path;
-  for (const blob of shownIcons) releaseUrl(blob);
-  shownIcons = [];
   listEl.replaceChildren();
   statusEl.replaceChildren();
   overlayEl.classList.toggle('has-library', folder !== null);
@@ -224,7 +220,7 @@ async function launch(row: Row): Promise<void> {
 }
 
 function found(file: File, path: string): Found {
-  return { file, path, peek: null, icon: null, read: false, failed: false };
+  return { file, path, peek: null, iconUrl: null, read: false, failed: false };
 }
 
 // Dot folders (`.Trash-1000`) and ones the browser refuses (`System Volume Information`) are
@@ -287,8 +283,10 @@ async function peekAll(): Promise<void> {
       try {
         const { title, icon } = await call('peekTitle', next.file);
         next.peek = title;
-        const mime = title.kind === 'game' || title.kind === 'homebrew' ? title.icon_mime : '';
-        next.icon = icon ? new Blob([icon], { type: mime || 'image/jpeg' }) : null;
+        next.iconUrl = title.kind === 'game' || title.kind === 'homebrew'
+          ? knownTitle({ id: title.title_id, name: title.name, publisher: title.publisher, version: title.version },
+            icon, title.icon_mime).iconUrl
+          : null;
       } catch (err) {
         next.failed = !isNro(next);
         log('No details for ' + next.path + ': ' + (err as Error).message, 'debug');
