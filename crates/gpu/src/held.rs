@@ -901,15 +901,29 @@ impl Gpu {
                 self.space.aliased.extend(hit);
             }
         }
+        // Run before every draw over every held surface, nearly all of them watched already.
+        if self
+            .space
+            .held
+            .values()
+            .all(|held| !held.watched.is_empty())
+        {
+            return;
+        }
         let pending: Vec<_> = self
             .space
             .pending
             .iter()
             .filter_map(|pending| pending.target().map(surface_span))
             .collect();
-        for held in self.space.held.values_mut() {
+        for held in self
+            .space
+            .held
+            .values_mut()
+            .filter(|held| held.watched.is_empty())
+        {
             let span = held_span(held);
-            if !held.watched.is_empty() || pending.iter().any(|p| spans_overlap(p, &span)) {
+            if pending.iter().any(|p| spans_overlap(p, &span)) {
                 continue;
             }
             held.watched = guest_pages(ctx, span.start, span.end - span.start);
