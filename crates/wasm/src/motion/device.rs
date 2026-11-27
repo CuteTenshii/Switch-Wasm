@@ -39,8 +39,10 @@ extern "C" {
     fn close(this: &HidDevice) -> Promise;
     #[wasm_bindgen(method, setter, js_name = oninputreport)]
     fn set_oninputreport(this: &HidDevice, handler: Option<&Function>);
+    // Takes a JS-owned array: a slice would be a view onto the shared wasm memory, which
+    // WebHID refuses.
     #[wasm_bindgen(method, catch, js_name = sendReport)]
-    fn send_report(this: &HidDevice, report_id: u8, data: &mut [u8]) -> Result<Promise, JsValue>;
+    fn send_report(this: &HidDevice, report_id: u8, data: &Uint8Array) -> Result<Promise, JsValue>;
 
     type HidInputReportEvent;
     #[wasm_bindgen(method, getter, js_name = reportId)]
@@ -152,7 +154,7 @@ async fn subcommand(device: &HidDevice, subcommand: u8, args: &[u8]) -> Result<V
     packet.push(subcommand);
     packet.extend(args);
     let sent = device
-        .send_report(REPORT_SUBCOMMAND, &mut packet)
+        .send_report(REPORT_SUBCOMMAND, &Uint8Array::from(&packet[..]))
         .map_err(describe)?;
     JsFuture::from(sent).await.map_err(describe)?;
     let winner = JsFuture::from(Promise::race(&js_sys::Array::of2(&reply, &timeout)))
