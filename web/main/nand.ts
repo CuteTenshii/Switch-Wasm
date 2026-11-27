@@ -3,14 +3,12 @@
 import { NAND_KIND, type NandEntry } from '../shared/protocol';
 import { $, el } from './dom';
 import { gatherNcas, type FirmwareFound } from './firmware';
-import { beginLoad } from './loading';
 import { hasProdKeys, onKeysChanged } from './keys';
 import { log } from './log';
 import { nandBusy, nandOperation, onNandBusy } from './nandbusy';
 import { call, onWorker } from './rpc';
-import { refuseBootWhileNandBusy } from './session';
 import { setNote } from './shell';
-import { doLaunchNca } from './container';
+import { launchProgram } from './container';
 import { zipExtract, zipMembers, type ZipMember } from './unzip';
 
 // Shared data archives (applet assets, Mii and amiibo models) registered by title id.
@@ -133,10 +131,8 @@ function nandRow(id: string, entry: NandEntry): HTMLButtonElement {
 }
 
 function launchInstalled(id: string, entry: NandEntry): Promise<void> {
-  const name = titleLabel(id);
-  if (refuseBootWhileNandBusy(name)) return Promise.resolve();
-  beginLoad(name, 'Reading ' + entry.name + ' from the NAND');
-  return doLaunchNca(name, () => call('nandLaunch', entry.name));
+  return launchProgram(titleLabel(id), () => call('nandLaunch', entry.name),
+    { phase: 'Reading ' + entry.name + ' from the NAND' });
 }
 
 // Content and index entry go together; a registered archive stays until the session is replaced.

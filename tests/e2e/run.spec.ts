@@ -25,6 +25,12 @@ test('Stop ends a running program without a loading screen, and the next boot ru
   await bootElf(page, aarch64Elf([ASM.halt]), 'halted');
 });
 
+test('a file opened while a program runs ends that program and runs in its place', async ({ page }) => {
+  await bootElf(page, aarch64Elf([ASM.spin]), 'running');
+  await bootElf(page, aarch64Elf([ASM.halt]), 'halted');
+  await expect(page.locator('#loading')).toHaveClass(/hidden/);
+});
+
 // Booting through a click: browsers ask before unload only after a user gesture.
 async function openElf(page: Page, until: EmuState): Promise<void> {
   const chooser = page.waitForEvent('filechooser');

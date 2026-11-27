@@ -5,60 +5,39 @@ import type { ControlData } from '../shared/protocol';
 import { bootContainer } from './container';
 import { $, pickedFile } from './dom';
 import { classify } from './filetype';
-import { fmtSize } from '../shared/format';
-import { awaitFirstFrame, beginLoad, failLoad, loadIdentity, loadPhase } from './loading';
+import { failLoad } from './loading';
+import { replaceTitle, startTitle } from './launch';
 import { log } from './log';
 import { nandBusy, onNandBusy } from './nandbusy';
 import { call } from './rpc';
-import { onChainLoad, run, updateReadouts } from './runloop';
-import { endTitle, noteBooted, refuseBootWhileNandBusy } from './session';
-import { dropveilEl, setState, showScreen, stageEl } from './shell';
-import { runningIconUrl, setRunning } from './title';
+import { onChainLoad } from './runloop';
+import { refuseBootWhileNandBusy } from './session';
+import { dropveilEl, stageEl } from './shell';
 import { knownTitle, type KnownTitle } from './titles';
 
-export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<boolean> {
-  if (refuseBootWhileNandBusy(file.name)) return false;
-  setState('loading');
-  beginLoad(file.name, 'Reading ' + fmtSize(file.size));
-  loadPhase(kind === 'nro' ? 'Loading the NRO' : 'Loading the ELF',
-    'Reading, mapping the image and seeding the guest');
-  return loadWith(file.name, () => call('loadProgram', file));
+function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<boolean> {
+  return startTitle({
+    name: file.name,
+    phase: kind === 'nro' ? 'Loading the NRO' : 'Loading the ELF',
+    detail: 'Reading, mapping the image and seeding the guest',
+    load: () => call('loadProgram', file),
+    loaded: () => homebrewTitle(file.name),
+  });
 }
 
 // Launch the NRO at `path` on the SD card in place of the running title, as hbmenu does.
 export async function launchFromSd(path: string): Promise<void> {
   const name = path.slice(path.lastIndexOf('/') + 1);
-  if (refuseBootWhileNandBusy(name)) return;
-  if (!(await replaceTitle(name))) return;
-  setState('loading');
-  loadPhase('Loading the NRO', 'Mapping the image and seeding the guest');
-  if (await loadWith(name, () => call('loadSd', path))) await run();
+  await startTitle({
+    name,
+    phase: 'Loading the NRO',
+    detail: 'Mapping the image and seeding the guest',
+    load: () => call('loadSd', path),
+    loaded: () => homebrewTitle(name),
+  });
 }
 
 onChainLoad((path) => void launchFromSd(path));
-
-// Load with `load`, which throws why it cannot, then show the program as booted.
-async function loadWith(name: string, load: () => Promise<number>): Promise<boolean> {
-  try {
-    await load();
-  } catch (err) {
-    const why = (err as Error).message;
-    setState('fault');
-    failLoad('Load failed: ' + why);
-    log('Load failed: ' + why, 'error', { openConsole: false });
-    return false;
-  }
-  const title = await homebrewTitle(name);
-  setRunning(title);
-  loadIdentity(title.name, runningIconUrl());
-  noteBooted();
-  setState('loaded');
-  // The loading screen stays over it until the first real frame (`display.noteFrame`).
-  showScreen();
-  awaitFirstFrame();
-  await updateReadouts();
-  return true;
-}
 
 // An NRO's icon and name from its asset section, falling back to the file name.
 async function homebrewTitle(filename: string): Promise<KnownTitle> {
@@ -89,23 +68,7 @@ export async function bootFile(file: File): Promise<void> {
     await bootContainer(file, verdict.format);
     return;
   }
-  if (await loadProgram(file, verdict.format)) await run();
-}
-
-// End whatever runs before booting `name`.
-async function replaceTitle(name: string): Promise<boolean> {
-  try {
-    beginLoad(name, 'Ending the running title');
-    setRunning(null);
-    await endTitle();
-    return true;
-  } catch (err) {
-    const why = (err as Error).message;
-    setState('fault');
-    failLoad('The running title could not be ended: ' + why);
-    log('The running title could not be ended: ' + why, 'error', { openConsole: false });
-    return false;
-  }
+  await loadProgram(file, verdict.format);
 }
 
 // The Open buttons are labels for the file input, so disabling the input stops the picker.

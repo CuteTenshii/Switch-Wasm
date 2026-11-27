@@ -7,12 +7,11 @@ import { hasKeys, stageKeys, updateKeysState } from './keys';
 import { log, logLevel, offerPreviousLog, onLogLevel } from './log';
 import { initNand } from './nand';
 import { attachScreen, call, initWorker, whenStarted } from './rpc';
-import { updateReadouts, updateRam } from './runloop';
+import { updateRam } from './runloop';
 import { loadProfiles, stageUsers } from './users';
 import { sdRequestPersistence } from './sdcard';
-import { screenEl, setState, showOverlay } from './shell';
-import { endTitle } from './session';
-import { setRunning } from './title';
+import { screenEl } from './shell';
+import { stopTitle } from './launch';
 import { restoreLibrary } from './library';
 import { endLoad, failLoad, loadPhase } from './loading';
 
@@ -70,22 +69,7 @@ async function init(): Promise<void> {
   await restoreLibrary();
 }
 
-$('btn-stop').addEventListener('click', async () => {
-  // Stops the run before any slice report is handled.
-  const ended = endTitle();
-  endLoad();
-  setRunning(null);
-  setState('idle');
-  showOverlay(true);
-  try {
-    await ended;
-  } catch (err) {
-    log('Stop failed: ' + (err as Error).message, 'error');
-    return;
-  }
-  await call('clearScreen');
-  await updateReadouts();
-});
+$('btn-stop').addEventListener('click', stopTitle);
 
 watchBattery();
 void init();

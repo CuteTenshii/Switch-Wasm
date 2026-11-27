@@ -7,18 +7,15 @@ import { $, el, pickedFile } from './dom';
 import { classify } from './filetype';
 import { fmtSize } from '../shared/format';
 import { hasProdKeys, onKeysChanged, revealKeys } from './keys';
-import {
-  awaitFirstFrame, beginLoad, currentAction, failLoad, loadPhase, type LoadAction,
-} from './loading';
+import { failBoot, startTitle } from './launch';
+import { beginLoad, currentAction, failLoad, type LoadAction } from './loading';
 import { log } from './log';
 import {
   describeDlc, describeUpdate, extrasFor, holdDlc, holdUpdate, pairedNotes, type HeldDlc,
 } from './pairing';
 import { call } from './rpc';
-import { run, updateReadouts } from './runloop';
-import { endTitle, noteBooted, refuseBootWhileNandBusy } from './session';
-import { openPanel, setNote, setState, showScreen } from './shell';
-import { setRunning } from './title';
+import { refuseBootWhileNandBusy } from './session';
+import { openPanel, setNote, setState } from './shell';
 import { appendRows, renderTitleCard } from './titlecard';
 import { knownTitle, type KnownTitle } from './titles';
 
@@ -139,11 +136,7 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
       return;
     }
     if (info.content_type !== 'Program') {
-      const why = file.name + ' is a ' + info.content_type
-        + ' NCA - only a Program NCA holds an executable.';
-      setState('fault');
-      failLoad(why);
-      log(why, 'error', { openConsole: false });
+      failBoot(file.name + ' is a ' + info.content_type + ' NCA - only a Program NCA holds an executable.');
       return;
     }
     await launchStandaloneNca(file);
@@ -328,12 +321,12 @@ function launchNca(name: string, index?: number): Promise<void> {
     await showTitleCard();
     await launchNca(name, index);
   };
-  return doLaunchNca(name, () => call('launch', index), identity, notes.join(' '), relaunch);
+  return launchProgram(name, () => call('launch', index), { identity, note: notes.join(' '), relaunch });
 }
 
 // Same as `launchNca`, for a standalone .nca that is already the open container.
 function launchStandaloneNca(file: File): Promise<void> {
-  return doLaunchNca(file.name, () => call('launch'), heldTitle);
+  return launchProgram(file.name, () => call('launch'), { identity: heldTitle });
 }
 
 // The log's first line: title, publisher, id, version and file.
@@ -358,60 +351,38 @@ onKeysChanged(() => {
   if (currentAction() === pending.action) void pending.relaunch();
 });
 
-export async function doLaunchNca(
+/** Launch an NCA program with `load`; `relaunch` reruns it once prod.keys are in, if they were missing. */
+export async function launchProgram(
   name: string,
-  loadFn: () => Promise<number>,
-  identity?: KnownTitle | null,
-  note?: string,
-  relaunch?: () => Promise<void>,
+  load: () => Promise<number>,
+  { identity = null, note, phase = 'Decrypting the program and reading its ExeFS', relaunch }: {
+    identity?: KnownTitle | null;
+    note?: string;
+    phase?: string;
+    relaunch?: () => Promise<void>;
+  } = {},
 ): Promise<void> {
-  if (refuseBootWhileNandBusy(identity?.name || name)) return;
-  log(describeLaunch(name, identity), 'info');
-  if (note) log(note, 'info');
-  setState('loading');
-  setRunning(null);
-  beginLoad(identity?.name || name, 'Decrypting the program and reading its ExeFS',
-    identity?.iconUrl);
-  try {
-    await endTitle();
-  } catch (err) {
-    const why = (err as Error).message;
-    setState('fault');
-    failLoad('The running title could not be ended: ' + why);
-    log('The running title could not be ended: ' + why, 'error', { openConsole: false });
-    return;
-  }
-  try {
-    await loadFn();
-  } catch (err) {
-    const why = (err as Error).message;
-    setState('fault');
-    // Without prod.keys no NCA header decrypts, so that is the cause whatever the core reports.
-    if (hasProdKeys()) failLoad('Launch failed: ' + why);
-    else {
+  await startTitle({
+    name,
+    identity,
+    phase,
+    announce: [describeLaunch(name, identity), ...(note ? [note] : [])],
+    load,
+    failed: (why) => {
+      // Without prod.keys no NCA header decrypts, so that is the cause whatever the core reports.
+      if (hasProdKeys()) {
+        failBoot('Launch failed: ' + why);
+        return;
+      }
       const action = { label: 'Load prod.keys', run: revealKeys };
       launchAwaitingKeys = {
         action,
-        relaunch: relaunch ?? (() => doLaunchNca(name, loadFn, identity, note)),
+        relaunch: relaunch ?? (() => launchProgram(name, load, { identity, note, phase })),
       };
+      setState('fault');
       failLoad('This game is encrypted. Load the prod.keys file from your Switch to play it.',
         undefined, action);
-    }
-    log('Launch failed: ' + why, 'error', { openConsole: false });
-    return;
-  }
-  setRunning({
-    id: identity?.id || '',
-    name: identity?.name || name,
-    publisher: identity?.publisher || '',
-    version: identity?.version || '',
-    iconUrl: identity?.iconUrl ?? null,
+      log('Launch failed: ' + why, 'error', { openConsole: false });
+    },
   });
-  noteBooted();
-  setState('loaded');
-  loadPhase('Starting the process');
-  showScreen();
-  awaitFirstFrame();
-  await updateReadouts();
-  await run();
 }

@@ -11,10 +11,21 @@ import { abortRun } from './runloop';
 import { stageUsers } from './users';
 
 let booted = false;
+// Nothing has been loaded since the title was last ended, so ending it again would do nothing.
+let ended = true;
+
+// Record that a load into the session begins; whether it succeeds or fails, it leaves a title to end.
+export function noteLoading(): void {
+  ended = false;
+}
 
 // Record that a title was loaded.
 export function noteBooted(): void {
   booted = true;
+}
+
+export function titleEnded(): boolean {
+  return ended;
 }
 
 export function titleBooted(): boolean {
@@ -43,6 +54,7 @@ export async function endTitle(): Promise<void> {
   resetAudio();
   resetDisplay();
   await call('endTitle');
+  ended = true;
   booted = false;
   resetMemoryHistory();
   // A running title keeps the player it started with; the next one gets the current list.
