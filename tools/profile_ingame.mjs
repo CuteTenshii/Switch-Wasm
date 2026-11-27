@@ -1,10 +1,13 @@
 // Run a title through browser_boot.mjs, wait for a state worth measuring, then profile the page:
 //   node tools/profile_ingame.mjs <container> | --nand=name [--when-fps=low-high] [--after=seconds]
-//                                 [--settle=samples] [--record=seconds] [--dir=out] [browser_boot flags]
+//                                 [--settle=samples] [--record=seconds] [--dir=out] [--callers=regex]
+//                                 [browser_boot flags]
 // Recording starts once `--settle` samples in a row, past `--after`, sit in the fps range. The report
 // names the wasm functions of the busiest thread, and gives every thread's CPU in the page and the
 // GPU process, which perf cannot attach to. Needs perf on Linux and sample on macOS (the report then
 // has process CPU and the busiest threads, not per-thread CPU), and --seconds caps the wait.
+// `--callers` records call chains through frame pointers, as V8 keeps them in wasm and JS frames,
+// and ranks the chains under the busiest thread's functions whose names match (Linux only).
 import { spawn, spawnSync } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -12,21 +15,25 @@ import { createInterface } from 'node:readline';
 import { commandLine, fail, repoRoot } from './common.mjs';
 
 const darwin = process.platform === 'darwin';
-const OWN_FLAGS = ['when-fps', 'after', 'settle', 'record', 'dir'];
+const OWN_FLAGS = ['when-fps', 'after', 'settle', 'record', 'dir', 'callers'];
 const SAMPLE_HZ = 500;
 const TOP_INTERVAL_S = 5;
 const FUNCTIONS_SHOWN = 45;
+const CHAINS_SHOWN = 25;
+const CHAIN_DEPTH = 8;
 
 const { args, flag, positional } = commandLine();
 if (!positional.length && !flag('nand')) {
   fail('usage: node tools/profile_ingame.mjs <container> | --nand=name [--when-fps=low-high]'
-    + ' [--after=seconds] [--settle=samples] [--record=seconds] [--dir=out] [browser_boot flags]');
+    + ' [--after=seconds] [--settle=samples] [--record=seconds] [--dir=out] [--callers=regex] [browser_boot flags]');
 }
 const [low, high] = (flag('when-fps') ?? '0.3-4').split('-').map(Number);
 const after = Number(flag('after') ?? 0);
 const settle = Number(flag('settle') ?? 6);
 const record = Number(flag('record') ?? 40);
 const dir = resolve(flag('dir') ?? 'profile');
+const callers = flag('callers') === undefined ? null : new RegExp(flag('callers'));
+if (callers && darwin) fail('--callers needs perf, which macOS does not have');
 mkdirSync(dir, { recursive: true });
 
 const processes = () => spawnSync('ps', ['-eo', 'pid=,ppid=,pcpu=,args='], { encoding: 'utf8', maxBuffer: 1 << 26 })
@@ -66,19 +73,41 @@ function symbolAt(symbols, ip) {
   return hit && ip < hit.start + hit.size ? hit.name : null;
 }
 
-// perf does not apply a JIT map to anonymous V8 pages, so the samples are resolved here.
-function reportPerf(data, map) {
-  const script = spawnSync('perf', ['script', '-i', data, '-G', '-F', 'comm,tid,ip,dso'], { encoding: 'utf8', maxBuffer: 1 << 30 });
-  const symbols = resolveSymbols(map);
-  const threads = new Map();
+// perf does not apply a JIT map to anonymous V8 pages, so the samples are resolved here. A sample
+// is one line, or with call chains a header line and one indented line per frame, leaf first.
+function perfSamples(data, symbols) {
+  const script = spawnSync('perf', ['script', '-i', data, '-F', 'comm,tid,ip,dso'], { encoding: 'utf8', maxBuffer: 1 << 30 });
+  const name = (ip, dso) => symbolAt(symbols, BigInt(`0x${ip}`)) ?? `[${dso.split('/').pop()}]`;
+  const samples = [];
+  let open = null;
   for (const line of script.stdout.split('\n')) {
-    const match = /^\s*(.*?)\s+(\d+)\s+([0-9a-f]+)\s+\((.*)\)\s*$/.exec(line);
-    if (!match) continue;
-    const [, comm, tid, ip, dso] = match;
-    const name = symbolAt(symbols, BigInt(`0x${ip}`)) ?? `[${dso.split('/').pop()}]`;
+    const frame = /^\s+([0-9a-f]+)\s+\((.*)\)\s*$/.exec(line);
+    if (frame && open) {
+      open.frames.push(name(frame[1], frame[2]));
+      continue;
+    }
+    const single = /^\s*(.*?)\s+(\d+)\s+([0-9a-f]+)\s+\((.*)\)\s*$/.exec(line);
+    if (single) {
+      samples.push({ comm: single[1], tid: single[2], frames: [name(single[3], single[4])] });
+      open = null;
+      continue;
+    }
+    const header = /^(\S.*?)\s+(\d+)\s*$/.exec(line);
+    open = header ? { comm: header[1], tid: header[2], frames: [] } : null;
+    if (open) samples.push(open);
+  }
+  return samples.filter((sample) => sample.frames.length);
+}
+
+const shortName = (name) => name.replace(/^(LazyCompile|Function|JS):/, '').slice(0, 100);
+
+function reportPerf(data, map) {
+  const samples = perfSamples(data, resolveSymbols(map));
+  const threads = new Map();
+  for (const { comm, tid, frames } of samples) {
     const thread = threads.get(tid) ?? { comm, samples: 0, functions: new Map() };
     thread.samples += 1;
-    thread.functions.set(name, (thread.functions.get(name) ?? 0) + 1);
+    thread.functions.set(frames[0], (thread.functions.get(frames[0]) ?? 0) + 1);
     threads.set(tid, thread);
   }
   const ranked = [...threads].sort((a, b) => b[1].samples - a[1].samples);
@@ -87,9 +116,28 @@ function reportPerf(data, map) {
   for (const [tid, thread] of ranked.slice(0, 3)) {
     out.push('', `Functions on thread ${tid} (${thread.comm}), ${thread.samples} samples:`);
     const functions = [...thread.functions].sort((a, b) => b[1] - a[1]).slice(0, FUNCTIONS_SHOWN);
-    for (const [name, samples] of functions) {
-      out.push(`${(100 * samples / thread.samples).toFixed(2).padStart(7)}%  ${name.replace(/^(LazyCompile|Function|JS):/, '').slice(0, 100)}`);
+    for (const [name, count] of functions) {
+      out.push(`${(100 * count / thread.samples).toFixed(2).padStart(7)}%  ${shortName(name)}`);
     }
+  }
+  if (callers && ranked.length) out.push('', ...reportCallers(samples, ranked[0]));
+  return out;
+}
+
+// The chains of the busiest thread's samples whose leaf matches `--callers`, counted whole and
+// ranked; a share is of every sample on the thread.
+function reportCallers(samples, [tid, thread]) {
+  const chains = new Map();
+  let matched = 0;
+  for (const sample of samples) {
+    if (sample.tid !== tid || !callers.test(sample.frames[0])) continue;
+    matched += 1;
+    const chain = sample.frames.slice(0, CHAIN_DEPTH).map(shortName).join('\n      <- ');
+    chains.set(chain, (chains.get(chain) ?? 0) + 1);
+  }
+  const out = [`Chains under functions matching ${callers} on thread ${tid}, ${matched} of ${thread.samples} samples:`];
+  for (const [chain, count] of [...chains].sort((a, b) => b[1] - a[1]).slice(0, CHAINS_SHOWN)) {
+    out.push(`${(100 * count / thread.samples).toFixed(2).padStart(7)}%  ${chain}`);
   }
   return out;
 }
@@ -202,7 +250,8 @@ if (darwin) {
   const shots = String(Math.round(record / TOP_INTERVAL_S) + 1);
   const top = spawn('top', ['-H', '-b', '-d', String(TOP_INTERVAL_S), '-n', shots, '-p', `${renderer},${gpu}`], { stdio: ['ignore', 'pipe', 'ignore'] });
   top.stdout.pipe(topFile);
-  const perf = spawnSync('perf', ['record', '-q', '-e', 'cpu-clock:u', '-F', String(SAMPLE_HZ), '-p', String(renderer), '-o', data, '--', 'sleep', String(record)], { encoding: 'utf8' });
+  const chains = callers ? ['--call-graph=fp'] : [];
+  const perf = spawnSync('perf', ['record', '-q', '-e', 'cpu-clock:u', ...chains, '-F', String(SAMPLE_HZ), '-p', String(renderer), '-o', data, '--', 'sleep', String(record)], { encoding: 'utf8' });
   profiled = perf.status === 0;
   if (!profiled) console.error(`perf failed: ${perf.stderr.trim()}`);
   await new Promise((done) => top.on('close', done));
