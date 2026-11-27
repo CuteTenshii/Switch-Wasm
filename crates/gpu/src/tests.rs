@@ -1821,6 +1821,145 @@ fn a_compute_launch_on_the_device_writes_what_the_software_dispatch_writes() {
     assert_eq!(device.output(12), expected);
 }
 
+/// Two surfaces at one address, as a rebinding guest draws them: the first, dirty, and a
+/// second over the same 128 bytes laid out differently. The first's texture holds `seed`.
+fn rebound_pair(
+    gpu: &mut super::Gpu,
+    h: &mut switch_core::gpu::testing::ComputeHarness,
+    seed: u8,
+) -> (
+    switch_core::gpu::upload::Target,
+    switch_core::gpu::upload::Target,
+) {
+    use switch_core::gpu::pipeline::Format;
+    use switch_core::gpu::surface::Layout;
+    use switch_core::gpu::upload::Target;
+    let surface = |width: u32, height: u32| Target {
+        format: Format::Rgba8Unorm,
+        addr: h.base + 0x2000,
+        width,
+        height,
+        layout: Layout::Pitch { pitch: width * 4 },
+        row_bytes: width * 4,
+        rows: height,
+        unit: 4,
+        depth: None,
+    };
+    let (first, second) = (surface(8, 4), surface(4, 8));
+    gpu.hold(&first, &h.ctx()).unwrap();
+    let held = gpu.space.held.get_mut(&first.addr).unwrap();
+    held.dirty = true;
+    let texels: Vec<u8> = (0..128).map(|i| seed.wrapping_add(i)).collect();
+    gpu.queue.write_texture(
+        held.texture.as_image_copy(),
+        &texels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(32),
+            rows_per_image: Some(4),
+        },
+        held.texture.size(),
+    );
+    (first, second)
+}
+
+/// The 128 guest bytes at `addr`.
+fn guest_bytes(h: &mut switch_core::gpu::testing::ComputeHarness, addr: u64) -> Vec<u8> {
+    let ctx = h.ctx();
+    (0..128)
+        .map(|i| ctx.vmm_read_u8(addr + i).unwrap())
+        .collect()
+}
+
+/// A surface the guest rebinds stays on the device rather than going back, and drawing into it
+/// again brings back its own texture and texels, with nothing read back on the way.
+#[test]
+fn a_rebound_surface_held_again_comes_back_without_a_readback() {
+    use switch_core::gpu::renderer::{Flush, Renderer};
+    use switch_core::gpu::testing::ComputeHarness;
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let mut h = ComputeHarness::new(&[], [1, 1, 1], [1, 1, 1], 0);
+    let (first, second) = rebound_pair(&mut gpu, &mut h, 7);
+    let texture = gpu.space.held[&first.addr].texture.clone();
+    gpu.hold(&second, &h.ctx()).unwrap();
+    assert_eq!(gpu.space.retired.len(), 1);
+    assert!(
+        gpu.space.pending.is_empty(),
+        "the rebound surface was read back"
+    );
+    gpu.hold(&first, &h.ctx()).unwrap();
+    let held = &gpu.space.held[&first.addr];
+    assert_eq!(held.target, first);
+    assert_eq!(held.texture, texture, "held again from a new texture");
+    assert!(held.dirty);
+    assert!(
+        gpu.space.pending.is_empty(),
+        "held again through a readback"
+    );
+    let mut flushes = 0;
+    while gpu.flush(&mut h.ctx()).unwrap() == Flush::Pending {
+        flushes += 1;
+        assert!(flushes < 100, "the readback never landed");
+    }
+    let expected: Vec<u8> = (0..128).map(|i| 7u8.wrapping_add(i)).collect();
+    assert_eq!(guest_bytes(&mut h, first.addr), expected);
+}
+
+/// An engine about to read memory a retired surface covers gets the surface's texels there.
+#[test]
+fn a_read_of_a_retired_surface_sends_it_back() {
+    use switch_core::gpu::renderer::{Flush, Renderer};
+    use switch_core::gpu::testing::ComputeHarness;
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let mut h = ComputeHarness::new(&[], [1, 1, 1], [1, 1, 1], 0);
+    let (first, second) = rebound_pair(&mut gpu, &mut h, 40);
+    gpu.hold(&second, &h.ctx()).unwrap();
+    let span = first.addr..first.addr + first.len();
+    assert!(!gpu.guest_memory_is_current(std::slice::from_ref(&span), &mut h.ctx()));
+    let mut synced = 0;
+    while gpu
+        .sync_ranges(std::slice::from_ref(&span), &[], &mut h.ctx())
+        .unwrap()
+        == Flush::Pending
+    {
+        synced += 1;
+        assert!(synced < 100, "the readback never landed");
+    }
+    assert!(gpu.space.retired.is_empty());
+    let expected: Vec<u8> = (0..128).map(|i| 40u8.wrapping_add(i)).collect();
+    assert_eq!(guest_bytes(&mut h, first.addr), expected);
+}
+
+/// A retired surface nothing holds again goes back once enough presents pass without it.
+#[test]
+fn a_retired_surface_goes_back_after_presents_without_it() {
+    use switch_core::gpu::testing::ComputeHarness;
+
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let mut h = ComputeHarness::new(&[], [1, 1, 1], [1, 1, 1], 0);
+    let (_, second) = rebound_pair(&mut gpu, &mut h, 1);
+    gpu.hold(&second, &h.ctx()).unwrap();
+    gpu.age_retired();
+    assert_eq!(gpu.space.retired.len(), 1, "sent back before any present");
+    let mut presents = 0;
+    while !gpu.space.retired.is_empty() {
+        gpu.frames_presented += 1;
+        gpu.age_retired();
+        presents += 1;
+        assert!(presents < 100, "never sent back");
+    }
+    assert!(presents > 1, "sent back at the first present");
+    assert_eq!(gpu.space.pending.len(), 1, "sent back without a readback");
+}
+
 /// A sync for an engine's ranges sends back only the held surfaces over them: one it reads
 /// stays held, one it overwrites is let go, and one beside them stays on the device unsent.
 #[test]

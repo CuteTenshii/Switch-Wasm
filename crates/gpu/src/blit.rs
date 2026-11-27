@@ -94,7 +94,11 @@ impl Gpu {
             let range = surface.addr..surface.addr + u64::from(surface.size());
             self.space.held.values().any(|held| {
                 held.target.addr != surface.addr && overlap(&span(&held.target), &range)
-            })
+            }) || self
+                .space
+                .retired
+                .iter()
+                .any(|retired| overlap(&span(&retired.held.target), &range))
         })
     }
 
@@ -122,9 +126,14 @@ impl Gpu {
             clear(&held.target) && held.other.as_ref().is_none_or(|other| clear(&other.target))
         }) && self
             .space
-            .pending
+            .retired
             .iter()
-            .all(|pending| pending.target().is_none_or(clear))
+            .all(|retired| clear(&retired.held.target))
+            && self
+                .space
+                .pending
+                .iter()
+                .all(|pending| pending.target().is_none_or(clear))
     }
 
     /// Whether `ranges` miss every buffer shaders wrote on the device, held or on its way back.

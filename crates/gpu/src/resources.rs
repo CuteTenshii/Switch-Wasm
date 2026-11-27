@@ -183,8 +183,13 @@ impl Gpu {
         buffer
     }
 
-    /// Drop every cached texture the guest has written over.
+    /// Drop every cached texture the guest has written over, and those under surfaces retired
+    /// since, whose texels guest memory does not have yet.
     pub(super) fn evict_written(&mut self, ctx: &mut ExecCtx) {
+        for span in std::mem::take(&mut self.space.retired_spans) {
+            let pages = guest_pages(ctx, span.start, span.end - span.start);
+            self.evict_pages(pages);
+        }
         if !ctx.mem.has_dirty_gpu() {
             self.watch_held(ctx, &[]);
             return;

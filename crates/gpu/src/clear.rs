@@ -260,9 +260,14 @@ impl Gpu {
                     .is_some_and(|other| overlaps(&other.target))
         }) && !self
             .space
-            .pending
+            .retired
             .iter()
-            .any(|pending| pending.target().is_some_and(overlaps))
+            .any(|retired| overlaps(&retired.held.target))
+            && !self
+                .space
+                .pending
+                .iter()
+                .any(|pending| pending.target().is_some_and(overlaps))
     }
 
     /// Clear the depth surface, on the device.
@@ -320,12 +325,16 @@ impl Gpu {
             Some(held) if held.target == *target => return Ok(()),
             Some(_) => {
                 if let Some(held) = self.space.held.remove(&target.addr) {
-                    self.ask_for(held);
+                    self.retire(held);
                 }
             }
             None => {}
         }
         self.note_aliases(target);
+        // Its texels are about to be cleared, but its texture serves.
+        if self.resurrect(target) {
+            return Ok(());
+        }
         let texture = self.blank_target(target)?;
         self.space.held.insert(
             target.addr,

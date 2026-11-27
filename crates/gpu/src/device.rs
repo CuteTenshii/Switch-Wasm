@@ -89,6 +89,8 @@ impl Gpu {
             lost,
             deferred_readbacks: false,
             crop_switches: 0,
+            surfaces_retired: 0,
+            surfaces_resurrected: 0,
             pass: None,
             batch: None,
             batched_draws: 0,

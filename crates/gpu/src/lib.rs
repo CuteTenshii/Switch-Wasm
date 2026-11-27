@@ -670,6 +670,12 @@ struct Space {
     /// Surfaces that overlap another held at a different address: they go back at the next
     /// present, and a blit touching held memory waits for that.
     aliased: Vec<u64>,
+    /// Surfaces no longer held, kept on the device rather than read back, oldest first. See
+    /// [`Gpu::retire`].
+    retired: Vec<Retired>,
+    /// Memory retired surfaces cover, whose cached textures go at the next chance to look up
+    /// their pages. See [`Gpu::evict_written`].
+    retired_spans: Vec<std::ops::Range<u64>>,
     /// Asks made for a whole frame's surfaces; each readback carries its ask's number.
     asked: u64,
     /// Deswizzled texture bytes, evicted when the guest writes their pages.
@@ -690,6 +696,13 @@ struct Space {
     /// Which kept inputs a guest page holds bytes for.
     input_pages: std::collections::HashMap<u32, Vec<(u64, u64)>>,
     input_bytes: u64,
+}
+
+/// A surface the guest stopped rendering into, and the present it was retired before.
+#[derive(Debug)]
+struct Retired {
+    held: Held,
+    presented: u64,
 }
 
 /// A device copy of guest memory a compute launch reads and never writes.
@@ -857,6 +870,10 @@ pub struct Gpu {
     batched_draws: u32,
     /// Depth surfaces switched between sizes on the device. See [`Gpu::switch_crop`].
     crop_switches: u64,
+    /// Surfaces retired rather than read back, and those held again from there. See
+    /// [`Gpu::retire`].
+    surfaces_retired: u64,
+    surfaces_resurrected: u64,
     /// `--defer-readbacks` on `screenshot`: never wait for readbacks, to reproduce a browser natively.
     defer_readbacks: bool,
     /// `--interleave` on `screenshot`: interleave fallback draws into device frames even with late readbacks.
@@ -1534,6 +1551,7 @@ impl Renderer for Gpu {
         // A frame shown here skips `submit_frame`, which otherwise collects finished readbacks:
         // without this, every surface sent back while frames were shown so stayed on the device.
         self.land_ready(ctx)?;
+        self.age_retired();
         // A write since the last draw has to count before the held surface is shown.
         self.evict_written(ctx);
         Ok(self.scan_out_held(ctx, shot))
@@ -1573,6 +1591,8 @@ impl Renderer for Gpu {
             // `held` grows with flush cost.
             .field("held", self.space.held.len())
             .field("cropSwitches", self.crop_switches)
+            .field("retired", self.surfaces_retired)
+            .field("resurrected", self.surfaces_resurrected)
             .field("pending", self.space.pending.len());
         out.object("read", |read| {
             read.field("textures", self.uploaded.textures)

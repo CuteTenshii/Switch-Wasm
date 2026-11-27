@@ -4,6 +4,7 @@ use crate::builtin::LOAD_DEPTH_WGSL;
 use crate::convert::{depth_texture_format, held_attachment_format, narrow, widen, Widen};
 use crate::readback::{Held, Pending, Readback, Scratch, MAP_FAILED, MAP_READY, MAP_WAITING};
 use crate::resources::guest_pages;
+use crate::Retired;
 use crate::{Gpu, Space, COPY_ALIGNMENT, MAX_FRAMES_IN_FLIGHT};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::renderer::{Flush, Submit};
@@ -13,6 +14,12 @@ use switch_core::{Error, Result};
 
 /// Past this much held across a present, it all goes back to guest memory and is freed.
 const MAX_HELD_BYTES: u64 = 512 << 20;
+
+/// Presents a retired surface waits to be held again before it goes back to guest memory.
+const RETIRED_PRESENTS: u64 = 4;
+
+/// Past this much retired at a present, the oldest go back to guest memory.
+const MAX_RETIRED_BYTES: u64 = 256 << 20;
 
 /// Guest memory a target's texels occupy; block-linear rows pad out to whole blocks.
 pub(super) fn surface_span(target: &Target) -> std::ops::Range<u64> {
@@ -32,6 +39,18 @@ pub(super) fn every_layer_held(
         && (0..key.layers.max(1)).all(|layer| {
             held.contains_key(&(key.addr + u64::from(layer) * u64::from(key.layer_stride)))
         })
+}
+
+/// Record the pages of `held` the guest wrote. Only pages wholly the surface's count: other data
+/// shares the rest, and the guest writing that says nothing about the surface's texels.
+fn note_overwritten(held: &mut Held, ctx: &ExecCtx, written: &std::collections::HashSet<u32>) {
+    let span = held_span(held);
+    for (range, page) in gpu_pages(ctx, span) {
+        let whole = range.end - range.start == 1 << PAGE_BITS;
+        if whole && written.contains(&page) && !held.overwritten.iter().any(|(_, p)| *p == page) {
+            held.overwritten.push((range, page));
+        }
+    }
 }
 
 /// Whether two targets are one depth surface, one cropped from the other.
@@ -87,6 +106,9 @@ impl Gpu {
         for pending in space.pending {
             pending.destroy();
         }
+        for retired in space.retired {
+            retired.held.texture.destroy();
+        }
         for copy in space.held_copies.into_values() {
             copy.texture.destroy();
         }
@@ -118,12 +140,15 @@ impl Gpu {
             // A different surface at the same address: the guest rebound it.
             Some(_) => {
                 if let Some(held) = self.space.held.remove(&target.addr) {
-                    self.ask_for(held);
+                    self.retire(held);
                 }
             }
             None => {}
         }
         self.note_aliases(target);
+        if self.resurrect(target) {
+            return Ok(());
+        }
         let texture = self.upload_target(target, ctx)?;
         self.space.held.insert(
             target.addr,
@@ -379,6 +404,8 @@ impl Gpu {
         let (target, texture, dirty) = (held.target, held.texture.clone(), held.dirty);
         let kept = kept_pages(held);
         if dirty {
+            let span = surface_span(&target);
+            self.settle_retired_where(|other| spans_overlap(other, &span));
             self.submit_batch();
             let pending = self.start_read_back(&target, &texture, kept);
             self.space.pending.push(pending);
@@ -395,6 +422,85 @@ impl Gpu {
     /// which a frame shown on the device skips: Breath of the Wild rebinds its G-buffer memory
     /// every frame, and the textures waiting ran the GPU out of memory.
     pub(super) fn ask_for(&mut self, held: Held) {
+        // Retired surfaces under it are older, so they land first.
+        let span = held_span(&held);
+        self.settle_retired_where(|other| spans_overlap(other, &span));
+        self.send_back(held);
+    }
+
+    /// Stop holding a surface the guest rebound or overlapped and keep its texture, rather than
+    /// reading it back: Breath of the Wild cycles its render targets through the same memory
+    /// every frame, and reading each back was most of what its frames waited on in a browser.
+    /// Held again as the same surface, it comes back as it was ([`Gpu::resurrect`]); anything
+    /// reading its memory sends it back first ([`Gpu::settle_retired_where`]), and so does a
+    /// few presents unused ([`Gpu::age_retired`]). One the guest wrote over, or held at two
+    /// sizes or through a companion, goes back at once.
+    pub(super) fn retire(&mut self, held: Held) {
+        if !held.overwritten.is_empty() || held.companion.is_some() || held.other.is_some() {
+            self.ask_for(held);
+            return;
+        }
+        self.surfaces_retired += 1;
+        self.space.retired_spans.push(held_span(&held));
+        self.space.retired.push(Retired {
+            held,
+            presented: self.frames_presented,
+        });
+    }
+
+    /// Hold `target` again from the retired surface that was it, if one was kept.
+    pub(super) fn resurrect(&mut self, target: &Target) -> bool {
+        let Some(at) = self
+            .space
+            .retired
+            .iter()
+            .position(|retired| retired.held.target == *target)
+        else {
+            return false;
+        };
+        let retired = self.space.retired.remove(at);
+        self.surfaces_resurrected += 1;
+        self.space.held.insert(target.addr, retired.held);
+        true
+    }
+
+    /// Send back, oldest first, the retired surfaces whose memory `under` takes in.
+    pub(super) fn settle_retired_where(
+        &mut self,
+        mut under: impl FnMut(&std::ops::Range<u64>) -> bool,
+    ) {
+        let mut at = 0;
+        while at < self.space.retired.len() {
+            if under(&held_span(&self.space.retired[at].held)) {
+                let retired = self.space.retired.remove(at);
+                self.send_back(retired.held);
+            } else {
+                at += 1;
+            }
+        }
+    }
+
+    /// At a present: send back the retired surfaces not held again for a few presents, and the
+    /// oldest while they come to more than the budget.
+    pub(super) fn age_retired(&mut self) {
+        let now = self.frames_presented;
+        let mut bytes: u64 = self.space.retired.iter().map(|r| r.held.target.len()).sum();
+        let mut at = 0;
+        while at < self.space.retired.len() {
+            let retired = &self.space.retired[at];
+            if now.saturating_sub(retired.presented) > RETIRED_PRESENTS || bytes > MAX_RETIRED_BYTES
+            {
+                bytes -= retired.held.target.len();
+                let retired = self.space.retired.remove(at);
+                self.send_back(retired.held);
+            } else {
+                at += 1;
+            }
+        }
+    }
+
+    /// [`Gpu::ask_for`] without settling the retired surfaces under it first.
+    fn send_back(&mut self, held: Held) {
         self.submit_batch();
         let held = self.merge_crop(held);
         // A companion's contents must be in the surface before it is copied.
@@ -881,6 +987,7 @@ impl Gpu {
     /// Whether a surface being drawn into shares memory with what is about to be read from it.
     /// What the guest wrote over since is current in guest memory.
     pub(super) fn note_read_of(&mut self, read: std::ops::Range<u64>) {
+        self.settle_retired_where(|span| spans_overlap(span, &read));
         if self.space.held.values().any(|held| {
             held.dirty && spans_overlap(&held_span(held), &read) && !overwritten(held, &read)
         }) {
@@ -900,22 +1007,25 @@ impl Gpu {
                     continue;
                 }
                 hit.push(held.target.addr);
-                // Only pages wholly the surface's: other data shares the rest, and the guest
-                // writing that says nothing about the surface's texels.
-                let span = held_span(held);
-                for (range, page) in gpu_pages(ctx, span) {
-                    let whole = range.end - range.start == 1 << PAGE_BITS;
-                    if whole
-                        && written.contains(&page)
-                        && !held.overwritten.iter().any(|(_, p)| *p == page)
-                    {
-                        held.overwritten.push((range, page));
-                    }
-                }
+                note_overwritten(held, ctx, &written);
             }
             if !hit.is_empty() {
                 self.syncs[5] += 1;
                 self.space.aliased.extend(hit);
+            }
+            let mut written_over = Vec::new();
+            let mut at = 0;
+            while at < self.space.retired.len() {
+                let held = &mut self.space.retired[at].held;
+                if held.watched.iter().any(|page| written.contains(page)) {
+                    note_overwritten(held, ctx, &written);
+                    written_over.push(self.space.retired.remove(at).held);
+                } else {
+                    at += 1;
+                }
+            }
+            for held in written_over {
+                self.send_back(held);
             }
         }
         // Run before every draw over every held surface, nearly all of them watched already.
@@ -958,7 +1068,9 @@ impl Gpu {
                 self.send_back_kept(addr);
             }
             for addr in std::mem::take(&mut self.space.aliased) {
-                self.flush_one(addr);
+                if let Some(held) = self.space.held.remove(&addr) {
+                    self.retire(held);
+                }
             }
             self.ask_for_globals();
         });
@@ -970,6 +1082,7 @@ impl Gpu {
             self.space.sync_all = false;
             self.space.aliased.clear();
             self.space.asked += 1;
+            self.settle_retired_where(|_| true);
             let addresses: Vec<u64> = self.space.held.keys().copied().collect();
             for addr in addresses {
                 self.flush_one(addr);
@@ -1082,6 +1195,7 @@ impl Gpu {
             }
         }
         self.space.aliased.clear();
+        self.age_retired();
         timed!(self, flush_wait, self.land_ready(ctx))?;
         if self.space.pending.is_empty() {
             return Ok(Submit::Done);
@@ -1108,6 +1222,7 @@ impl Gpu {
         self.release_scratch();
         // Nothing held, owed or in flight: nothing to do (and no poll).
         if self.space.held.is_empty()
+            && self.space.retired.is_empty()
             && self.space.globals.is_empty()
             && self.space.pending.is_empty()
         {
@@ -1138,6 +1253,7 @@ impl Gpu {
         };
         timed!(self, flush_ask, {
             self.space.asked += 1;
+            self.settle_retired_where(|span| touches(span, read) || touches(span, written));
             let mut owed: Vec<(u64, bool)> = self
                 .space
                 .held
