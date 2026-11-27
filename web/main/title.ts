@@ -7,8 +7,9 @@ const iconEl = $<HTMLImageElement>('running-icon');
 const nameEl = $('running-name');
 const versionEl = $('running-version');
 
+const APP_NAME = 'switch-wasm';
+// The page's own `<title>`, shown while nothing runs.
 const PAGE_TITLE = document.title;
-const SHORT_TITLE = PAGE_TITLE.split(' - ')[0];
 
 let iconUrl: string | null = null;
 
@@ -28,7 +29,7 @@ export function setRunning(title: KnownTitle | null): void {
   if (iconUrl) iconEl.src = iconUrl;
   else iconEl.removeAttribute('src');
   document.title = title
-    ? [title.name, title.version ? 'v' + title.version : '', title.publisher, SHORT_TITLE]
+    ? [title.name, title.version ? 'v' + title.version : '', title.publisher, APP_NAME]
         .filter(Boolean)
         .join(' \u00b7 ')
     : PAGE_TITLE;
