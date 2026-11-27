@@ -305,7 +305,7 @@ async function updateRenderDebug(): Promise<void> {
   const binds = (g.bindHits ?? 0) + (g.bindMisses ?? 0) + (g.bindUncached ?? 0);
   $('render-bind-hits').textContent = binds
     ? `${(((g.bindHits ?? 0) * 100) / binds).toFixed(1)}% (${fmtCount(g.bindMisses ?? 0)} missed, ${fmtCount(g.bindUncached ?? 0)} uncached: `
-    + `${fmtCount(g.bindUncachedHeld ?? 0)} held, ${fmtCount(g.bindUncachedShadow ?? 0)} shadow, `
+    + `${fmtCount(g.bindUncachedImage ?? 0)} image, ${fmtCount(g.bindUncachedShadow ?? 0)} shadow, `
     + `${fmtCount(g.bindUncachedTexture ?? 0)} texture, ${fmtCount(g.bindUncachedGlobal ?? 0)} global)`
     : '-';
   const splits = Object.entries(g.passSplits ?? {});

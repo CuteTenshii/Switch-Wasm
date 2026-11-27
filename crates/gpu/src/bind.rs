@@ -180,7 +180,7 @@ impl Gpu {
         let mut resources: Vec<Resource> = Vec::new();
         // Whether everything it binds outlives the draw, so the group can serve the next one.
         let mut persistent = true;
-        // Why it is not: a held surface, a shadow map, a texture the cache does not keep, a global.
+        // Why it is not: a storage image, a shadow map, a texture the cache does not keep, a global.
         let mut why = [false; 4];
         let mut constant_patches = Vec::new();
         let mut dynamic_offsets = Vec::new();
@@ -600,7 +600,7 @@ impl Gpu {
         let texture = if let Some(surface) = direct {
             surface
         } else if !held.is_empty() {
-            reason = Some(0);
+            // Kept in `held_copies` until a newer copy replaces it, so a group binding it is reusable.
             let target = |addr: &u64| self.space.held.get(addr).map(|held| &held.texture);
             let feedback = held.iter().any(|(_, layer)| {
                 drawn

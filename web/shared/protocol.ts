@@ -53,7 +53,7 @@ export interface GpuReport {
   bindMisses?: number;
   bindUncached?: number;
   // Of the uncached ones, how many bound each kind of resource; one can count in several.
-  bindUncachedHeld?: number;
+  bindUncachedImage?: number;
   bindUncachedShadow?: number;
   bindUncachedTexture?: number;
   bindUncachedGlobal?: number;

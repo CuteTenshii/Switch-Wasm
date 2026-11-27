@@ -897,7 +897,7 @@ pub struct Gpu {
     pub bind_hits: u64,
     pub bind_misses: u64,
     pub bind_uncached: u64,
-    /// Of those, how many bound a held surface, a shadow map, a texture the cache does not
+    /// Of those, how many bound a storage image, a shadow map, a texture the cache does not
     /// keep, or a global; one that did several counts in each.
     pub bind_uncached_why: [u64; 4],
     /// Textures made from held surfaces, and draws that reused one still current.
@@ -1009,7 +1009,7 @@ impl Drop for Gpu {
         );
         eprintln!(
             "[gpu] {} stage bind groups reused, {} built and kept, {} built for one draw \
-             (held surface {}, shadow map {}, texture not kept {}, global {}); \
+             (storage image {}, shadow map {}, texture not kept {}, global {}); \
              {} copies of held surfaces made, {} reused, {} updated by layer, {} corners \
              sampled in place",
             self.bind_hits,
@@ -1571,7 +1571,7 @@ impl Renderer for Gpu {
             .field("bindHits", self.bind_hits)
             .field("bindMisses", self.bind_misses)
             .field("bindUncached", self.bind_uncached)
-            .field("bindUncachedHeld", self.bind_uncached_why[0])
+            .field("bindUncachedImage", self.bind_uncached_why[0])
             .field("bindUncachedShadow", self.bind_uncached_why[1])
             .field("bindUncachedTexture", self.bind_uncached_why[2])
             .field("bindUncachedGlobal", self.bind_uncached_why[3])
