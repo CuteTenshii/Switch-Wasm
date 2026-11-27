@@ -51,7 +51,7 @@ export function showScreen(): void {
 }
 
 // Side panel (Console / Debug / Files).
-export function panelOpen(): boolean {
+function panelOpen(): boolean {
   return document.body.classList.contains('panel-open');
 }
 
@@ -65,7 +65,7 @@ export function openPanel(tab?: string): void {
   if (tab) selectTab(tab);
 }
 
-export function selectTab(name: string): void {
+function selectTab(name: string): void {
   document.querySelectorAll<HTMLElement>('.panel .tab').forEach((t) => {
     const on = t.dataset.tab === name;
     t.classList.toggle('is-active', on);

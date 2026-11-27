@@ -138,7 +138,7 @@ function clearConsole(): void {
 $('btn-clear-console').addEventListener('click', clearConsole);
 
 // Includes entries the view has dropped.
-export function consoleText(): string {
+function consoleText(): string {
   return backlog.map(asLine).join('\n');
 }
 
@@ -158,7 +158,7 @@ function flashSaveLabel(text: string): void {
   }, 1400);
 }
 
-export function download(name: string, text: string, type = 'text/plain'): void {
+function download(name: string, text: string, type = 'text/plain'): void {
   const url = URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` }));
   const link = el('a');
   link.href = url;
@@ -168,7 +168,7 @@ export function download(name: string, text: string, type = 'text/plain'): void 
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
-export function stamp(): string {
+function stamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-').replace('Z', '');
 }
 
@@ -192,7 +192,7 @@ async function mirrorLog(): Promise<void> {
 }
 
 // Read once at startup and then cleared.
-export async function takePreviousLog(): Promise<string> {
+async function takePreviousLog(): Promise<string> {
   try {
     const db = await logIdb();
     const previous = await idbGet<string>(db, LOG_STORE, LOG_KEY);

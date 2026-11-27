@@ -306,7 +306,7 @@ async function showContainer(file: File, files: NspFile[]): Promise<void> {
   setNote('container-badge', file.name, true);
 }
 
-export function clearNsp(): void {
+function clearNsp(): void {
   $('nsp-result').textContent = '';
   setNote('container-badge', 'none open', false);
   // The held update outlives the container; the pairing does not.
