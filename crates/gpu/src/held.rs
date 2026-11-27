@@ -474,7 +474,8 @@ impl Gpu {
         Ok(texture)
     }
 
-    /// Upload a depth surface via an `r32float` staging image and a pass. See [`LOAD_DEPTH_WGSL`].
+    /// Upload a depth surface: `depth16unorm` by a copy, `depth32float`, which no copy can
+    /// write, via an `r32float` staging image and a pass. See [`LOAD_DEPTH_WGSL`].
     fn upload_depth_target(
         &mut self,
         target: &Target,
@@ -496,11 +497,27 @@ impl Gpu {
             format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST
                 | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         // A cropped target takes the left of each row.
         let values = target.read_depth(ctx, target.width)?;
+        // The guest's 16-bit values are the texels as they are. A pass, a staging image twice the
+        // size and a submit for each were most of what Breath of the Wild uploaded.
+        if kind == DepthKind::Unorm16 {
+            self.queue.write_texture(
+                texture.as_image_copy(),
+                &values,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(target.width * 2),
+                    rows_per_image: Some(target.height),
+                },
+                size,
+            );
+            return Ok(texture);
+        }
         // The staging image is always `r32float`.
         let staging = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth upload"),
