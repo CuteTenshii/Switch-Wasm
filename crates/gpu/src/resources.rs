@@ -423,13 +423,25 @@ impl Gpu {
         self.constants_unrecorded = true;
         // Instances of one draw usually repeat their constants, and the same offset lets the
         // next instance widen the draw call before it.
-        if let Some((offset, last_size)) = self.last_constants[stage] {
+        let placed_at = |staging: &[u8], offset: u32| {
             let at = offset as usize;
-            let same = self
-                .constant_staging
+            staging
                 .get(at..at + bytes.len())
-                .is_some_and(|held| same_bytes(held, bytes));
-            if same && last_size == size {
+                .is_some_and(|held| same_bytes(held, bytes))
+        };
+        if let Some((offset, last_size)) = self.last_constants[stage] {
+            if last_size == size && placed_at(&self.constant_staging, offset) {
+                return Some((offset, size));
+            }
+        }
+        // Frames repeat their constants: Breath of the Wild's draws placed 3.9 GiB of them, 97%
+        // the same bytes placed before. The arena keeps them across submits, found by content.
+        let print = bytes_fingerprint(bytes);
+        if let Some(&offset) = self.placed_constants.get(&print) {
+            if u64::from(offset) + size <= CONSTANT_ARENA_BYTES
+                && placed_at(&self.constant_staging, offset)
+            {
+                self.last_constants[stage] = Some((offset, size));
                 return Some((offset, size));
             }
         }
@@ -444,6 +456,10 @@ impl Gpu {
             self.constants_unrecorded = false;
             self.submit_batch();
             self.constants_unrecorded = true;
+            self.constant_staging.clear();
+            self.constants_flushed = 0;
+            self.placed_constants.clear();
+            self.last_constants = [None; 2];
             offset = 0;
         }
         self.constant_staging.resize(offset as usize, 0);
@@ -452,16 +468,8 @@ impl Gpu {
         let words = self.constant_staging.len().next_multiple_of(4);
         self.constant_staging.resize(words, 0);
         self.last_constants[stage] = Some((offset as u32, size));
+        self.placed_constants.insert(print, offset as u32);
         Some((offset as u32, size))
-    }
-
-    /// Start the arena over once a submit has taken every draw that reads it.
-    fn restart_constants(&mut self) {
-        if !self.constants_unrecorded {
-            self.constant_staging.clear();
-            self.constants_flushed = 0;
-            self.last_constants = [None; 2];
-        }
     }
 
     /// Write what was placed in the arena since the last submit, ahead of the next one. Only
@@ -488,7 +496,6 @@ impl Gpu {
             let times = self.resolve_times(&mut batch);
             timed!(self, encode, self.queue.submit([batch.finish()]));
             self.map_times(times);
-            self.restart_constants();
         }
     }
 
@@ -524,7 +531,6 @@ impl Gpu {
                 .submit(batch.into_iter().chain([encoder.finish()]))
         );
         self.map_times(times);
-        self.restart_constants();
     }
 
     pub(super) fn release_scratch(&mut self) {

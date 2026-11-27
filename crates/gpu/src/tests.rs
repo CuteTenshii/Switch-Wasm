@@ -2864,6 +2864,35 @@ fn a_draw_into_the_layer_set_rt_layer_picks_lands_there_on_the_device() {
     assert_eq!(ctx.read_u32(rt.addr).unwrap(), 0);
 }
 
+/// Constants placed before a submit are found again after it by their bytes, whichever stage
+/// places them, and bytes that differ anywhere are placed anew.
+#[test]
+fn constants_placed_before_a_submit_are_found_again_after_it() {
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    let first = vec![1u8; 512];
+    let second = vec![2u8; 512];
+    let (at_first, _) = gpu.stage_constants(0, &first).expect("placed");
+    let (at_second, _) = gpu.stage_constants(1, &second).expect("placed");
+    assert_ne!(at_first, at_second);
+    // Recorded and submitted, as a draw would be.
+    gpu.constants_unrecorded = false;
+    gpu.submit_batch();
+    assert_eq!(
+        gpu.stage_constants(0, &second).map(|(at, _)| at),
+        Some(at_second)
+    );
+    assert_eq!(
+        gpu.stage_constants(1, &first).map(|(at, _)| at),
+        Some(at_first)
+    );
+    let mut changed = first.clone();
+    changed[300] = 9;
+    let (at_changed, _) = gpu.stage_constants(0, &changed).expect("placed");
+    assert!(at_changed != at_first && at_changed != at_second);
+}
+
 /// Copies made for unsubmitted draws are submitted and freed once they pass
 /// `MAX_SCRATCH_BYTES`, rather than piling up until the frame ends.
 #[test]

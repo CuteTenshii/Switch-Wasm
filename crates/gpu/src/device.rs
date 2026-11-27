@@ -63,6 +63,7 @@ impl Gpu {
             constant_staging: Vec::new(),
             constants_flushed: 0,
             last_constants: [None; 2],
+            placed_constants: std::collections::HashMap::new(),
             constants_unrecorded: false,
             shared_buffers: std::collections::HashMap::new(),
             shared_bytes: 0,

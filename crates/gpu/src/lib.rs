@@ -697,8 +697,10 @@ struct Input {
     pages: Vec<u32>,
 }
 
-/// The constants of the draws between two submits; a draw's are at most 18 banks of 64 KiB.
-const CONSTANT_ARENA_BYTES: u64 = 8 << 20;
+/// The constants draws place, kept across submits; a draw's are at most 18 banks of 64 KiB.
+/// It holds a frame's: Breath of the Wild's draws place about 10 MiB of them a frame, and at
+/// 8 MiB the arena started over before any came round again.
+const CONSTANT_ARENA_BYTES: u64 = 64 << 20;
 
 /// Past this, every shared vertex and index buffer is dropped.
 const SHARED_BUFFER_BYTES: u64 = 64 << 20;
@@ -841,6 +843,9 @@ pub struct Gpu {
     constants_flushed: usize,
     /// Where each stage's last constants placed are, and the size they are bound at.
     last_constants: [Option<(u32, u64)>; 2],
+    /// Where the arena holds each run of constants placed since it last started over, by
+    /// `bytes_fingerprint`; a hit is checked against `constant_staging`.
+    placed_constants: std::collections::HashMap<u64, u32>,
     /// Whether a draw placed constants and is not recorded yet, so a submit in between must
     /// not start the arena over.
     constants_unrecorded: bool,
