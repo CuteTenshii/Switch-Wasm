@@ -62,6 +62,7 @@ declare module '@core/switch_wasm.js' {
   export function switch_log_activity(seconds: number): void;
   export function switch_set_battery(percent: number, charging: boolean): void;
   export function switch_set_operation_mode(docked: boolean): void;
+  export function switch_set_host_pad(pad: string): void;
   export function switch_motion_attach(): Promise<string>;
   export function switch_motion_detach(): Promise<void>;
   export function switch_force_software(on: boolean): void;

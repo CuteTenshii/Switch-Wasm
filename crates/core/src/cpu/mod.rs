@@ -339,6 +339,8 @@ pub struct Machine {
     /// Touch slots filled at the last publish, so stale ones are cleared.
     /// The host's motion sensor and the pose integrated from it.
     pub(crate) motion: crate::services::input::Motion,
+    /// See [`Cpu::set_host_pad`].
+    pub(crate) host_pad: crate::services::input::HostPad,
     pub(crate) touch_published: usize,
     /// Contacts down at the last publish; see [`Cpu::set_touch_state`].
     pub(crate) touch_down: Vec<TouchPoint>,
@@ -623,6 +625,7 @@ impl Cpu {
                 shared_font_regions: Vec::new(),
                 audio_streams: BTreeMap::new(),
                 motion: Default::default(),
+                host_pad: Default::default(),
                 audio_produced: 0,
                 audio_taken: 0,
                 audio_dropped: 0,

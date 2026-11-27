@@ -776,6 +776,83 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_joy_con_is_player_1_in_its_own_style_when_the_title_takes_one() {
+        use crate::cpu::hid_shmem as h;
+        use crate::cpu::HostPad;
+        use crate::cpu::OperationMode::Handheld;
+        const SHMEM: u64 = 0x3000_0000;
+        const BUTTONS: u64 = 0x1;
+        const PLAYER_1: u32 = 0;
+
+        let every = h::STYLE_FULL_KEY
+            | h::STYLE_HANDHELD
+            | h::STYLE_JOY_DUAL
+            | h::STYLE_JOY_LEFT
+            | h::STYLE_JOY_RIGHT;
+        for (styles, pad, slot, style, lifo) in [
+            (
+                every,
+                HostPad::JoyRight,
+                PLAYER_1,
+                h::STYLE_JOY_RIGHT,
+                h::JOY_RIGHT_LIFO,
+            ),
+            (
+                every,
+                HostPad::JoyLeft,
+                PLAYER_1,
+                h::STYLE_JOY_LEFT,
+                h::JOY_LEFT_LIFO,
+            ),
+            (
+                h::STYLE_FULL_KEY | h::STYLE_HANDHELD,
+                HostPad::JoyRight,
+                h::HANDHELD_SLOT,
+                h::STYLE_HANDHELD,
+                h::HANDHELD_LIFO,
+            ),
+        ] {
+            let case = format!("styles {styles:#x}, {pad:?}");
+            let mut cpu = request(false, 100, &styles.to_le_bytes());
+            map_hid(&mut cpu, SHMEM);
+            cpu.register_service_handle(9, "hid");
+            cpu.hid_request(TLS, 9, Some(100)).unwrap();
+            cpu.set_operation_mode(Handheld);
+            cpu.set_host_pad(pad);
+            cpu.set_gamepad_state(BUTTONS, 0, 0, 0, 0);
+
+            let live = h::NPAD + slot * h::ENTRY_SIZE;
+            assert_eq!(
+                cpu.mem
+                    .read_u32(SHMEM + u64::from(live + h::STYLE_SET))
+                    .unwrap(),
+                style,
+                "{case}"
+            );
+            let state = live + lifo + h::LIFO_STORAGE;
+            assert_eq!(
+                cpu.mem
+                    .read_u64(SHMEM + u64::from(state + h::STATE_BUTTONS))
+                    .unwrap(),
+                BUTTONS,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_change_of_host_pad_signals_the_style_update_event() {
+        let mut cpu = request(false, 106, &[0; 16]);
+        cpu.register_service_handle(9, "hid");
+        cpu.hid_request(TLS, 9, Some(106)).unwrap();
+        let event = cpu.npad_style_update_event.unwrap();
+        cpu.clear_event(event);
+
+        cpu.set_host_pad(crate::cpu::HostPad::JoyRight);
+        assert_eq!(cpu.event_signaled(event), Some(true));
+    }
+
+    #[test]
     fn the_pad_carries_the_system_ext_lifo_the_home_menu_reads() {
         // SystemExt is a second copy the pad carries, whatever style was asked for.
         use crate::cpu::hid_shmem as h;

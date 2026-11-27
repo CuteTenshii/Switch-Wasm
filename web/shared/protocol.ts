@@ -398,6 +398,8 @@ export interface NetStatus {
   in: number;
 }
 
+export type HostPad = 'full' | 'joyLeft' | 'joyRight';
+
 export interface Commands {
   // End the running title and its applets; the console stays.
   endTitle(): void;
@@ -408,6 +410,8 @@ export interface Commands {
   setTouch(points: Uint32Array): void;
   setBattery(percent: number, charging: boolean): void;
   setOperationMode(docked: boolean): void;
+  // The controller the buttons come from; a lone Joy-Con is published in its own style.
+  setHostPad(pad: HostPad): void;
   // Open the first WebHID controller the page was granted; its name, or empty for none.
   attachMotion(): string;
   detachMotion(): void;

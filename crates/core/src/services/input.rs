@@ -17,6 +17,17 @@ pub(crate) struct NpadPresentation {
     pub(crate) joy_assignment: u32,
 }
 
+/// The controller the host's buttons and sticks come from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HostPad {
+    /// Joy-Cons on the rails when undocked, else a full controller as player 1.
+    #[default]
+    Full,
+    /// A lone Joy-Con held by itself, which is player 1 whether docked or not.
+    JoyLeft,
+    JoyRight,
+}
+
 /// Offsets into libnx's `HidSharedMemory` (`switch/services/hid.h`).
 pub(crate) mod hid_shmem {
     /// `offsetof(HidSharedMemory, npad)`.
@@ -348,6 +359,22 @@ impl Cpu {
         self.write_hid_gamepad_state(buttons, stick_lx, stick_ly, stick_rx, stick_ry);
     }
 
+    /// Say which controller the host's input comes from, moving the pad to the style that
+    /// matches it and telling every process the style changed.
+    pub fn set_host_pad(&mut self, pad: HostPad) {
+        if self.host_pad == pad {
+            return;
+        }
+        self.host_pad = pad;
+        for pid in self.pids() {
+            self.in_process(pid, |cpu| {
+                if let Some(event) = cpu.npad_style_update_event {
+                    cpu.signal_event(event);
+                }
+            });
+        }
+    }
+
     /// Take the host's motion sensor reading; it is published on the next `hid` sample.
     pub fn set_motion_state(&mut self, accel: [f32; 3], gyro: [f32; 3], connected: bool) {
         self.motion.accel = accel;
@@ -472,8 +499,8 @@ impl Cpu {
         self.write_npad_disconnected(idle, sample);
     }
 
-    /// The one pad there is: on the rails when undocked, else player 1, as far as the title
-    /// accepts either.
+    /// The one pad there is: a lone Joy-Con as player 1, else on the rails when undocked, else
+    /// player 1, as far as the title accepts each.
     pub(crate) fn active_npad(&self) -> (u32, NpadPresentation) {
         let styles = self.npad_style_set;
         let id_accepted = |id| self.npad_id_types.is_empty() || self.npad_id_types.contains(&id);
@@ -481,7 +508,18 @@ impl Cpu {
             (styles == 0 || styles & NPAD_HANDHELD.style != 0) && id_accepted(NPAD_ID_HANDHELD);
         let player_1 = id_accepted(NPAD_ID_PLAYER_1)
             && (styles == 0 || NPAD_PRESENTATIONS.iter().any(|pad| styles & pad.style != 0));
-        if handheld && (self.operation_mode == OperationMode::Handheld || !player_1) {
+        let lone_style = match self.host_pad {
+            HostPad::Full => None,
+            HostPad::JoyLeft => Some(hid_shmem::STYLE_JOY_LEFT),
+            HostPad::JoyRight => Some(hid_shmem::STYLE_JOY_RIGHT),
+        };
+        // A title that cannot take a lone Joy-Con gets the pad it would have had.
+        let lone = lone_style
+            .filter(|style| player_1 && (styles == 0 || styles & style != 0))
+            .and_then(|style| NPAD_PRESENTATIONS.into_iter().find(|p| p.style == style));
+        if let Some(lone) = lone {
+            (0, lone)
+        } else if handheld && (self.operation_mode == OperationMode::Handheld || !player_1) {
             (hid_shmem::HANDHELD_SLOT, NPAD_HANDHELD)
         } else {
             (0, npad_presentation_for(styles))
