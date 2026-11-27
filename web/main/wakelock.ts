@@ -4,14 +4,19 @@
 // Whether the run loop wants the screen awake, independent of holding a lock.
 let wanted = false;
 let held: WakeLockSentinel | null = null;
+// A request in flight; a second one would take a lock nothing releases.
+let acquiring = false;
 
 async function acquire(): Promise<void> {
-  if (!('wakeLock' in navigator) || held || document.visibilityState !== 'visible') return;
+  if (!('wakeLock' in navigator) || held || acquiring || document.visibilityState !== 'visible') return;
+  acquiring = true;
   try {
     const sentinel = await navigator.wakeLock.request('screen');
     // The run may have ended while the request was in flight.
     if (!wanted) {
-      await sentinel.release();
+      void sentinel.release().catch(() => {
+        // Already released by the browser.
+      });
       return;
     }
     held = sentinel;
@@ -20,6 +25,8 @@ async function acquire(): Promise<void> {
     });
   } catch {
     // Refused: the screen dims, nothing else changes.
+  } finally {
+    acquiring = false;
   }
 }
 
