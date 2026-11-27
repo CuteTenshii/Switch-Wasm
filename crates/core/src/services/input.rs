@@ -162,18 +162,37 @@ const MOTION_BACKLOG: usize = 6;
 /// One sensor sample: accelerometer in G, gyroscope in revolutions per second.
 type MotionSample = ([f32; 3], [f32; 3]);
 
+/// How hard the pose is pulled toward the gravity the accelerometer reads, in radians per
+/// second per unit of error; yuzu's gain.
+const GRAVITY_GAIN: f32 = 0.3;
+/// A reading this close to 1 G is taken as gravity alone, not the hand moving.
+const GRAVITY_TOLERANCE: f32 = 0.25;
+/// Below this rate, in revolutions per second, with gravity alone, the sensor is at rest.
+const REST_RATE: f32 = 0.02;
+/// Ticks at rest, one second's worth, before the gyro's reading is taken as its bias.
+const REST_TICKS: u32 = 200;
+/// The share of the gap to the reading the bias closes each tick at rest.
+const BIAS_RATE: f32 = 0.005;
+
 /// The host's motion sensor and the pose integrated from it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Motion {
-    /// The sample last published.
+    /// The sample last published, its gyro less the bias.
     accel: [f32; 3],
     gyro: [f32; 3],
+    raw_gyro: [f32; 3],
     connected: bool,
+    /// What the gyro reads at rest, in revolutions per second.
+    bias: [f32; 3],
+    rest_ticks: u32,
+    /// The pose has been tilted to the gravity of a still reading.
+    aligned: bool,
     /// Samples not yet published, oldest first.
     backlog: std::collections::VecDeque<MotionSample>,
     /// Gyro integrated since the sensor connected, in revolutions.
     rotation: [f32; 3],
-    /// The sensor's axes as unit rows, in the frame it connected in.
+    /// The sensor's axes as unit rows, in a frame whose z is up and whose yaw is where the
+    /// sensor pointed when it connected.
     orientation: [[f32; 3]; 3],
     sample: u64,
     /// A connected state has been published, so a disconnect needs one more.
@@ -187,7 +206,11 @@ impl Default for Motion {
         Self {
             accel: [0.0; 3],
             gyro: [0.0; 3],
+            raw_gyro: [0.0; 3],
             connected: false,
+            bias: [0.0; 3],
+            rest_ticks: 0,
+            aligned: false,
             backlog: std::collections::VecDeque::new(),
             rotation: [0.0; 3],
             orientation: IDENTITY,
@@ -217,9 +240,23 @@ fn normalized(v: [f32; 3]) -> [f32; 3] {
     v.map(|c| c / len)
 }
 
+/// The pose of a still sensor whose accelerometer reads `accel`, its yaw taken from its x axis.
+fn tilted_to(accel: [f32; 3]) -> [[f32; 3]; 3] {
+    // The world's up, then its x and y, each written in the sensor's axes.
+    let up = normalized(accel.map(|c| -c));
+    let mut east = [1.0 - up[0] * up[0], -up[0] * up[1], -up[0] * up[2]];
+    if dot(east, east) < 1e-6 {
+        east = [-up[1] * up[0], 1.0 - up[1] * up[1], -up[1] * up[2]];
+    }
+    let east = normalized(east);
+    let north = cross(up, east);
+    [0, 1, 2].map(|i| [east[i], north[i], up[i]])
+}
+
 impl Motion {
-    /// Turn the axes by the gyro over `seconds`, keeping them orthonormal.
-    fn integrate(&mut self, seconds: f32) {
+    /// Publish the next sample: estimate the gyro's bias, then turn the axes by the gyro over
+    /// `seconds`, pulled toward the gravity the accelerometer reads.
+    fn update(&mut self, seconds: f32) {
         if !self.connected {
             *self = Self {
                 published: self.published,
@@ -227,13 +264,29 @@ impl Motion {
             };
             return;
         }
+        let only_gravity = (dot(self.accel, self.accel).sqrt() - 1.0).abs() < GRAVITY_TOLERANCE;
+        self.track_bias(only_gravity);
+        self.gyro = [0, 1, 2].map(|i| self.raw_gyro[i] - self.bias[i]);
+        if !self.aligned && only_gravity {
+            self.orientation = tilted_to(self.accel);
+            self.aligned = true;
+        }
         for (rot, rate) in self.rotation.iter_mut().zip(self.gyro) {
             *rot += rate * seconds;
         }
+
         let [x, y, z] = self.orientation;
+        let mut rate = self.gyro;
+        if only_gravity {
+            // Gravity as the pose expects the accelerometer to read it, against what it does.
+            let expected = [-x[2], -y[2], -z[2]];
+            let error = cross(normalized(self.accel), expected);
+            for (r, e) in rate.iter_mut().zip(error) {
+                *r += GRAVITY_GAIN * e / std::f32::consts::TAU;
+            }
+        }
         let turn = std::f32::consts::TAU * seconds;
-        let spin = [0, 1, 2]
-            .map(|i| turn * (self.gyro[0] * x[i] + self.gyro[1] * y[i] + self.gyro[2] * z[i]));
+        let spin = [0, 1, 2].map(|i| turn * (rate[0] * x[i] + rate[1] * y[i] + rate[2] * z[i]));
         let step = |e: [f32; 3]| {
             let c = cross(spin, e);
             [e[0] + c[0], e[1] + c[1], e[2] + c[2]]
@@ -241,6 +294,22 @@ impl Motion {
         let x = normalized(step(x));
         let z = normalized(cross(x, step(y)));
         self.orientation = [x, cross(z, x), z];
+    }
+
+    /// After a second at rest, ease the bias toward what the gyro reads.
+    fn track_bias(&mut self, only_gravity: bool) {
+        let still = (0..3).all(|i| (self.raw_gyro[i] - self.bias[i]).abs() < REST_RATE);
+        if !(still && only_gravity) {
+            self.rest_ticks = 0;
+            return;
+        }
+        if self.rest_ticks < REST_TICKS {
+            self.rest_ticks += 1;
+            return;
+        }
+        for (bias, raw) in self.bias.iter_mut().zip(self.raw_gyro) {
+            *bias += (raw - *bias) * BIAS_RATE;
+        }
     }
 }
 
@@ -330,8 +399,9 @@ pub const TOUCH_SCREEN_HEIGHT: u32 = 720;
 
 pub const TOUCH_MAX: usize = 16;
 
-/// The time between six-axis samples, in nanoseconds.
+/// The time between six-axis samples, in nanoseconds and in seconds.
 const SIX_AXIS_DELTA_NS: u64 = 5_000_000;
+const MOTION_PERIOD_S: f32 = HID_SAMPLE_PERIOD_CYCLES as f32 / 1_020_000_000.0;
 
 /// Contact size reported for every touch; only checked to be non-zero.
 const TOUCH_DIAMETER: u32 = 10;
@@ -414,10 +484,9 @@ impl Cpu {
         // An empty backlog holds the last sample, as a sensor between reports would read.
         if let Some((accel, gyro)) = self.motion.backlog.pop_front() {
             self.motion.accel = accel;
-            self.motion.gyro = gyro;
+            self.motion.raw_gyro = gyro;
         }
-        let period = HID_SAMPLE_PERIOD_CYCLES as f32 / 1_020_000_000.0;
-        self.motion.integrate(period);
+        self.motion.update(MOTION_PERIOD_S);
         self.motion.published = self.motion.connected;
         self.motion.sample = self.motion.sample.wrapping_add(1);
         let (slot, presentation) = self.active_npad();
@@ -839,5 +908,103 @@ impl Cpu {
 
     pub fn hid_shmem_addr(&self) -> u64 {
         self.process().hid_shmem_addr
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connected() -> Motion {
+        Motion {
+            connected: true,
+            ..Motion::default()
+        }
+    }
+
+    /// Hold `accel` and `gyro` for `seconds` of 200 Hz ticks.
+    fn hold(motion: &mut Motion, accel: [f32; 3], gyro: [f32; 3], seconds: f32) {
+        motion.accel = accel;
+        motion.raw_gyro = gyro;
+        for _ in 0..(seconds / MOTION_PERIOD_S).round() as u32 {
+            motion.update(MOTION_PERIOD_S);
+        }
+    }
+
+    /// Gravity as the pose says the accelerometer should read it.
+    fn expected_gravity(motion: &Motion) -> [f32; 3] {
+        motion.orientation.map(|row| -row[2])
+    }
+
+    fn close(a: [f32; 3], b: [f32; 3]) -> bool {
+        (0..3).all(|i| (a[i] - b[i]).abs() < 0.01)
+    }
+
+    #[test]
+    fn a_still_sensor_is_posed_with_gravity_where_it_reads_it() {
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        for accel in [
+            [0.0, 0.0, -1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, half, -half],
+        ] {
+            let mut motion = connected();
+            hold(&mut motion, accel, [0.0; 3], MOTION_PERIOD_S);
+            assert!(
+                close(expected_gravity(&motion), accel),
+                "{accel:?}: {:?}",
+                motion.orientation
+            );
+            let [x, y, z] = motion.orientation;
+            assert!(
+                close(cross(x, y), z),
+                "{accel:?} is not a right-handed pose"
+            );
+        }
+    }
+
+    #[test]
+    fn a_turn_the_gyro_missed_is_pulled_back_to_gravity() {
+        let mut motion = connected();
+        hold(&mut motion, [0.0, 0.0, -1.0], [0.0; 3], 1.0);
+        // Turned onto its side with no gyro reading, as drift leaves it.
+        hold(&mut motion, [0.0, -1.0, 0.0], [0.0; 3], 30.0);
+        assert!(
+            close(expected_gravity(&motion), [0.0, -1.0, 0.0]),
+            "{:?}",
+            motion.orientation
+        );
+    }
+
+    #[test]
+    fn shaking_does_not_tilt_the_pose() {
+        let mut motion = connected();
+        hold(&mut motion, [0.0, 0.0, -1.0], [0.0; 3], 1.0);
+        hold(&mut motion, [2.0, 0.0, -1.0], [0.0; 3], 10.0);
+        assert!(close(expected_gravity(&motion), [0.0, 0.0, -1.0]));
+    }
+
+    #[test]
+    fn a_gyro_that_reads_a_turn_at_rest_stops_turning_the_pose() {
+        // A small bias about z, the axis gravity cannot correct.
+        let mut motion = connected();
+        hold(&mut motion, [0.0, 0.0, -1.0], [0.0, 0.0, 0.01], 20.0);
+        assert!(motion.gyro[2].abs() < 0.001, "published {:?}", motion.gyro);
+        let yaw_kept = motion.orientation[0][0];
+        assert!(
+            yaw_kept > 0.97,
+            "the x axis drifted to {:?}",
+            motion.orientation[0]
+        );
+    }
+
+    #[test]
+    fn a_real_turn_is_not_taken_for_bias() {
+        let mut motion = connected();
+        hold(&mut motion, [0.0, 0.0, -1.0], [0.0, 0.0, 0.25], 4.0);
+        assert_eq!(motion.bias, [0.0; 3]);
+        assert_eq!(motion.gyro, [0.0, 0.0, 0.25]);
     }
 }
