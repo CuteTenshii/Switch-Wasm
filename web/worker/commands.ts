@@ -13,13 +13,13 @@ import {
   switch_get_steps, switch_gpu_report_json, switch_guest_fatal, switch_guest_ram, switch_halted,
   switch_jit_stats_json, switch_keyboard_answer, switch_last_error, switch_load_control,
   switch_launch, switch_load_keys, switch_load_program,
-  switch_load_sd, switch_memory_json, switch_nand_content, switch_nand_identify, switch_nand_launch,
+  switch_load_sd, switch_memory_json, switch_motion_attach, switch_motion_detach, switch_nand_content, switch_nand_identify, switch_nand_launch,
   switch_net_connect,
   switch_net_connections_json, switch_net_disconnect, switch_net_set_settings, switch_net_status_json,
   switch_next_load,
   switch_open_nca,
   switch_inspect_nca, switch_open_container, switch_peek_icon, switch_peek_title, switch_reg_dump, switch_restore_nand, switch_restore_storage, switch_run,
-  switch_set_battery, switch_set_device_timing, switch_set_jit, switch_set_operation_mode, switch_set_touch, switch_threads_json,
+  switch_set_battery, switch_set_device_timing, switch_set_host_pad, switch_set_jit, switch_set_operation_mode, switch_set_touch, switch_threads_json,
   switch_set_trace, switch_set_trace_channels, switch_store_profile_edits, switch_thread_dump,
   switch_user_stage, switch_users_commit,
 } from '@core/switch_wasm.js';
@@ -45,6 +45,10 @@ export const CMD = {
   // The Battery Status API is Window-only, so the main thread sends it.
   setBattery: switch_set_battery,
   setOperationMode: switch_set_operation_mode,
+  setHostPad: switch_set_host_pad,
+  // WebHID reaches the worker, but only the page can ask the user for a device.
+  attachMotion: switch_motion_attach,
+  detachMotion: switch_motion_detach,
   forceSoftware: switch_force_software,
   setDeviceTiming: switch_set_device_timing,
   connectNetwork: switch_net_connect,

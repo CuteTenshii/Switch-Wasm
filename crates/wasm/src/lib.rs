@@ -45,6 +45,7 @@ mod idb;
 mod input;
 mod keyboard;
 mod log;
+mod motion;
 mod nand;
 mod net;
 #[cfg(target_arch = "wasm32")]

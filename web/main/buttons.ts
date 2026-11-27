@@ -5,6 +5,7 @@ export const BTN = {
   L: 1 << 6, R: 1 << 7, ZL: 1 << 8, ZR: 1 << 9,
   PLUS: 1 << 10, MINUS: 1 << 11,
   LEFT: 1 << 12, UP: 1 << 13, RIGHT: 1 << 14, DOWN: 1 << 15,
+  LEFT_SL: 1 << 24, LEFT_SR: 1 << 25, RIGHT_SL: 1 << 26, RIGHT_SR: 1 << 27,
 } as const;
 
 export type Button = keyof typeof BTN;

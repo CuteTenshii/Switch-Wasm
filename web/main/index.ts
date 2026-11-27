@@ -23,6 +23,7 @@ import './network';
 import './readonly';
 import './relay-settings';
 import './files';
+import './hid';
 import './input';
 
 // iOS greys out every file whose extension it has no type for, which is all of ours.

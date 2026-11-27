@@ -524,6 +524,163 @@ mod tests {
     }
 
     #[test]
+    fn the_motion_sensor_is_published_in_the_handheld_six_axis_lifo() {
+        use crate::cpu::hid_shmem as h;
+        const SHMEM: u64 = 0x3000_0000;
+
+        let mut cpu = Cpu::new();
+        map_hid(&mut cpu, SHMEM);
+        cpu.cycles = crate::kernel::sched::HID_SAMPLE_PERIOD_CYCLES + 1;
+        cpu.push_motion_sample([0.0, 0.0, -1.0], [0.0, 0.0, 1.0]);
+        cpu.hid_tick();
+
+        let lifo = SHMEM
+            + u64::from(
+                h::NPAD
+                    + h::HANDHELD_SLOT * h::ENTRY_SIZE
+                    + h::SIX_AXIS_FULL_KEY_LIFO
+                    + h::SIX_AXIS_HANDHELD * h::SIX_AXIS_LIFO_SIZE,
+            );
+        assert_eq!(
+            cpu.mem.read_u64(lifo + u64::from(h::LIFO_COUNT)).unwrap(),
+            1
+        );
+        let state = lifo + u64::from(h::LIFO_STORAGE + h::SIX_AXIS_STATE);
+        let float = |at: u32| {
+            f32::from_bits(
+                cpu.mem
+                    .read_u32(state + u64::from(h::SIX_AXIS_FLOATS + at))
+                    .unwrap(),
+            )
+        };
+        assert_eq!(float(8), -1.0, "acceleration z");
+        assert_eq!(float(20), 1.0, "angular velocity z");
+        assert!(
+            (float(32) - 1.0 / 200.0).abs() < 1e-6,
+            "one tick of rotation about z"
+        );
+        assert_eq!(
+            cpu.mem
+                .read_u32(state + u64::from(h::SIX_AXIS_ATTRIBUTES))
+                .unwrap(),
+            h::SIX_AXIS_ATTR_CONNECTED
+        );
+        // A turn about z leaves the z axis where it was and tips x toward y.
+        assert_eq!(float(68), 1.0, "orientation zz");
+        assert!(float(36) > 0.99 && float(40) > 0.0, "orientation x row");
+
+        cpu.disconnect_motion();
+        cpu.cycles += crate::kernel::sched::HID_SAMPLE_PERIOD_CYCLES;
+        cpu.hid_tick();
+        let newest = newest_six_axis_state(&cpu, lifo);
+        assert_eq!(
+            cpu.mem
+                .read_u32(newest + u64::from(h::SIX_AXIS_ATTRIBUTES))
+                .unwrap(),
+            0
+        );
+    }
+
+    /// The state behind a six-axis LIFO's tail.
+    fn newest_six_axis_state(cpu: &Cpu, lifo: u64) -> u64 {
+        use crate::cpu::hid_shmem as h;
+        let tail = cpu.mem.read_u64(lifo + u64::from(h::LIFO_TAIL)).unwrap();
+        lifo + u64::from(h::LIFO_STORAGE + h::SIX_AXIS_STATE)
+            + tail * u64::from(h::SIX_AXIS_STORAGE_SIZE)
+    }
+
+    #[test]
+    fn each_motion_sample_is_its_own_entry_in_the_six_axis_ring() {
+        use crate::cpu::hid_shmem as h;
+        const SHMEM: u64 = 0x3000_0000;
+        let period = crate::kernel::sched::HID_SAMPLE_PERIOD_CYCLES;
+
+        let mut cpu = Cpu::new();
+        map_hid(&mut cpu, SHMEM);
+        let lifo = SHMEM
+            + u64::from(
+                h::NPAD
+                    + h::HANDHELD_SLOT * h::ENTRY_SIZE
+                    + h::SIX_AXIS_FULL_KEY_LIFO
+                    + h::SIX_AXIS_HANDHELD * h::SIX_AXIS_LIFO_SIZE,
+            );
+        let accel_x = |cpu: &Cpu, state: u64| {
+            f32::from_bits(
+                cpu.mem
+                    .read_u32(state + u64::from(h::SIX_AXIS_FLOATS))
+                    .unwrap(),
+            )
+        };
+        let sampling_number = |cpu: &Cpu, state: u64| {
+            cpu.mem
+                .read_u64(state + u64::from(h::SIX_AXIS_SAMPLING_NUMBER))
+                .unwrap()
+        };
+
+        for x in [0.1, 0.2, 0.3] {
+            cpu.push_motion_sample([x, 0.0, -1.0], [0.0; 3]);
+        }
+        let mut published = Vec::new();
+        for _ in 0..4 {
+            cpu.cycles += period + 1;
+            cpu.hid_tick();
+            let state = newest_six_axis_state(&cpu, lifo);
+            published.push((accel_x(&cpu, state), sampling_number(&cpu, state)));
+        }
+        // The fourth tick finds the backlog empty and holds the last sample.
+        assert_eq!(
+            published.iter().map(|&(x, _)| x).collect::<Vec<_>>(),
+            [0.1, 0.2, 0.3, 0.3]
+        );
+        assert!(published.windows(2).all(|w| w[1].1 == w[0].1 + 1));
+        assert_eq!(
+            cpu.mem.read_u64(lifo + u64::from(h::LIFO_COUNT)).unwrap(),
+            4
+        );
+
+        // The ring keeps the 17 newest and wraps its tail.
+        for _ in 0..20 {
+            cpu.push_motion_sample([0.5, 0.0, -1.0], [0.0; 3]);
+            cpu.cycles += period + 1;
+            cpu.hid_tick();
+        }
+        assert_eq!(
+            cpu.mem.read_u64(lifo + u64::from(h::LIFO_COUNT)).unwrap(),
+            17
+        );
+        assert!(cpu.mem.read_u64(lifo + u64::from(h::LIFO_TAIL)).unwrap() < 17);
+    }
+
+    #[test]
+    fn a_motion_backlog_drops_its_oldest_samples_once_full() {
+        use crate::cpu::hid_shmem as h;
+        const SHMEM: u64 = 0x3000_0000;
+
+        let mut cpu = Cpu::new();
+        map_hid(&mut cpu, SHMEM);
+        let lifo = SHMEM
+            + u64::from(
+                h::NPAD
+                    + h::HANDHELD_SLOT * h::ENTRY_SIZE
+                    + h::SIX_AXIS_FULL_KEY_LIFO
+                    + h::SIX_AXIS_HANDHELD * h::SIX_AXIS_LIFO_SIZE,
+            );
+        // Far more than the core keeps between ticks.
+        for i in 0..100 {
+            cpu.push_motion_sample([i as f32, 0.0, -1.0], [0.0; 3]);
+        }
+        cpu.cycles += crate::kernel::sched::HID_SAMPLE_PERIOD_CYCLES + 1;
+        cpu.hid_tick();
+        let state = newest_six_axis_state(&cpu, lifo);
+        let first = f32::from_bits(
+            cpu.mem
+                .read_u32(state + u64::from(h::SIX_AXIS_FLOATS))
+                .unwrap(),
+        );
+        assert!(first > 90.0, "published {first}, an old sample");
+    }
+
+    #[test]
     fn the_pad_is_published_in_a_style_the_title_actually_asked_for() {
         // A title that supports Joy-Con pairs but not Pro Controllers must find a style it asked for.
         use crate::cpu::hid_shmem as h;
@@ -716,6 +873,83 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_lone_joy_con_is_player_1_in_its_own_style_when_the_title_takes_one() {
+        use crate::cpu::hid_shmem as h;
+        use crate::cpu::HostPad;
+        use crate::cpu::OperationMode::Handheld;
+        const SHMEM: u64 = 0x3000_0000;
+        const BUTTONS: u64 = 0x1;
+        const PLAYER_1: u32 = 0;
+
+        let every = h::STYLE_FULL_KEY
+            | h::STYLE_HANDHELD
+            | h::STYLE_JOY_DUAL
+            | h::STYLE_JOY_LEFT
+            | h::STYLE_JOY_RIGHT;
+        for (styles, pad, slot, style, lifo) in [
+            (
+                every,
+                HostPad::JoyRight,
+                PLAYER_1,
+                h::STYLE_JOY_RIGHT,
+                h::JOY_RIGHT_LIFO,
+            ),
+            (
+                every,
+                HostPad::JoyLeft,
+                PLAYER_1,
+                h::STYLE_JOY_LEFT,
+                h::JOY_LEFT_LIFO,
+            ),
+            (
+                h::STYLE_FULL_KEY | h::STYLE_HANDHELD,
+                HostPad::JoyRight,
+                h::HANDHELD_SLOT,
+                h::STYLE_HANDHELD,
+                h::HANDHELD_LIFO,
+            ),
+        ] {
+            let case = format!("styles {styles:#x}, {pad:?}");
+            let mut cpu = request(false, 100, &styles.to_le_bytes());
+            map_hid(&mut cpu, SHMEM);
+            cpu.register_service_handle(9, "hid");
+            cpu.hid_request(TLS, 9, Some(100)).unwrap();
+            cpu.set_operation_mode(Handheld);
+            cpu.set_host_pad(pad);
+            cpu.set_gamepad_state(BUTTONS, 0, 0, 0, 0);
+
+            let live = h::NPAD + slot * h::ENTRY_SIZE;
+            assert_eq!(
+                cpu.mem
+                    .read_u32(SHMEM + u64::from(live + h::STYLE_SET))
+                    .unwrap(),
+                style,
+                "{case}"
+            );
+            let state = live + lifo + h::LIFO_STORAGE;
+            assert_eq!(
+                cpu.mem
+                    .read_u64(SHMEM + u64::from(state + h::STATE_BUTTONS))
+                    .unwrap(),
+                BUTTONS,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_change_of_host_pad_signals_the_style_update_event() {
+        let mut cpu = request(false, 106, &[0; 16]);
+        cpu.register_service_handle(9, "hid");
+        cpu.hid_request(TLS, 9, Some(106)).unwrap();
+        let event = cpu.npad_style_update_event.unwrap();
+        cpu.clear_event(event);
+
+        cpu.set_host_pad(crate::cpu::HostPad::JoyRight);
+        assert_eq!(cpu.event_signaled(event), Some(true));
     }
 
     #[test]

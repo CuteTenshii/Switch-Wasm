@@ -17,6 +17,17 @@ pub(crate) struct NpadPresentation {
     pub(crate) joy_assignment: u32,
 }
 
+/// The controller the host's buttons and sticks come from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HostPad {
+    /// Joy-Cons on the rails when undocked, else a full controller as player 1.
+    #[default]
+    Full,
+    /// A lone Joy-Con held by itself, which is player 1 whether docked or not.
+    JoyLeft,
+    JoyRight,
+}
+
 /// Offsets into libnx's `HidSharedMemory` (`switch/services/hid.h`).
 pub(crate) mod hid_shmem {
     /// `offsetof(HidSharedMemory, npad)`.
@@ -121,6 +132,185 @@ pub(crate) mod hid_shmem {
     pub const TOUCH_DIAMETER_X: u32 = 0x18;
     pub const TOUCH_DIAMETER_Y: u32 = 0x1C;
     pub const TOUCH_ROTATION_ANGLE: u32 = 0x20;
+
+    /// The six `HidNpadSixAxisSensorLifo`s follow `SYSTEM_EXT_LIFO`: full key, handheld, joy
+    /// dual left and right, joy left, joy right.
+    pub const SIX_AXIS_FULL_KEY_LIFO: u32 = 0x1758;
+    pub const SIX_AXIS_LIFO_SIZE: u32 = 0x708;
+    /// `sizeof(HidSixAxisSensorStateAtomicStorage)`, the stride of its 17 entries.
+    pub const SIX_AXIS_STORAGE_SIZE: u32 = 0x68;
+    pub const SIX_AXIS_HANDHELD: u32 = 1;
+    pub const SIX_AXIS_JOY_DUAL_LEFT: u32 = 2;
+    pub const SIX_AXIS_JOY_DUAL_RIGHT: u32 = 3;
+    pub const SIX_AXIS_JOY_LEFT: u32 = 4;
+    pub const SIX_AXIS_JOY_RIGHT: u32 = 5;
+
+    /// `HidSixAxisSensorState` fields; the storage entry holds a sampling number, then it.
+    pub const SIX_AXIS_STATE: u32 = 0x08;
+    pub const SIX_AXIS_DELTA_TIME: u32 = 0x00;
+    pub const SIX_AXIS_SAMPLING_NUMBER: u32 = 0x08;
+    /// Eighteen `f32`s: acceleration, angular velocity, rotation, then the 3x3 orientation.
+    pub const SIX_AXIS_FLOATS: u32 = 0x10;
+    pub const SIX_AXIS_ATTRIBUTES: u32 = 0x58;
+    pub const SIX_AXIS_ATTR_CONNECTED: u32 = 1 << 0;
+}
+
+/// Samples the sensor may run ahead of the 200 Hz publish by, two reports' worth, before the
+/// oldest are dropped so a core running slow does not fall ever further behind.
+const MOTION_BACKLOG: usize = 6;
+
+/// One sensor sample: accelerometer in G, gyroscope in revolutions per second.
+type MotionSample = ([f32; 3], [f32; 3]);
+
+/// How hard the pose is pulled toward the gravity the accelerometer reads, in radians per
+/// second per unit of error; yuzu's gain.
+const GRAVITY_GAIN: f32 = 0.3;
+/// A reading this close to 1 G is taken as gravity alone, not the hand moving.
+const GRAVITY_TOLERANCE: f32 = 0.25;
+/// Below this rate, in revolutions per second, with gravity alone, the sensor is at rest.
+const REST_RATE: f32 = 0.02;
+/// Ticks at rest, one second's worth, before the gyro's reading is taken as its bias.
+const REST_TICKS: u32 = 200;
+/// The share of the gap to the reading the bias closes each tick at rest.
+const BIAS_RATE: f32 = 0.005;
+
+/// The host's motion sensor and the pose integrated from it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Motion {
+    /// The sample last published, its gyro less the bias.
+    accel: [f32; 3],
+    gyro: [f32; 3],
+    raw_gyro: [f32; 3],
+    connected: bool,
+    /// What the gyro reads at rest, in revolutions per second.
+    bias: [f32; 3],
+    rest_ticks: u32,
+    /// The pose has been tilted to the gravity of a still reading.
+    aligned: bool,
+    /// Samples not yet published, oldest first.
+    backlog: std::collections::VecDeque<MotionSample>,
+    /// Gyro integrated since the sensor connected, in revolutions.
+    rotation: [f32; 3],
+    /// The sensor's axes as unit rows, in a frame whose z is up and whose yaw is where the
+    /// sensor pointed when it connected.
+    orientation: [[f32; 3]; 3],
+    sample: u64,
+    /// A connected state has been published, so a disconnect needs one more.
+    published: bool,
+}
+
+const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+impl Default for Motion {
+    fn default() -> Self {
+        Self {
+            accel: [0.0; 3],
+            gyro: [0.0; 3],
+            raw_gyro: [0.0; 3],
+            connected: false,
+            bias: [0.0; 3],
+            rest_ticks: 0,
+            aligned: false,
+            backlog: std::collections::VecDeque::new(),
+            rotation: [0.0; 3],
+            orientation: IDENTITY,
+            sample: 0,
+            published: false,
+        }
+    }
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn normalized(v: [f32; 3]) -> [f32; 3] {
+    let len = dot(v, v).sqrt();
+    if len == 0.0 {
+        return v;
+    }
+    v.map(|c| c / len)
+}
+
+/// The pose of a still sensor whose accelerometer reads `accel`, its yaw taken from its x axis.
+fn tilted_to(accel: [f32; 3]) -> [[f32; 3]; 3] {
+    // The world's up, then its x and y, each written in the sensor's axes.
+    let up = normalized(accel.map(|c| -c));
+    let mut east = [1.0 - up[0] * up[0], -up[0] * up[1], -up[0] * up[2]];
+    if dot(east, east) < 1e-6 {
+        east = [-up[1] * up[0], 1.0 - up[1] * up[1], -up[1] * up[2]];
+    }
+    let east = normalized(east);
+    let north = cross(up, east);
+    [0, 1, 2].map(|i| [east[i], north[i], up[i]])
+}
+
+impl Motion {
+    /// Publish the next sample: estimate the gyro's bias, then turn the axes by the gyro over
+    /// `seconds`, pulled toward the gravity the accelerometer reads.
+    fn update(&mut self, seconds: f32) {
+        if !self.connected {
+            *self = Self {
+                published: self.published,
+                ..Self::default()
+            };
+            return;
+        }
+        let only_gravity = (dot(self.accel, self.accel).sqrt() - 1.0).abs() < GRAVITY_TOLERANCE;
+        self.track_bias(only_gravity);
+        self.gyro = [0, 1, 2].map(|i| self.raw_gyro[i] - self.bias[i]);
+        if !self.aligned && only_gravity {
+            self.orientation = tilted_to(self.accel);
+            self.aligned = true;
+        }
+        for (rot, rate) in self.rotation.iter_mut().zip(self.gyro) {
+            *rot += rate * seconds;
+        }
+
+        let [x, y, z] = self.orientation;
+        let mut rate = self.gyro;
+        if only_gravity {
+            // Gravity as the pose expects the accelerometer to read it, against what it does.
+            let expected = [-x[2], -y[2], -z[2]];
+            let error = cross(normalized(self.accel), expected);
+            for (r, e) in rate.iter_mut().zip(error) {
+                *r += GRAVITY_GAIN * e / std::f32::consts::TAU;
+            }
+        }
+        let turn = std::f32::consts::TAU * seconds;
+        let spin = [0, 1, 2].map(|i| turn * (rate[0] * x[i] + rate[1] * y[i] + rate[2] * z[i]));
+        let step = |e: [f32; 3]| {
+            let c = cross(spin, e);
+            [e[0] + c[0], e[1] + c[1], e[2] + c[2]]
+        };
+        let x = normalized(step(x));
+        let z = normalized(cross(x, step(y)));
+        self.orientation = [x, cross(z, x), z];
+    }
+
+    /// After a second at rest, ease the bias toward what the gyro reads.
+    fn track_bias(&mut self, only_gravity: bool) {
+        let still = (0..3).all(|i| (self.raw_gyro[i] - self.bias[i]).abs() < REST_RATE);
+        if !(still && only_gravity) {
+            self.rest_ticks = 0;
+            return;
+        }
+        if self.rest_ticks < REST_TICKS {
+            self.rest_ticks += 1;
+            return;
+        }
+        for (bias, raw) in self.bias.iter_mut().zip(self.raw_gyro) {
+            *bias += (raw - *bias) * BIAS_RATE;
+        }
+    }
 }
 
 /// Styles the pad can be published as, best first. A style the title does not
@@ -209,6 +399,10 @@ pub const TOUCH_SCREEN_HEIGHT: u32 = 720;
 
 pub const TOUCH_MAX: usize = 16;
 
+/// The time between six-axis samples, in nanoseconds and in seconds.
+const SIX_AXIS_DELTA_NS: u64 = 5_000_000;
+const MOTION_PERIOD_S: f32 = HID_SAMPLE_PERIOD_CYCLES as f32 / 1_020_000_000.0;
+
 /// Contact size reported for every touch; only checked to be non-zero.
 const TOUCH_DIAMETER: u32 = 10;
 
@@ -248,6 +442,124 @@ impl Cpu {
         self.write_hid_gamepad_state(buttons, stick_lx, stick_ly, stick_rx, stick_ry);
     }
 
+    /// Say which controller the host's input comes from, moving the pad to the style that
+    /// matches it and telling every process the style changed.
+    pub fn set_host_pad(&mut self, pad: HostPad) {
+        if self.host_pad == pad {
+            return;
+        }
+        self.host_pad = pad;
+        for pid in self.pids() {
+            self.in_process(pid, |cpu| {
+                if let Some(event) = cpu.npad_style_update_event {
+                    cpu.signal_event(event);
+                }
+            });
+        }
+    }
+
+    /// Queue a sample from the host's motion sensor: accelerometer in G, gyroscope in
+    /// revolutions per second. Each `hid` sample publishes the next, 5 ms of sensor time apart.
+    pub fn push_motion_sample(&mut self, accel: [f32; 3], gyro: [f32; 3]) {
+        let motion = &mut self.motion;
+        if motion.backlog.len() == MOTION_BACKLOG {
+            motion.backlog.pop_front();
+        }
+        motion.backlog.push_back((accel, gyro));
+        motion.connected = true;
+    }
+
+    /// The host's motion sensor is gone; the next `hid` sample publishes it disconnected.
+    pub fn disconnect_motion(&mut self) {
+        self.motion.connected = false;
+        self.motion.backlog.clear();
+    }
+
+    /// Publish the sensor into the six-axis LIFOs of the style the title can use.
+    fn write_six_axis(&mut self) {
+        use hid_shmem as h;
+        if !self.hid_mapped || !(self.motion.connected || self.motion.published) {
+            return;
+        }
+        // An empty backlog holds the last sample, as a sensor between reports would read.
+        if let Some((accel, gyro)) = self.motion.backlog.pop_front() {
+            self.motion.accel = accel;
+            self.motion.raw_gyro = gyro;
+        }
+        self.motion.update(MOTION_PERIOD_S);
+        self.motion.published = self.motion.connected;
+        self.motion.sample = self.motion.sample.wrapping_add(1);
+        let (slot, presentation) = self.active_npad();
+        let lifos: &[u32] = match presentation.style {
+            _ if slot == h::HANDHELD_SLOT => &[h::SIX_AXIS_HANDHELD],
+            h::STYLE_FULL_KEY => &[0],
+            h::STYLE_JOY_DUAL => &[h::SIX_AXIS_JOY_DUAL_LEFT, h::SIX_AXIS_JOY_DUAL_RIGHT],
+            h::STYLE_JOY_LEFT => &[h::SIX_AXIS_JOY_LEFT],
+            _ => &[h::SIX_AXIS_JOY_RIGHT],
+        };
+        let base = h::NPAD + slot * h::ENTRY_SIZE + h::SIX_AXIS_FULL_KEY_LIFO;
+        for index in lifos {
+            self.write_six_axis_lifo(base + index * h::SIX_AXIS_LIFO_SIZE);
+        }
+    }
+
+    /// Add the current state to a six-axis LIFO's ring, after the entry it last took.
+    fn write_six_axis_lifo(&mut self, lifo: u32) {
+        use hid_shmem as h;
+        let m = &self.motion;
+        let floats: Vec<u32> = m
+            .accel
+            .iter()
+            .chain(&m.gyro)
+            .chain(&m.rotation)
+            .chain(m.orientation.iter().flatten())
+            .map(|value| value.to_bits())
+            .collect();
+        let sample = m.sample;
+        let attributes = if m.connected {
+            h::SIX_AXIS_ATTR_CONNECTED
+        } else {
+            0
+        };
+        let capacity = h::LIFO_CAPACITY as u32;
+        // Both stay below the capacity, so their low words are the whole value.
+        let count = self.hid_shmem.read_u32(lifo + h::LIFO_COUNT).unwrap_or(0);
+        let tail = match count {
+            0 => 0,
+            _ => (self.hid_shmem.read_u32(lifo + h::LIFO_TAIL).unwrap_or(0) + 1) % capacity,
+        };
+
+        let entry = lifo + h::LIFO_STORAGE + tail * h::SIX_AXIS_STORAGE_SIZE;
+        let _ = self
+            .hid_shmem
+            .write_u64(entry + h::STORAGE_SAMPLING_NUMBER, sample << 1);
+        let state = entry + h::SIX_AXIS_STATE;
+        let _ = self
+            .hid_shmem
+            .write_u64(state + h::SIX_AXIS_DELTA_TIME, SIX_AXIS_DELTA_NS);
+        let _ = self
+            .hid_shmem
+            .write_u64(state + h::SIX_AXIS_SAMPLING_NUMBER, sample);
+        for (i, bits) in floats.into_iter().enumerate() {
+            let at = state + h::SIX_AXIS_FLOATS + 4 * i as u32;
+            let _ = self.hid_shmem.write_u32(at, bits);
+        }
+        let _ = self
+            .hid_shmem
+            .write_u32(state + h::SIX_AXIS_ATTRIBUTES, attributes);
+
+        // The header last, so a reader never finds the tail on an entry still being written.
+        let _ = self
+            .hid_shmem
+            .write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
+        let _ = self
+            .hid_shmem
+            .write_u64(lifo + h::LIFO_TAIL, u64::from(tail));
+        let _ = self
+            .hid_shmem
+            .write_u64(lifo + h::LIFO_COUNT, u64::from((count + 1).min(capacity)));
+    }
+
     /// Publish a fresh `hid` sample when the 200 Hz timer comes round.
     pub(crate) fn hid_tick(&mut self) {
         if !self.hid_mapped
@@ -260,6 +572,7 @@ impl Cpu {
         self.set_gamepad_state(buttons, lx, ly, rx, ry);
         let touches = std::mem::take(&mut self.last_touches);
         self.set_touch_state(&touches);
+        self.write_six_axis();
     }
 
     /// `HidNpadButton_StickL*`/`StickR*` bits derived from stick deflection.
@@ -301,8 +614,8 @@ impl Cpu {
         self.write_npad_disconnected(idle, sample);
     }
 
-    /// The one pad there is: on the rails when undocked, else player 1, as far as the title
-    /// accepts either.
+    /// The one pad there is: a lone Joy-Con as player 1, else on the rails when undocked, else
+    /// player 1, as far as the title accepts each.
     pub(crate) fn active_npad(&self) -> (u32, NpadPresentation) {
         let styles = self.npad_style_set;
         let id_accepted = |id| self.npad_id_types.is_empty() || self.npad_id_types.contains(&id);
@@ -310,7 +623,18 @@ impl Cpu {
             (styles == 0 || styles & NPAD_HANDHELD.style != 0) && id_accepted(NPAD_ID_HANDHELD);
         let player_1 = id_accepted(NPAD_ID_PLAYER_1)
             && (styles == 0 || NPAD_PRESENTATIONS.iter().any(|pad| styles & pad.style != 0));
-        if handheld && (self.operation_mode == OperationMode::Handheld || !player_1) {
+        let lone_style = match self.host_pad {
+            HostPad::Full => None,
+            HostPad::JoyLeft => Some(hid_shmem::STYLE_JOY_LEFT),
+            HostPad::JoyRight => Some(hid_shmem::STYLE_JOY_RIGHT),
+        };
+        // A title that cannot take a lone Joy-Con gets the pad it would have had.
+        let lone = lone_style
+            .filter(|style| player_1 && (styles == 0 || styles & style != 0))
+            .and_then(|style| NPAD_PRESENTATIONS.into_iter().find(|p| p.style == style));
+        if let Some(lone) = lone {
+            (0, lone)
+        } else if handheld && (self.operation_mode == OperationMode::Handheld || !player_1) {
             (hid_shmem::HANDHELD_SLOT, NPAD_HANDHELD)
         } else {
             (0, npad_presentation_for(styles))
@@ -584,5 +908,103 @@ impl Cpu {
 
     pub fn hid_shmem_addr(&self) -> u64 {
         self.process().hid_shmem_addr
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connected() -> Motion {
+        Motion {
+            connected: true,
+            ..Motion::default()
+        }
+    }
+
+    /// Hold `accel` and `gyro` for `seconds` of 200 Hz ticks.
+    fn hold(motion: &mut Motion, accel: [f32; 3], gyro: [f32; 3], seconds: f32) {
+        motion.accel = accel;
+        motion.raw_gyro = gyro;
+        for _ in 0..(seconds / MOTION_PERIOD_S).round() as u32 {
+            motion.update(MOTION_PERIOD_S);
+        }
+    }
+
+    /// Gravity as the pose says the accelerometer should read it.
+    fn expected_gravity(motion: &Motion) -> [f32; 3] {
+        motion.orientation.map(|row| -row[2])
+    }
+
+    fn close(a: [f32; 3], b: [f32; 3]) -> bool {
+        (0..3).all(|i| (a[i] - b[i]).abs() < 0.01)
+    }
+
+    #[test]
+    fn a_still_sensor_is_posed_with_gravity_where_it_reads_it() {
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        for accel in [
+            [0.0, 0.0, -1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, half, -half],
+        ] {
+            let mut motion = connected();
+            hold(&mut motion, accel, [0.0; 3], MOTION_PERIOD_S);
+            assert!(
+                close(expected_gravity(&motion), accel),
+                "{accel:?}: {:?}",
+                motion.orientation
+            );
+            let [x, y, z] = motion.orientation;
+            assert!(
+                close(cross(x, y), z),
+                "{accel:?} is not a right-handed pose"
+            );
+        }
+    }
+
+    #[test]
+    fn a_turn_the_gyro_missed_is_pulled_back_to_gravity() {
+        let mut motion = connected();
+        hold(&mut motion, [0.0, 0.0, -1.0], [0.0; 3], 1.0);
+        // Turned onto its side with no gyro reading, as drift leaves it.
+        hold(&mut motion, [0.0, -1.0, 0.0], [0.0; 3], 30.0);
+        assert!(
+            close(expected_gravity(&motion), [0.0, -1.0, 0.0]),
+            "{:?}",
+            motion.orientation
+        );
+    }
+
+    #[test]
+    fn shaking_does_not_tilt_the_pose() {
+        let mut motion = connected();
+        hold(&mut motion, [0.0, 0.0, -1.0], [0.0; 3], 1.0);
+        hold(&mut motion, [2.0, 0.0, -1.0], [0.0; 3], 10.0);
+        assert!(close(expected_gravity(&motion), [0.0, 0.0, -1.0]));
+    }
+
+    #[test]
+    fn a_gyro_that_reads_a_turn_at_rest_stops_turning_the_pose() {
+        // A small bias about z, the axis gravity cannot correct.
+        let mut motion = connected();
+        hold(&mut motion, [0.0, 0.0, -1.0], [0.0, 0.0, 0.01], 20.0);
+        assert!(motion.gyro[2].abs() < 0.001, "published {:?}", motion.gyro);
+        let yaw_kept = motion.orientation[0][0];
+        assert!(
+            yaw_kept > 0.97,
+            "the x axis drifted to {:?}",
+            motion.orientation[0]
+        );
+    }
+
+    #[test]
+    fn a_real_turn_is_not_taken_for_bias() {
+        let mut motion = connected();
+        hold(&mut motion, [0.0, 0.0, -1.0], [0.0, 0.0, 0.25], 4.0);
+        assert_eq!(motion.bias, [0.0; 3]);
+        assert_eq!(motion.gyro, [0.0, 0.0, 0.25]);
     }
 }

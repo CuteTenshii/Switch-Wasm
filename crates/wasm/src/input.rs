@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicI32, AtomicU32};
 
-use switch_core::cpu::{Cpu, TouchPoint, TOUCH_MAX};
+use switch_core::cpu::{Cpu, HostPad, TouchPoint, TOUCH_MAX};
 use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::session;
@@ -209,6 +209,19 @@ pub(crate) fn exchange(cpu: &mut Cpu) {
 /// Drop latched input the guest has had a frame to see.
 pub(crate) fn release_if_seen(cpu: &mut Cpu) {
     LATCH.with_borrow_mut(|latch| latch.release_if_seen(cpu));
+}
+
+/// Say which controller the page reads: `"full"`, or a lone `"joyLeft"` or `"joyRight"`.
+#[wasm_bindgen]
+pub fn switch_set_host_pad(pad: &str) -> Result<(), String> {
+    let pad = match pad {
+        "full" => HostPad::Full,
+        "joyLeft" => HostPad::JoyLeft,
+        "joyRight" => HostPad::JoyRight,
+        _ => return Err(format!("no host pad called {pad:?}")),
+    };
+    session().cpu.set_host_pad(pad);
+    Ok(())
 }
 
 /// Feed touch contacts: `(finger_id, x, y)` triples in 1280x720 digitizer space. No triples is

@@ -3,6 +3,8 @@
 import { BTN } from './buttons';
 import { $ } from './dom';
 import { log } from './log';
+import type { HostPad } from '../shared/protocol';
+import { readGamepad } from './gamepad';
 import { call, hasSession } from './rpc';
 import { writeInput } from './mailbox';
 import { pullVibration } from './rumble';
@@ -10,13 +12,8 @@ import { screenSize } from './display';
 import { screenEl } from './shell';
 import { touchpadActive, touchpadButtons, touchpadStick } from './touchpad';
 
-// The W3C standard gamepad layout's buttons 0-15, in order.
-const STANDARD_PAD = [
-  BTN.B, BTN.A, BTN.Y, BTN.X,
-  BTN.L, BTN.R, BTN.ZL, BTN.ZR,
-  BTN.MINUS, BTN.PLUS, BTN.STICK_L, BTN.STICK_R,
-  BTN.UP, BTN.DOWN, BTN.LEFT, BTN.RIGHT,
-];
+// The host pad the core was last told about, and null once there is no session to tell.
+let sentHostPad: HostPad | null = null;
 
 function inputStatus(text: string, detail = ''): void {
   const el = $('input-state');
@@ -160,25 +157,26 @@ screenEl.addEventListener('pointerup', liftTouch);
 screenEl.addEventListener('pointercancel', liftTouch);
 
 function pushInput(): void {
-  if (!hasSession()) return;
+  if (!hasSession()) {
+    sentHostPad = null;
+    return;
+  }
   const pads = navigator.getGamepads ? navigator.getGamepads() : [];
   const pad = pads.find((p) => p && p.connected);
+  const reading = pad ? readGamepad(pad) : null;
+  const hostPad = reading?.hostPad ?? 'full';
+  if (hostPad !== sentHostPad) {
+    sentHostPad = hostPad;
+    void call('setHostPad', hostPad);
+  }
   let mask = keyboardMask();
   for (const name of touchpadButtons()) mask |= BTN[name];
   let { x: slx, y: sly } = touchpadStick('left');
   let { x: srx, y: sry } = touchpadStick('right');
-  if (pad) {
-    STANDARD_PAD.forEach((bit, i) => {
-      if (pad.buttons[i]?.pressed) mask |= bit;
-    });
-    // -32768..32767, ~15% deadzone; Y negated because Horizon's axis points up.
-    const dz = 0.15;
-    const axes = pad.axes || [];
-    const axis = (i: number) => (Math.abs(axes[i] || 0) > dz ? axes[i] : 0);
-    slx = Math.round(axis(0) * 32767);
-    sly = Math.round(-axis(1) * 32767);
-    srx = Math.round(axis(2) * 32767);
-    sry = Math.round(-axis(3) * 32767);
+  if (pad && reading) {
+    mask |= reading.buttons;
+    if (reading.left) [slx, sly] = reading.left;
+    if (reading.right) [srx, sry] = reading.right;
     inputStatus(padName(pad), pad.id);
   } else if (touchpadActive()) {
     inputStatus('touch controls');
