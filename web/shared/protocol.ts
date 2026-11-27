@@ -530,6 +530,9 @@ export interface CallRequest {
   args: unknown[];
 }
 
+// What the page sends the worker: calls, and once at startup the canvas it paints.
+export type PageMessage = CallRequest | { type: 'screen'; canvas: OffscreenCanvas };
+
 // A log line's severity; the console shows those at or above its chosen level.
 export type LogLevel = 'error' | 'warn' | 'info' | 'log' | 'debug' | 'trace';
 

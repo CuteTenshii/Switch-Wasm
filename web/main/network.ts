@@ -8,7 +8,7 @@ import { fmtSize } from '../shared/format';
 import { $ } from './dom';
 import { icon } from './icons';
 import { log } from './log';
-import { call, onNetState, whenReady } from './rpc';
+import { call, onWorker, whenReady } from './rpc';
 
 const DEFAULT_URL = 'ws://127.0.0.1:18787';
 const URL_KEY = 'relay-url';
@@ -91,7 +91,7 @@ async function refresh(): Promise<void> {
   link.textContent = `Socket ${status.socket}, ${status.out} frames out, ${status.in} in.`;
 }
 
-onNetState((next) => {
+onWorker('net_state', ({ state: next }) => {
   state = next;
   render();
   say(next === 'unreachable' ? `No relay answered at ${urlInput.value}. Download and start switch-relay, then turn this on.` : '');

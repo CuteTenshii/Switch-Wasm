@@ -2,7 +2,7 @@
 import { $, pickedFile } from './dom';
 import { readKeysFile } from './filetype';
 import { log } from './log';
-import { call, isReady } from './rpc';
+import { call, hasSession } from './rpc';
 import { openPanel, setNote } from './shell';
 
 const KEYS_STORE = { prod: 'switch-prod-keys', title: 'switch-title-keys' };
@@ -35,7 +35,7 @@ export function onKeysChanged(handler: () => void): void {
 }
 
 export async function stageKeys(): Promise<void> {
-  if (!isReady()) return;
+  if (!hasSession()) return;
   const prod = prodKeysText ? new TextEncoder().encode(prodKeysText) : null;
   const title = titleKeysText ? new TextEncoder().encode(titleKeysText) : null;
   await call('loadKeys', prod, title);

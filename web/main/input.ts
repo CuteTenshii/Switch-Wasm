@@ -3,7 +3,7 @@
 import { BTN } from './buttons';
 import { $ } from './dom';
 import { log } from './log';
-import { call, hasSession, isReady } from './rpc';
+import { call, hasSession } from './rpc';
 import { writeInput } from './mailbox';
 import { pullVibration } from './rumble';
 import { screenSize } from './display';
@@ -160,8 +160,7 @@ screenEl.addEventListener('pointerup', liftTouch);
 screenEl.addEventListener('pointercancel', liftTouch);
 
 function pushInput(): void {
-  // Stop frees the session first; swallow rejections from these fire-and-forget calls.
-  if (!isReady() || !hasSession()) return;
+  if (!hasSession()) return;
   const pads = navigator.getGamepads ? navigator.getGamepads() : [];
   const pad = pads.find((p) => p && p.connected);
   let mask = keyboardMask();

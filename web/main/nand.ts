@@ -7,7 +7,7 @@ import { beginLoad } from './loading';
 import { hasProdKeys, onKeysChanged } from './keys';
 import { log } from './log';
 import { nandBusy, nandOperation, onNandBusy } from './nandbusy';
-import { call, onNandProgress } from './rpc';
+import { call, onWorker } from './rpc';
 import { refuseBootWhileNandBusy } from './session';
 import { setNote } from './shell';
 import { doLaunchNca } from './container';
@@ -54,7 +54,7 @@ let registering = false;
 
 let restoreProgress: { done: number; total: number } | null = null;
 
-onNandProgress((done, total) => {
+onWorker('nand_progress', ({ done, total }) => {
   restoreProgress = { done, total };
   updateFirmwareState();
 });

@@ -1,17 +1,11 @@
 // Promise-based RPC to the emulator worker over postMessage.
 
-import type {
-  CallRequest, Commands, ErrorDialog, KeyboardRequest, NetState, SliceReport, WorkerMessage,
-} from '../shared/protocol';
+import type { CallRequest, Commands, PageMessage, WorkerMessage } from '../shared/protocol';
 import { spawnWorker } from '../shared/spawn';
 import workerUrl from '../worker/index.ts?worker&url';
-import { setAudioFormat, setAudioRing } from './audio';
 import { log } from './log';
-import { setMailbox } from './mailbox';
-import { showReadOnly } from './readonly';
 
 let worker: Worker | null = null;
-let ready = false;
 let startResolve!: () => void;
 let startReject!: (err: Error) => void;
 const started = new Promise<void>((resolve, reject) => {
@@ -27,35 +21,20 @@ let startFailure: string | null = null;
 // Whether the worker has loaded the core, which builds its session.
 let loaded = false;
 
-// The run loop's handlers for what the worker's loop reports; set by `runloop.ts`.
-let loopEvents: {
-  slice: (report: SliceReport) => void;
-  failed: (error: string) => void;
-  keyboard: (request: KeyboardRequest) => void;
-  errorDialog: (dialog: ErrorDialog) => void;
-  profilesEdited: () => void;
-} | null = null;
+/** A message the worker sends unprompted; `rpc.ts` handles replies, readiness and log lines itself. */
+export type WorkerEvent = Exclude<WorkerMessage['type'], 'reply' | 'ready' | 'log'>;
 
-let netState: ((state: NetState) => void) | null = null;
+type EventOf<T extends WorkerEvent> = Extract<WorkerMessage, { type: T }>;
 
-export function onNetState(handler: NonNullable<typeof netState>): void {
-  netState = handler;
-}
+const listeners: { [T in WorkerEvent]?: ((message: EventOf<T>) => void)[] } = {};
 
-let netSettings: ((json: string) => void) | null = null;
-
-export function onNetSettings(handler: NonNullable<typeof netSettings>): void {
-  netSettings = handler;
-}
-
-let nandProgress: ((done: number, total: number) => void) | null = null;
-
-export function onNandProgress(handler: NonNullable<typeof nandProgress>): void {
-  nandProgress = handler;
-}
-
-export function onLoopEvents(handlers: NonNullable<typeof loopEvents>): void {
-  loopEvents = handlers;
+/**
+ * Call `handler` with every `type` message from the worker. Messages sent once at startup are
+ * seen only by modules imported before `initWorker` runs.
+ */
+export function onWorker<T extends WorkerEvent>(type: T, handler: (message: EventOf<T>) => void): void {
+  const list: ((message: EventOf<T>) => void)[] = listeners[type] ??= [];
+  list.push(handler);
 }
 
 let msgId = 0;
@@ -63,10 +42,6 @@ const pending = new Map<number, {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
 }>();
-
-export function isReady(): boolean {
-  return ready;
-}
 
 export function whenReady(): Promise<void> {
   return readyPromise;
@@ -99,7 +74,7 @@ export function call<K extends keyof Commands>(
 
 export function initWorker(): void {
   worker = spawnWorker(workerUrl, 'Emulator', (why) => {
-    if (ready) log(why, 'error');
+    if (loaded) log(why, 'error');
     else failStart(why);
   });
   worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
@@ -116,52 +91,17 @@ export function initWorker(): void {
       case 'log':
         log(d.text, d.level);
         break;
-      case 'slice':
-        loopEvents?.slice(d.report);
-        break;
-      case 'loop_failed':
-        loopEvents?.failed(d.error);
-        break;
-      case 'keyboard':
-        loopEvents?.keyboard(d);
-        break;
-      case 'error_dialog':
-        loopEvents?.errorDialog(d);
-        break;
-      case 'profiles_edited':
-        loopEvents?.profilesEdited();
-        break;
-      case 'storage_read_only':
-        showReadOnly();
-        break;
-      case 'input_mailbox':
-        setMailbox(d.buffer, d.at);
-        break;
-      case 'audio_ring':
-        setAudioRing(d);
-        break;
-      case 'audio_format':
-        setAudioFormat(d.format);
-        break;
-      case 'net_state':
-        netState?.(d.state);
-        break;
-      case 'net_settings':
-        netSettings?.(d.json);
-        break;
-      case 'nand_progress':
-        nandProgress?.(d.done, d.total);
-        break;
       case 'ready':
         // A core that failed to load still reports ready, with the error.
         if (d.error) {
           failStart(`The WebAssembly core did not load (${d.error})`);
           break;
         }
-        ready = true;
         loaded = true;
         startResolve();
         break;
+      default:
+        for (const handler of (listeners[d.type] ?? []) as ((message: WorkerMessage) => void)[]) handler(d);
     }
   };
 }
@@ -178,5 +118,5 @@ function failStart(why: string): void {
 
 // Give the worker the canvas; it paints every frame from then on.
 export function attachScreen(canvas: OffscreenCanvas): void {
-  worker?.postMessage({ type: 'screen', canvas }, [canvas]);
+  worker?.postMessage({ type: 'screen', canvas } satisfies PageMessage, [canvas]);
 }

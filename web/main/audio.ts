@@ -3,6 +3,7 @@
 import type { RingOptions, WorkletReport } from './pcm-worklet';
 import workletUrl from './pcm-worklet.ts?worker&url';
 import { log } from './log';
+import { onWorker } from './rpc';
 
 let ring: RingOptions | null = null;
 let audioCtx: AudioContext | null = null;
@@ -47,13 +48,12 @@ export function audioOutput(): AudioOutput {
   };
 }
 
-export function setAudioRing(options: RingOptions): void {
-  ring = options;
-}
-
-export function setAudioFormat(next: number): void {
+onWorker('audio_ring', ({ buffer, at, samples }) => {
+  ring = { buffer, at, samples };
+});
+onWorker('audio_format', ({ format: next }) => {
   format = next;
-}
+});
 
 // Each slice: the first sound opens the output, and a held-back one is retried.
 export function noteAudio(): void {

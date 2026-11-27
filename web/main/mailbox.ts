@@ -1,5 +1,7 @@
 // Controller state and rumble, shared with the core's linear memory so no message carries them.
 
+import { onWorker } from './rpc';
+
 // Word offsets into the core's `Mailbox`.
 const BUTTONS = 0;
 const PRESSED = 1;
@@ -10,10 +12,10 @@ const WORDS = 7;
 let words: Int32Array | null = null;
 let down = 0;
 
-export function setMailbox(buffer: SharedArrayBuffer, at: number): void {
+onWorker('input_mailbox', ({ buffer, at }) => {
   words = new Int32Array(buffer, at, WORDS);
   down = 0;
-}
+});
 
 // A press is also noted on its own, so a tap shorter than a slice is still seen.
 export function writeInput(buttons: number, sticks: readonly number[]): void {

@@ -23,6 +23,7 @@ import './boot';
 import './dock';
 import './elements/info-tip';
 import './network';
+import './readonly';
 import './relay-settings';
 import './files';
 import './input';

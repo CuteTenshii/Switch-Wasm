@@ -3,7 +3,7 @@
 
 import { $, el } from './dom';
 import { onRelayLink } from './network';
-import { call, onNetSettings } from './rpc';
+import { call, onWorker } from './rpc';
 
 interface Report {
   listening: number;
@@ -218,7 +218,7 @@ function addOrigin(): void {
   sync();
 }
 
-onNetSettings((json) => received(JSON.parse(json) as Message));
+onWorker('net_settings', ({ json }) => received(JSON.parse(json) as Message));
 onRelayLink((state) => {
   if (state === 'open') {
     say('Reading settings…');

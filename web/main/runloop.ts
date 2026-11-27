@@ -15,7 +15,7 @@ import { dropKeyboard, offerKeyboard } from './keyboard';
 import { endLoad } from './loading';
 import { log } from './log';
 import { noteRam } from './memory';
-import { call, onLoopEvents } from './rpc';
+import { call, onWorker } from './rpc';
 import { pullProfileEdits, reloadProfiles } from './users';
 import { loaded, setState } from './shell';
 import { holdWakeLock, releaseWakeLock } from './wakelock';
@@ -58,13 +58,11 @@ function loopEnded(): void {
   releaseWakeLock();
 }
 
-onLoopEvents({
-  slice: (report) => void onSlice(report),
-  failed: (error) => void onFailed(error),
-  keyboard: offerKeyboard,
-  errorDialog: (dialog) => offerErrors([dialog]),
-  profilesEdited: () => void reloadProfiles(),
-});
+onWorker('slice', ({ report }) => void onSlice(report));
+onWorker('loop_failed', ({ error }) => void onFailed(error));
+onWorker('keyboard', offerKeyboard);
+onWorker('error_dialog', (dialog) => offerErrors([dialog]));
+onWorker('profiles_edited', () => void reloadProfiles());
 
 async function onSlice(report: SliceReport): Promise<void> {
   countEmulation(report.ms);
