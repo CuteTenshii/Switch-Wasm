@@ -10,6 +10,7 @@ import {
   type NandEntry,
   type StoredEntry,
 } from '../shared/db';
+import { parseSaveId, saveIdFor } from '../shared/saves';
 import {
   switch_flush_storage, switch_fs_create_dir, switch_fs_entries, switch_fs_read, switch_fs_remove,
   switch_fs_upload, switch_fs_write, switch_nand_content, switch_nand_content_size, switch_nand_erase,
@@ -134,10 +135,10 @@ export const STORAGE = {
     }
     return { ids: switch_saves(), names: [...names] };
   },
-  // Saves are named "<save id>@<uid>"; returns how many entries went.
+  // Returns how many entries went.
   async savesDeleteUser(uid) {
     let removed = 0;
-    for (const id of switch_saves().filter((save) => save.endsWith('@' + uid))) {
+    for (const id of switch_saves().filter((save) => parseSaveId(save).uid === uid)) {
       const volume: StorageVolume = { kind: 'save', id };
       const paths = [...scan(volume).keys()];
       await apply(volume, paths.map((path) => [path, null]));
@@ -149,23 +150,23 @@ export const STORAGE = {
   // New copies are written before the old ones go, so an interrupted move loses nothing.
   async savesMoveUser(from, to) {
     // A save both UIDs own would merge two titles' saves.
-    const ids = switch_saves();
-    const moving = ids.filter((id) => id.endsWith('@' + from)).map((id) => id.slice(0, id.indexOf('@')));
-    const taken = new Set(ids.filter((id) => id.endsWith('@' + to)).map((id) => id.slice(0, id.indexOf('@'))));
+    const ids = switch_saves().map(parseSaveId);
+    const moving = ids.filter((id) => id.uid === from).map((id) => id.save);
+    const taken = new Set(ids.filter((id) => id.uid === to).map((id) => id.save));
     const clashes = moving.filter((save) => taken.has(save));
     if (clashes.length) {
       throw new Error(`${to} already has saves for ${clashes.length === 1 ? 'title' : 'titles'} ${clashes.join(', ')}`);
     }
     let moved = 0;
     for (const save of moving) {
-      const source: StorageVolume = { kind: 'save', id: `${save}@${from}` };
+      const source: StorageVolume = { kind: 'save', id: saveIdFor(save, from) };
       const all = scan(source);
       const changes: [string, StoredEntry][] = [];
       for (const [path, info] of all) {
         const value = readEntry(source, path, info);
         if (value) changes.push([path, value]);
       }
-      await apply({ kind: 'save', id: `${save}@${to}` }, changes);
+      await apply({ kind: 'save', id: saveIdFor(save, to) }, changes);
       await apply(source, [...all.keys()].map((path) => [path, null]));
       moved += changes.length;
     }

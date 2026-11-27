@@ -1,6 +1,7 @@
 // The file manager: the SD card, save data and NAND titles as stored in this browser.
 
 import type { StorageInfo, StorageVolume } from '../shared/protocol';
+import { parseSaveId } from '../shared/saves';
 import {
   Archive, Database, Download, File, FileArchive, FilePen, FileUp, Folder, FolderPlus, FolderUp,
   MemoryStick, Package, PackagePlus, Pencil, Play, Save, Trash2, type IconNode,
@@ -414,10 +415,9 @@ async function renderSaves(mine: number): Promise<void> {
     return;
   }
   for (const id of ids) {
-    const [save, uid] = id.split('@');
-    const [title, cache] = save.split('.cache');
+    const { uid, title, cache } = parseSaveId(id);
     const user = uid ? names.get(uid) ?? 'profile ' + uid.slice(0, 8) : 'shared';
-    const owner = cache === undefined ? user : 'cache storage ' + cache;
+    const owner = cache === null ? user : 'cache storage ' + cache;
     const label = titleLabel(title);
     const { actions } = row(Save, label, (label === title ? '' : title + ' · ') + owner,
       () => go({ kind: 'save', id, dir: '/' }));
