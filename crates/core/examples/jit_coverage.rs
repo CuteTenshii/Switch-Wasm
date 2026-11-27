@@ -1,6 +1,6 @@
 //! Lists the instructions a program runs that the block emitter has no writer for,
 //! weighted by one frame's instruction mix:
-//! `jit_coverage <target> [--keys <prod.keys>] [--frame <n>]`.
+//! `jit_coverage <target> [--keys <prod.keys>] [--from-frame <n>]`.
 mod common;
 
 use clap::Parser;
@@ -24,8 +24,8 @@ struct Cli {
     #[command(flatten)]
     report: common::Report,
     /// The presented frame to sample; the default skips startup to a steady frame.
-    #[arg(short = 'n', long, default_value_t = 2)]
-    frame: u64,
+    #[arg(short = 's', long, default_value_t = 2, value_name = "N")]
+    from_frame: u64,
 }
 
 fn written(insn: u32) -> bool {
@@ -105,7 +105,7 @@ fn main() {
     program.boot(&mut cpu, None);
     common::start_play(&mut cpu);
 
-    let Some((seen, total)) = sample_frame(&mut cpu, cli.frame) else {
+    let Some((seen, total)) = sample_frame(&mut cpu, cli.from_frame) else {
         return;
     };
     let mut missing: Vec<(u64, u32)> = seen

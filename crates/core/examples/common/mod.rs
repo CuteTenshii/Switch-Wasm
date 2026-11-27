@@ -27,12 +27,10 @@ const FALLBACK_FONT: &[u8] = include_bytes!("../../../../web/font.ttf");
 /// The flags every tool that builds a machine takes.
 #[derive(ClapArgs, Clone, Default)]
 pub struct Shared {
-    /// Trace channels to switch on (`svc`, `ipc`, ...).
-    #[arg(short = 't', long, value_delimiter = ',', value_parser = channel)]
-    trace: Vec<Trace>,
-    /// Leave `--trace` off until this presented frame, to trace a late scene with its history drawn.
-    #[arg(long, value_name = "N")]
-    trace_from_frame: Option<u64>,
+    /// Trace channels to switch on (`svc`, `ipc`, ...); `@FRAME` leaves them off until that
+    /// presented frame, to trace a late scene with its history drawn.
+    #[arg(short = 't', long, value_parser = trace_spec, value_name = "CHANNELS[@FRAME]")]
+    trace: Option<TraceSpec>,
     /// Run the interpreter only.
     #[arg(long)]
     no_jit: bool,
@@ -44,9 +42,16 @@ pub struct Shared {
 /// The flags of a tool that boots a container or an NRO through [`Program`] or [`Title`].
 #[derive(ClapArgs, Clone, Default)]
 pub struct Boot {
-    /// Boot docked (1080p).
-    #[arg(short = 'd', long)]
-    docked: bool,
+    /// Boot docked (1080p); `--docked=FRAME` docks after that presented frame instead, as a real
+    /// dock mid-run does.
+    #[arg(
+        short = 'd',
+        long,
+        value_name = "FRAME",
+        num_args = 0..=1,
+        require_equals = true
+    )]
+    docked: Option<Option<u64>>,
     /// Register the system data archives of this firmware directory.
     #[arg(short = 'f', long, value_name = "DIR")]
     firmware: Option<String>,
@@ -122,16 +127,16 @@ pub struct Probe {
     #[arg(long)]
     watch_regs: bool,
     /// Hex-dump memory (`--dump` syntax) at each `--watch-pc` hit.
-    #[arg(long, value_name = "SPEC")]
-    watch_dump: Option<String>,
+    #[arg(long, value_parser = dumps, value_name = "SPEC")]
+    watch_dump: Option<Dumps>,
     /// Print the last N `--watch-pc` hits when the run stops.
     #[arg(long, default_value_t = 0, value_name = "N")]
     watch_last: usize,
     /// Hex-dump memory where the run stopped: `<base>[+<hex>][:<hex length>][,...]`, where
     /// `<base>` is `x0`..`x30`, `sp`, `pc` or an address and a leading `*` follows the pointer
     /// stored there.
-    #[arg(long, value_name = "SPEC")]
-    dump: Option<String>,
+    #[arg(long, value_parser = dumps, value_name = "SPEC")]
+    dump: Option<Dumps>,
 }
 
 /// The groups a tool flattened, handed to [`parse`] by [`Flags::with`].
@@ -183,12 +188,8 @@ pub fn parse<C: Parser>(groups_of: impl FnOnce(&C) -> Flags) -> C {
     std::env::set_var("DISABLE_MANGOHUD", "1");
     let cli = C::parse();
     let flags = groups_of(&cli);
-    let mut channels = flags.shared.trace.clone();
-    if flags.report.dump_wgsl.is_some() && !channels.contains(&Trace::Wgsl) {
-        channels.push(Trace::Wgsl);
-    }
-    if flags.shared.trace_from_frame.is_none() {
-        switch_core::trace::set_mask(&channels);
+    if trace_from_frame(&flags).is_none() {
+        switch_core::trace::set_mask(&channels(&flags));
     }
     switch_core::dump::install(Box::new(DumpDirs {
         texture: flags.report.dump_tex.clone(),
@@ -199,9 +200,55 @@ pub fn parse<C: Parser>(groups_of: impl FnOnce(&C) -> Flags) -> C {
     cli
 }
 
+/// `--trace <channels>[@<frame>]`.
+#[derive(Clone)]
+pub struct TraceSpec {
+    channels: Vec<Trace>,
+    from_frame: Option<u64>,
+}
+
+fn trace_spec(text: &str) -> Result<TraceSpec, String> {
+    let (names, from_frame) = match text.rsplit_once('@') {
+        Some((names, frame)) => {
+            let frame = frame
+                .parse()
+                .map_err(|_| format!("{frame:?} is not a frame number"))?;
+            (names, Some(frame))
+        }
+        None => (text, None),
+    };
+    let channels = names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(channel)
+        .collect::<Result<_, _>>()?;
+    Ok(TraceSpec {
+        channels,
+        from_frame,
+    })
+}
+
 fn channel(name: &str) -> Result<Trace, String> {
     Trace::from_name(&format!("TRACE_{}", name.to_ascii_uppercase()))
         .ok_or_else(|| format!("no trace channel named {name:?}"))
+}
+
+/// The channels `--trace` names, plus the one `--dump-wgsl` reads its shaders from.
+fn channels(flags: &Flags) -> Vec<Trace> {
+    let mut channels = flags
+        .shared
+        .trace
+        .as_ref()
+        .map_or_else(Vec::new, |spec| spec.channels.clone());
+    if flags.report.dump_wgsl.is_some() && !channels.contains(&Trace::Wgsl) {
+        channels.push(Trace::Wgsl);
+    }
+    channels
+}
+
+fn trace_from_frame(flags: &Flags) -> Option<u64> {
+    flags.shared.trace.as_ref().and_then(|spec| spec.from_frame)
 }
 
 /// A machine with the `--no-jit` and `--no-vsync-throttle` flags applied.
@@ -384,8 +431,17 @@ impl Program {
 
 /// `--docked` boots docked (1080p), as the frontend's dock toggle does.
 fn apply_docked(cpu: &mut Cpu) {
-    if flags().boot.docked {
+    if flags().boot.docked == Some(None) {
         cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
+    }
+}
+
+/// `--docked=FRAME`: dock once that frame is presented; call once per tick of a run loop.
+pub fn dock_when_due(cpu: &mut Cpu) {
+    if let Some(Some(at)) = flags().boot.docked {
+        if cpu.nv.gpu.frames >= at {
+            cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
+        }
     }
 }
 
@@ -863,13 +919,14 @@ pub fn drive(
     let mut run = Run::default();
     let mut frames = FrameTimes::new(cpu);
     let mut player = PLAYER.take();
-    let mut trace_from = flags().shared.trace_from_frame;
+    let mut trace_from = trace_from_frame(flags());
     while run.steps < budget && !cpu.halted {
         frames.sample(cpu);
         if trace_from.is_some_and(|from| cpu.nv.gpu.frames >= from) {
             trace_from = None;
-            switch_core::trace::set_mask(&flags().shared.trace);
+            switch_core::trace::set_mask(&channels(flags()));
         }
+        dock_when_due(cpu);
         if let Some(player) = player.as_mut() {
             if let Some(gate) = player.gate.as_mut() {
                 gate.tick(cpu);
@@ -1005,6 +1062,7 @@ pub fn report(cpu: &Cpu, run: &Run) {
 }
 
 /// Where one `--dump` entry starts: a register or an absolute address.
+#[derive(Clone)]
 enum DumpBase {
     Absolute(u64),
     Register(u8),
@@ -1012,6 +1070,7 @@ enum DumpBase {
     ProgramCounter,
 }
 
+#[derive(Clone)]
 struct DumpSpec {
     label: String,
     base: DumpBase,
@@ -1021,48 +1080,73 @@ struct DumpSpec {
     len: u32,
 }
 
-fn parse_dump_specs(spec: &str) -> Vec<DumpSpec> {
-    const DEFAULT_LEN: u32 = 0x40;
+/// Memory regions to hex-dump, in `--dump` syntax.
+#[derive(Clone, Default)]
+pub struct Dumps(Vec<DumpSpec>);
+
+impl Dumps {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Each region as it reads in `cpu` now.
+    pub fn read(&self, cpu: &Cpu) -> String {
+        dump_regions(cpu, &self.0)
+    }
+}
+
+/// A flag value in `--dump` syntax: `<base>[+<hex>][:<hex length>][,...]`.
+pub fn dumps(spec: &str) -> Result<Dumps, String> {
     spec.split(',')
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
-        .filter_map(|entry| {
-            let (addr, len) = match entry.split_once(':') {
-                Some((addr, len)) => (addr, parse_hex(len)? as u32),
-                None => (entry, DEFAULT_LEN),
-            };
-            // Search from the right so `x23+0x10` splits on the sign.
-            let (base, offset) = match addr.rfind(['+', '-']).filter(|&i| i > 0) {
-                Some(i) => {
-                    let value = parse_hex(&addr[i + 1..])? as i64;
-                    let signed = if addr.as_bytes()[i] == b'-' {
-                        -value
-                    } else {
-                        value
-                    };
-                    (&addr[..i], signed)
-                }
-                None => (addr, 0),
-            };
-            let (deref, base) = match base.trim().strip_prefix('*') {
-                Some(pointer) => (true, pointer),
-                None => (false, base),
-            };
-            let base = match base.trim() {
-                "sp" => DumpBase::StackPointer,
-                "pc" => DumpBase::ProgramCounter,
-                name if name.starts_with('x') => DumpBase::Register(name[1..].parse().ok()?),
-                absolute => DumpBase::Absolute(parse_hex(absolute)?),
-            };
-            Some(DumpSpec {
-                label: entry.to_string(),
-                base,
-                deref,
-                offset,
-                len,
+        .map(|entry| {
+            dump_entry(entry).ok_or_else(|| {
+                format!("{entry:?} is not <base>[+<hex>][:<hex length>], <base> x0..x30, sp, pc or an address")
             })
         })
-        .collect()
+        .collect::<Result<_, _>>()
+        .map(Dumps)
+}
+
+fn dump_entry(entry: &str) -> Option<DumpSpec> {
+    const DEFAULT_LEN: u32 = 0x40;
+    let (addr, len) = match entry.split_once(':') {
+        Some((addr, len)) => (addr, u32::try_from(parse_hex(len)?).ok()?),
+        None => (entry, DEFAULT_LEN),
+    };
+    // Search from the right so `x23+0x10` splits on the sign.
+    let (base, offset) = match addr.rfind(['+', '-']).filter(|&i| i > 0) {
+        Some(i) => {
+            let value = i64::try_from(parse_hex(&addr[i + 1..])?).ok()?;
+            let signed = if addr.as_bytes()[i] == b'-' {
+                -value
+            } else {
+                value
+            };
+            (&addr[..i], signed)
+        }
+        None => (addr, 0),
+    };
+    let (deref, base) = match base.trim().strip_prefix('*') {
+        Some(pointer) => (true, pointer),
+        None => (false, base),
+    };
+    let base = match base.trim() {
+        "sp" => DumpBase::StackPointer,
+        "pc" => DumpBase::ProgramCounter,
+        name if name.starts_with('x') => {
+            DumpBase::Register(name[1..].parse().ok().filter(|&r: &u8| r <= 30)?)
+        }
+        absolute => DumpBase::Absolute(parse_hex(absolute)?),
+    };
+    Some(DumpSpec {
+        label: entry.to_string(),
+        base,
+        deref,
+        offset,
+        len,
+    })
 }
 
 fn dump_regions(cpu: &Cpu, specs: &[DumpSpec]) -> String {
@@ -1139,11 +1223,11 @@ pub struct Debug {
     last_traps: std::collections::VecDeque<String>,
     watch_pc: Vec<u32>,
     watch_regs: bool,
-    watch_dumps: Vec<DumpSpec>,
+    watch_dumps: Dumps,
     /// `WATCH_LAST`: capacity and the latest watch hits.
     watch_last: usize,
     last_watches: std::collections::VecDeque<String>,
-    dumps: Vec<DumpSpec>,
+    dumps: Dumps,
     traps: u32,
     watch_hits: u32,
     /// Pcs that read the `TRAP_READ` region, with counts.
@@ -1163,18 +1247,10 @@ impl Debug {
             last_traps: std::collections::VecDeque::new(),
             watch_pc: flags.watch_pc.clone(),
             watch_regs: flags.watch_regs,
-            watch_dumps: flags
-                .watch_dump
-                .as_deref()
-                .map(parse_dump_specs)
-                .unwrap_or_default(),
+            watch_dumps: flags.watch_dump.clone().unwrap_or_default(),
             watch_last: flags.watch_last,
             last_watches: std::collections::VecDeque::new(),
-            dumps: flags
-                .dump
-                .as_deref()
-                .map(parse_dump_specs)
-                .unwrap_or_default(),
+            dumps: flags.dump.clone().unwrap_or_default(),
             traps: 0,
             watch_hits: 0,
             readers: std::collections::BTreeMap::new(),
@@ -1248,7 +1324,7 @@ impl Debug {
             if self.watch_regs {
                 line.push_str(&cpu.reg_dump());
             }
-            line.push_str(&dump_regions(cpu, &self.watch_dumps));
+            line.push_str(&self.watch_dumps.read(cpu));
             if self.watch_last > 0 {
                 if self.last_watches.len() == self.watch_last {
                     self.last_watches.pop_front();
@@ -1268,7 +1344,7 @@ impl Debug {
         }
         print!("{}", cpu.reg_dump());
         println!("backtrace: {}", backtrace(cpu, 24));
-        print!("{}", dump_regions(cpu, &self.dumps));
+        print!("{}", self.dumps.read(cpu));
     }
 
     pub fn report(&self) {

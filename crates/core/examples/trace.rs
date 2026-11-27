@@ -21,8 +21,8 @@ struct Cli {
     #[arg(long, value_delimiter = ',', value_parser = common::hex32, value_name = "PC")]
     pc: Vec<u32>,
     /// Instructions to run.
-    #[arg(long, default_value_t = 60_000_000)]
-    steps: u64,
+    #[arg(long, default_value_t = 60_000_000, value_name = "N")]
+    max_steps: u64,
 }
 
 fn main() {
@@ -41,7 +41,7 @@ fn main() {
     common::start_play(&mut cpu);
 
     let mut hot: HashMap<u32, u64> = HashMap::new();
-    let run = common::drive(&mut cpu, Pace::Instructions, cli.steps, |cpu, steps| {
+    let run = common::drive(&mut cpu, Pace::Instructions, cli.max_steps, |cpu, steps| {
         let pc = cpu.get_pc();
         if watch.contains(&pc) {
             print!("{steps} pc={pc:#x}");

@@ -29,7 +29,7 @@ struct Cli {
     #[arg(long)]
     simd: bool,
     /// The presented frame to start at; the default skips startup to a steady frame.
-    #[arg(long, default_value_t = 2)]
+    #[arg(short = 's', long, default_value_t = 2, value_name = "N")]
     from_frame: u64,
     /// Frames to profile.
     #[arg(short = 'n', long, default_value_t = 1)]

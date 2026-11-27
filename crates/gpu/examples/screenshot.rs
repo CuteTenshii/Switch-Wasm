@@ -1,5 +1,5 @@
 //! Boot a program and write its Nth presented frame to a PPM:
-//! `screenshot <target> --out <out.ppm> [--keys <prod.keys>] [--frame <n>] [--software]`.
+//! `screenshot <target> --out <out.ppm> [--keys <prod.keys>] [--stop-frame <n>] [--software]`.
 //!
 //! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (retail needs keys). Draws go to
 //! the GPU backend, as in the browser, falling back to the rasterizer where it does; without an
@@ -33,19 +33,16 @@ struct Cli {
     /// Where the frame is written.
     #[arg(short = 'o', long, value_name = "OUT.PPM")]
     out: String,
-    /// The presented frame to write.
-    #[arg(short = 'n', long, default_value_t = 1)]
-    frame: u64,
+    /// The presented frame to write; the run stops there.
+    #[arg(short = 'e', long, default_value_t = 1, value_name = "N")]
+    stop_frame: u64,
     /// Copy this host directory onto the SD card; an NRO inside it is launched from its SD path,
     /// as the page's Files dialog does, so it finds the files beside it.
     #[arg(long, value_name = "DIR")]
     sd: Option<String>,
     /// Instructions to run; unlimited for a retail title, 200 million for an `.nro`.
-    #[arg(long)]
-    steps: Option<u64>,
-    /// Dock after this presented frame, like a real dock mid-run (`--docked` docks at boot).
-    #[arg(long, value_name = "FRAME")]
-    dock_at: Option<u64>,
+    #[arg(long, value_name = "N")]
+    max_steps: Option<u64>,
     /// Draw everything with the software rasterizer, the reference the device is checked against.
     #[arg(long, conflicts_with_all = DEVICE_FLAGS)]
     software: bool,
@@ -120,12 +117,9 @@ struct Memory {
     /// Write block-linear surfaces as PPMs: `<addr>:<w>x<h>:<format>[:<block height>]`.
     #[arg(long, value_delimiter = ',', value_name = "SPEC")]
     dump_surface: Vec<String>,
-    /// Keep writing this `<addr>:<value>` word, once at `--poke-at` if given.
-    #[arg(long, value_parser = poke, value_name = "ADDR:VALUE")]
-    poke_u32: Option<(u64, u32)>,
-    /// The step to poke at.
-    #[arg(long, value_name = "STEP")]
-    poke_at: Option<u64>,
+    /// Keep writing this 32-bit `<addr>:<value>` word, or with `@STEP` write it once at that step.
+    #[arg(long, value_parser = poke, value_name = "ADDR:VALUE[@STEP]")]
+    poke: Option<Poke>,
     /// Find the title's gate word and keep it zero.
     #[arg(long)]
     gate_sniff: bool,
@@ -140,7 +134,7 @@ struct Memory {
 /// Steps between the periodic memory checks and pokes, and the `--stacks` sample interval.
 const DEFAULT_INTERVAL: u64 = 4096;
 
-/// The default `--steps` for an `.nro`.
+/// The default `--max-steps` for an `.nro`.
 const HOMEBREW_STEPS: u64 = 200_000_000;
 
 fn draw_range(spec: &str) -> Result<std::ops::Range<u32>, String> {
@@ -155,12 +149,33 @@ fn bounds(text: &str) -> Result<(u32, u32), String> {
     Ok((common::hex32(lo)?, common::hex32(hi)?))
 }
 
-/// A hex `<addr>:<value>` pair: a guest address and the word to keep there.
-fn poke(text: &str) -> Result<(u64, u32), String> {
-    let (addr, value) = text
+/// `--poke`: a guest address, the word to keep there, and the one step to write it at if any.
+#[derive(Clone, Copy)]
+struct Poke {
+    addr: u64,
+    value: u32,
+    at: Option<u64>,
+}
+
+/// A hex `<addr>:<value>` pair, then an optional decimal `@<step>`.
+fn poke(text: &str) -> Result<Poke, String> {
+    let (word, at) = match text.split_once('@') {
+        Some((word, step)) => {
+            let step = step
+                .parse()
+                .map_err(|_| format!("{step:?} is not a step number"))?;
+            (word, Some(step))
+        }
+        None => (text, None),
+    };
+    let (addr, value) = word
         .split_once(':')
-        .ok_or_else(|| format!("{text:?} is not <hex addr>:<hex value>"))?;
-    Ok((common::hex64(addr)?, common::hex32(value)?))
+        .ok_or_else(|| format!("{text:?} is not <hex addr>:<hex value>[@<step>]"))?;
+    Ok(Poke {
+        addr: common::hex64(addr)?,
+        value: common::hex32(value)?,
+        at,
+    })
 }
 
 fn main() {
@@ -174,7 +189,7 @@ fn main() {
             .with(&cli.probe)
     });
     let program = cli.target.open_program();
-    let (out, want) = (&cli.out, cli.frame);
+    let (out, want) = (&cli.out, cli.stop_frame);
     let renderer = open_renderer(cli.software, &cli.device);
 
     let mut cpu = common::new_cpu();
@@ -212,13 +227,13 @@ fn main() {
         u64::MAX
     };
     let pace = debug.pace(
-        profile.is_on() || memory.cover.is_some() || memory.poke_u32.is_some() || memory.gate_sniff,
+        profile.is_on() || memory.cover.is_some() || memory.poke.is_some() || memory.gate_sniff,
     );
     let cores = common::start_cores(&mut cpu);
     let run = common::drive(
         &mut cpu,
         pace,
-        cli.steps.unwrap_or(default_steps),
+        cli.max_steps.unwrap_or(default_steps),
         |cpu, done| {
             if cpu.nv.gpu.frames >= want {
                 return Flow::Stop;
@@ -231,9 +246,6 @@ fn main() {
             if let Some(press) = press.as_mut() {
                 press.tick(cpu, done);
             }
-            if cli.dock_at.is_some_and(|at| cpu.nv.gpu.frames >= at) {
-                cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
-            }
             profile.tick(cpu, done);
             if let Some(at) = memory.watch_mem {
                 // A block slice can end short, so `done` need not land on a multiple.
@@ -245,8 +257,8 @@ fn main() {
                     }
                 }
             }
-            if let Some((addr, value)) = memory.poke_u32 {
-                match memory.poke_at {
+            if let Some(Poke { addr, value, at }) = memory.poke {
+                match at {
                     Some(at) if done == at => {
                         let _ = cpu.mem.write_u32(addr, value);
                         println!("[poke] {addr:#x} = {value:#x} at step {done}");

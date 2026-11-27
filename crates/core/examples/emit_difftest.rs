@@ -46,7 +46,7 @@ struct Cli {
     )]
     out: String,
     /// Run to this presented frame first, to sample a title's later code.
-    #[arg(long, value_name = "N")]
+    #[arg(short = 's', long, value_name = "N")]
     from_frame: Option<u64>,
 }
 

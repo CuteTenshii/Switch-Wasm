@@ -1,6 +1,6 @@
 //! Profile a title that presents frames but draws nothing, sampling only after
 //! the Nth presented frame:
-//! `steady_state <container> --keys <prod.keys> [--frame <n>] [--steps <n>]`.
+//! `steady_state <container> --keys <prod.keys> [--from-frame <n>] [--steps <n>]`.
 //!
 //! Reports samples per thread, per 4 KiB page, per return address and per call stack.
 mod common;
@@ -22,8 +22,8 @@ struct Cli {
     #[command(flatten)]
     report: common::Report,
     /// Presented frame to start sampling after.
-    #[arg(short = 'n', long, default_value_t = 60)]
-    frame: u64,
+    #[arg(short = 's', long, default_value_t = 60, value_name = "N")]
+    from_frame: u64,
     /// Instructions to sample once the frame is reached.
     #[arg(long, default_value_t = DEFAULT_STEPS)]
     steps: u64,
@@ -47,7 +47,7 @@ fn main() {
             .with(&cli.report)
     });
     let title = cli.target.open();
-    let (want_frame, steps) = (cli.frame, cli.steps);
+    let (want_frame, steps) = (cli.from_frame, cli.steps);
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();

@@ -22,7 +22,7 @@ struct Cli {
     #[command(flatten)]
     probe: common::Probe,
     /// Instructions to run (default: unlimited for an `.nro`, 2 million for a title).
-    #[arg(long)]
+    #[arg(long, value_name = "N")]
     max_steps: Option<u64>,
     /// Copy this host directory onto the SD card; an NRO inside it is launched from its SD path,
     /// as the page's Files dialog does, so it finds the files beside it.
@@ -35,7 +35,7 @@ struct Cli {
     #[arg(long, default_value_t = 0, value_name = "INTERVAL")]
     profile: u64,
     /// Stop at this presented frame.
-    #[arg(long, default_value_t = u64::MAX, value_name = "N")]
+    #[arg(short = 'e', long, default_value_t = u64::MAX, value_name = "N")]
     stop_frame: u64,
     /// Write the last presented frame here.
     #[arg(long, value_name = "OUT.PPM")]

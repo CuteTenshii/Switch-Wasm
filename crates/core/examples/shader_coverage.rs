@@ -1,5 +1,5 @@
 //! List which of a frame's shader programs the WGSL translator cannot take:
-//! `shader_coverage <container> --keys <prod.keys> [--frame <n>]`.
+//! `shader_coverage <container> --keys <prod.keys> [--from-frame <n>] [--frames <n>]`.
 //!
 //! Reports the first blocker per program.
 mod common;
@@ -23,10 +23,10 @@ struct Cli {
     #[command(flatten)]
     report: common::Report,
     /// Presented frame to start recording after.
-    #[arg(short = 'n', long, default_value_t = 4)]
-    frame: u64,
+    #[arg(short = 's', long, default_value_t = 4, value_name = "N")]
+    from_frame: u64,
     /// Frames to record.
-    #[arg(long, default_value_t = 1)]
+    #[arg(short = 'n', long, default_value_t = 1)]
     frames: u64,
     /// Print this many instructions before each blocker.
     #[arg(long, value_name = "N")]
@@ -186,7 +186,7 @@ fn main() {
             .with(&cli.report)
     });
     let title = cli.target.open();
-    let want_frame = cli.frame;
+    let want_frame = cli.from_frame;
 
     let mut cpu = common::new_cpu();
     cpu.bootstrap();

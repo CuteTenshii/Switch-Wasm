@@ -21,7 +21,7 @@ struct Cli {
     #[command(flatten)]
     boot: common::Boot,
     /// Instructions to compare over.
-    #[arg(long, default_value_t = 2_000_000_000)]
+    #[arg(long, default_value_t = 2_000_000_000, value_name = "N")]
     max_steps: u64,
     /// Instructions between comparisons.
     #[arg(long, default_value_t = 1_000_000)]
@@ -42,6 +42,7 @@ fn boot(program: &common::Program, jit: bool) -> Cpu {
 fn advance(cpu: &mut Cpu, steps: u64) -> bool {
     let mut done = 0;
     while done < steps && !cpu.halted {
+        common::dock_when_due(cpu);
         match cpu.run(SLICE.min(steps - done)) {
             Ok(report) if report.steps == 0 => return false,
             Ok(report) => done += report.steps,
