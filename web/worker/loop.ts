@@ -1,16 +1,15 @@
 // The run loop: the worker runs slices back to back and reports each to the page.
 
-import type { Housekeeping, SliceReport, WorkerMessage } from '../shared/protocol';
+import type { Housekeeping, SliceReport } from '../shared/protocol';
 import { reportActivity } from './activity';
 import { CMD } from './commands';
 import { tryGpu } from './gpu';
 import { flushLog } from './log';
 import {
-  switch_fb_size, switch_frame_count, switch_halted, switch_pace, switch_present,
+  switch_fb_size, switch_frame_count, switch_halted, switch_pace, switch_present, switch_run,
 } from '@core/switch_wasm.js';
+import { postToPage } from './post';
 import { explainFailure } from './wasm';
-
-const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
 // Slices sized to about one display frame, so input and commands interleave.
 const SLICE_TARGET_MS = 16;
@@ -83,10 +82,10 @@ function slice(): void {
   }
   let steps: number;
   try {
-    steps = CMD.run(budget);
+    steps = switch_run(budget);
   } catch (err) {
     running = false;
-    ctx.postMessage({ type: 'loop_failed', error: explainFailure(err) } satisfies WorkerMessage);
+    postToPage({ type: 'loop_failed', error: explainFailure(err) });
     return;
   }
   const ms = performance.now() - at;
@@ -112,7 +111,7 @@ function slice(): void {
     paintMs,
     housekeeping: stopped || ++tick % HOUSEKEEPING_EVERY === 0 ? housekeeping() : null,
   };
-  ctx.postMessage({ type: 'slice', report } satisfies WorkerMessage);
+  postToPage({ type: 'slice', report });
 
   if (!tracing) {
     const scale = Math.min(2, Math.max(0.5, SLICE_TARGET_MS / Math.max(ms, 0.1)));

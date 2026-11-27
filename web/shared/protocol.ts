@@ -517,11 +517,11 @@ export interface Commands {
 
 export type CommandName = keyof Commands;
 
-// The worker's implementation: same signatures, or `{ error }` on failure.
+// The worker's implementation: same signatures, throwing why a command failed.
 export type CommandHandlers = {
   [K in CommandName]: (
     ...args: Parameters<Commands[K]>
-  ) => ReturnType<Commands[K]> | Promise<ReturnType<Commands[K]>> | { error: string };
+  ) => ReturnType<Commands[K]> | Promise<ReturnType<Commands[K]>>;
 };
 
 export interface CallRequest {

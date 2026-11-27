@@ -1,10 +1,11 @@
-// Command handlers: each returns a plain value or `{ error }` for `index.ts` to reply with.
+// Command handlers: each returns a plain value for `index.ts` to reply with, or throws why it can't.
 
 import type {
   AudioReport, CommandHandlers, ControlData, ControlInfo, GpuReport, JitStats, MemoryReport, NandIdentity, NcaInfo,
   NetConnection, NetStatus, OpenedContainer, PeekedTitle, ThreadReading,
 } from '../shared/protocol';
-import { noteRegistered } from './activity';
+import { noteRegistered, reportActivity } from './activity';
+import { tryGpu } from './gpu';
 import { flushLog } from './log';
 import {
   switch_audio_json, switch_clear_screen,
@@ -22,7 +23,7 @@ import {
   switch_set_trace, switch_set_trace_channels, switch_store_profile_edits, switch_thread_dump,
   switch_user_stage, switch_users_commit,
 } from '@core/switch_wasm.js';
-import { pauseLoop, startLoop, stopLoop } from './loop';
+import { paint, pauseLoop, startLoop, stopLoop } from './loop';
 import { STORAGE } from './storage';
 import { core, parseOr } from './wasm';
 
@@ -100,8 +101,13 @@ export const CMD = {
   },
   control: cachedControl,
 
+  // Step: one slice, painted and reported as the loop does after its own.
   run(budget) {
-    return switch_run(budget);
+    const steps = switch_run(budget);
+    paint();
+    tryGpu();
+    reportActivity(steps < budget);
+    return steps;
   },
   startLoop,
   pauseLoop,
