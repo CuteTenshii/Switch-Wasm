@@ -8,7 +8,7 @@ import {
 import { launchFromSd } from './boot';
 import { $, el } from './dom';
 import { showView } from './fileview';
-import { fmtSize } from './format';
+import { fmtSize } from '../shared/format';
 import { icon } from './icons';
 import { onInstallStatus, removeNandTitle, titleLabel } from './nand';
 import { call } from './rpc';

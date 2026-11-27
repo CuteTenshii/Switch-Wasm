@@ -10,8 +10,7 @@ import {
 import { screenSize } from './display';
 import { $, el } from './dom';
 import './elements/info-tip';
-import { fmtCount } from '../shared/format';
-import { formatBytes } from './format';
+import { fmtCount, formatBytes } from '../shared/format';
 import { log } from './log';
 import { updateAudioDebug } from './audio-debug';
 import { updateMemoryDebug } from './memory';

@@ -5,7 +5,7 @@ import type {
 } from '../shared/protocol';
 import { $, el, pickedFile } from './dom';
 import { classify } from './filetype';
-import { fmtSize } from './format';
+import { fmtSize } from '../shared/format';
 import { hasProdKeys, onKeysChanged, revealKeys } from './keys';
 import {
   awaitFirstFrame, beginLoad, currentAction, failLoad, loadPhase, type LoadAction,

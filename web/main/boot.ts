@@ -5,7 +5,7 @@ import type { ControlData } from '../shared/protocol';
 import { bootContainer } from './container';
 import { $, pickedFile } from './dom';
 import { classify } from './filetype';
-import { fmtSize } from './format';
+import { fmtSize } from '../shared/format';
 import { awaitFirstFrame, beginLoad, failLoad, loadIdentity, loadPhase } from './loading';
 import { log } from './log';
 import { nandBusy, onNandBusy } from './nandbusy';

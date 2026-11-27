@@ -3,7 +3,7 @@
 
 import type { GpuReport, Housekeeping, MemoryRegionKey, MemoryReport } from '../shared/protocol';
 import { $, el } from './dom';
-import { formatBytes } from './format';
+import { formatBytes } from '../shared/format';
 import { call, hasSession } from './rpc';
 import { titleBooted } from './session';
 import { setNote } from './shell';

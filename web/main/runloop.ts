@@ -8,7 +8,7 @@ import { traceEnabled } from './debug';
 import { countEmulation, noteFrame } from './display';
 import { recordRunSlice } from './display-metrics';
 import { $ } from './dom';
-import { formatBytes } from './format';
+import { formatBytes } from '../shared/format';
 import { icon } from './icons';
 import { dropErrors, offerErrors } from './errors';
 import { dropKeyboard, offerKeyboard } from './keyboard';

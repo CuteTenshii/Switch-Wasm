@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { formatBytes } from '../../web/main/format';
-import { fmtCount, fmtSize } from '../../web/shared/format';
+import { fmtCount, fmtSize, formatBytes } from '../../web/shared/format';
 
 describe('fmtSize', () => {
   test.each([
