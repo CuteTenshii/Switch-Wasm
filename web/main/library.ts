@@ -284,8 +284,7 @@ async function peekAll(): Promise<void> {
         const { title, icon } = await call('peekTitle', next.file);
         next.peek = title;
         next.iconUrl = title.kind === 'game' || title.kind === 'homebrew'
-          ? knownTitle({ id: title.title_id, name: title.name, publisher: title.publisher, version: title.version },
-            icon, title.icon_mime).iconUrl
+          ? knownTitle(title, icon).iconUrl
           : null;
       } catch (err) {
         next.failed = !isNro(next);

@@ -319,8 +319,7 @@ let heldTitle: KnownTitle | null = null;
 
 function holdTitle(info: ControlInfo | null, icon: Bytes | null): KnownTitle | null {
   heldTitle = info
-    ? knownTitle({ id: info.title_id, name: info.name, publisher: info.publisher, version: info.version },
-        icon, info.icon_mime)
+    ? knownTitle(info, icon)
     : null;
   return heldTitle;
 }

@@ -13,8 +13,15 @@ export interface KnownTitle {
   iconUrl: string | null;
 }
 
-/** What a peek or the control data says about a title; control data is `{}` when there is none. */
-export type TitleDetails = Partial<Omit<KnownTitle, 'iconUrl'>>;
+// What the core says about a title, from a peek or its control data, in the core's own names.
+interface TitleDetails {
+  title_id?: string;
+  name?: string;
+  publisher?: string;
+  version?: string;
+  // Empty or absent where the icon is a JPEG, as the console stores them.
+  icon_mime?: string;
+}
 
 interface TitleIcon {
   bytes: Bytes;
@@ -27,7 +34,7 @@ const icons = new Map<string, TitleIcon>();
 
 // Homebrew has no title id: a peek says "", its control data all zeros.
 function titleId(details: TitleDetails): string {
-  const id = details.id ?? '';
+  const id = details.title_id ?? '';
   return /^0*$/.test(id) ? '' : id.toLowerCase();
 }
 
@@ -50,16 +57,13 @@ function iconUrl(key: string, bytes: Bytes, type: string): string {
   return url;
 }
 
-/**
- * The title `details` describe, with the icon URL it already has when the same icon was seen
- * for it before. An icon with no `type` is taken as JPEG, as the console stores them.
- */
-export function knownTitle(details: TitleDetails, icon: Bytes | null, type = ''): KnownTitle {
+/** The title `details` describe, with the icon URL it already has when the same icon was seen for it before. */
+export function knownTitle(details: TitleDetails, icon: Bytes | null): KnownTitle {
   return {
     id: titleId(details),
     name: details.name ?? '',
     publisher: details.publisher ?? '',
     version: details.version ?? '',
-    iconUrl: icon && icon.length ? iconUrl(titleKey(details), icon, type || 'image/jpeg') : null,
+    iconUrl: icon && icon.length ? iconUrl(titleKey(details), icon, details.icon_mime || 'image/jpeg') : null,
   };
 }

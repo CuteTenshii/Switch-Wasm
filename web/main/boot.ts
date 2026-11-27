@@ -70,9 +70,7 @@ async function homebrewTitle(filename: string): Promise<KnownTitle> {
     return { id: '', name: filename, publisher: '', version: '', iconUrl: null };
   }
   const { info, icon } = control;
-  const title = knownTitle(
-    { id: info.title_id, name: info.name, publisher: info.publisher, version: info.version },
-    icon, info.icon_mime);
+  const title = knownTitle(info, icon);
   return { ...title, name: title.name || filename };
 }
 
