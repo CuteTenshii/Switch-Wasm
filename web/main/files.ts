@@ -11,7 +11,7 @@ import { $, el } from './dom';
 import { showView } from './fileview';
 import { fmtSize } from '../shared/format';
 import { icon } from './icons';
-import { onInstallStatus, removeNandTitle, titleLabel } from './nand';
+import { onInstallStatus, onNandChanged, removeNandTitle, titleLabel } from './nand';
 import { call } from './rpc';
 
 type Place =
@@ -564,6 +564,6 @@ onInstallStatus((text, error) => {
   if (dialog.open && place.kind === 'nand') setStatus(text, error);
 });
 
-document.addEventListener('nand-changed', () => {
+onNandChanged(() => {
   if (dialog.open && place.kind === 'nand') void render();
 });

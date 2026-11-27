@@ -145,7 +145,7 @@ export async function removeNandTitle(id: string): Promise<void> {
   nandTitles = nandTitles.filter(([titleId]) => titleId !== id);
   renderNandTitles();
   updateFirmwareState();
-  document.dispatchEvent(new Event('nand-changed'));
+  nandChanged();
 }
 
 function updateFirmwareState(): void {
@@ -167,18 +167,28 @@ function updateFirmwareState(): void {
     nandTitles.length > 0);
 }
 
-let installListener: ((text: string, error: boolean) => void) | null = null;
+const installListeners: ((text: string, error: boolean) => void)[] = [];
+const changeListeners: (() => void)[] = [];
 
 // The Files tab shows an install's progress and outcome too, since it offers the same buttons.
-export function onInstallStatus(handler: NonNullable<typeof installListener>): void {
-  installListener = handler;
+export function onInstallStatus(handler: (text: string, error: boolean) => void): void {
+  installListeners.push(handler);
+}
+
+/** Call `handler` whenever titles are installed, removed or erased. */
+export function onNandChanged(handler: () => void): void {
+  changeListeners.push(handler);
+}
+
+function nandChanged(): void {
+  for (const handler of changeListeners) handler();
 }
 
 function installStatus(text: string, error = false): void {
   const status = $('firmware-status');
   status.textContent = text;
   status.classList.toggle('is-error', error);
-  installListener?.(text, error);
+  for (const handler of installListeners) handler(text, error);
 }
 
 // Plain `x.nca` files, and the `x.nca/00`, `x.nca/01`… pieces the console's own Contents folder splits them into.
@@ -255,7 +265,7 @@ async function installFirmwareNcas(
   if (ignored) outcome += ' Skipped ' + ignored + ' file(s) that are not NCAs.';
   if (failures.length) outcome += ' ' + failures.length + ' could not be installed: ' + failures.join(', ') + '.';
   installStatus(outcome, failures.length > 0);
-  document.dispatchEvent(new Event('nand-changed'));
+  nandChanged();
 }
 
 function takeFiles(e: Event): File[] {
@@ -308,5 +318,5 @@ $('btn-erase-nand').addEventListener('click', async () => {
   renderNandTitles();
   updateFirmwareState();
   log('NAND erased.', 'info');
-  document.dispatchEvent(new Event('nand-changed'));
+  nandChanged();
 });
