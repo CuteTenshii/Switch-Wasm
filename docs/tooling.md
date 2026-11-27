@@ -45,6 +45,7 @@ Build profiles, hooks, benchmarks and diagnostic examples.
 ## `tools/common.mjs`
 
 - What the tools share: the repo root, `fail`, flag parsing and launching Chromium. Playwright loads only when a tool launches it.
+- The browsers it launches run with MangoHud off (`MANGOHUD=0`, `DISABLE_MANGOHUD=1`): with `MANGOHUD=1` in the session its Vulkan layer loads into Chromium's GPU process, which in Breath of the Wild's slow scene cost 10 to 30% of the frame rate.
 
 ## `tools/shader_compile.mjs`
 
