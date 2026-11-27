@@ -1,4 +1,4 @@
-// Plays the worker's audio ring (`crates/switch-wasm/src/audio.rs`) straight out of its
+// Plays the worker's audio ring (`crates/wasm/src/audio.rs`) straight out of its
 // shared memory, resampled to the output rate.
 
 // The worklet scope's globals, which the DOM types do not describe.
@@ -10,6 +10,15 @@ declare function registerProcessor(
   name: string,
   processor: new (options: { processorOptions: RingOptions }) => AudioWorkletProcessor,
 ): void;
+
+// What the worklet says once a second: seconds over that second, and the queue at its end.
+export interface WorkletReport {
+  played: number;
+  gaps: number;
+  silence: number;
+  trimmed: number;
+  queued: number;
+}
 
 export interface RingOptions {
   buffer: SharedArrayBuffer;
@@ -35,6 +44,9 @@ class RingPlayer extends AudioWorkletProcessor {
   private played = 0;
   private gaps = 0;
   private silent = 0;
+  // Seconds of audio dropped from the front to keep the queue short, and the queue left.
+  private trimmed = 0;
+  private queuedSeconds = 0;
   private sinceReport = 0;
   private wasPlaying = false;
 
@@ -64,6 +76,7 @@ class RingPlayer extends AudioWorkletProcessor {
     const most = Math.ceil(rate * MAX_QUEUED_SECONDS);
     if (queued > most) {
       read = (read + (queued - most) * channels) >>> 0;
+      this.trimmed += (queued - most) / rate;
       queued = most;
     }
     const step = rate / sampleRate;
@@ -84,6 +97,7 @@ class RingPlayer extends AudioWorkletProcessor {
     left.fill(0, filled);
     right.fill(0, filled);
     Atomics.store(this.head, READ, read);
+    this.queuedSeconds = queued / rate;
     this.account(filled, left.length - filled);
     return true;
   }
@@ -97,10 +111,14 @@ class RingPlayer extends AudioWorkletProcessor {
     this.played += played / sampleRate;
     this.sinceReport += (played + missed) / sampleRate;
     if (this.sinceReport < REPORT_EVERY_SECONDS) return;
-    this.port.postMessage({ played: this.played, gaps: this.gaps, silence: this.silent });
+    this.port.postMessage({
+      played: this.played, gaps: this.gaps, silence: this.silent,
+      trimmed: this.trimmed, queued: this.queuedSeconds,
+    } satisfies WorkletReport);
     this.played = 0;
     this.gaps = 0;
     this.silent = 0;
+    this.trimmed = 0;
     this.sinceReport = 0;
   }
 }

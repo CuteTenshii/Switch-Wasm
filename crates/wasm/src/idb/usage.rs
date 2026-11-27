@@ -1,0 +1,157 @@
+//! What the SD card, saves and NAND hold and the origin has left, reported to the core for the
+//! filesystem space queries (which cannot wait on a promise themselves).
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+use js_sys::{Array, ArrayBuffer, Function, Promise, Reflect};
+use switch_core::cpu::StorageUsage;
+use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::{spawn_local, JsFuture};
+use web_sys::{
+    Blob, IdbCursorWithValue, IdbDatabase, IdbFactory, StorageEstimate, WorkerGlobalScope,
+};
+
+use super::content::NAND_OPFS_DIR;
+use super::{drive, NAND_CONTENT, NAND_DB};
+use crate::session_if_live;
+
+/// Least time between two scans.
+const REFRESH_INTERVAL_MS: f64 = 2000.0;
+
+static IN_FLIGHT: crate::SyncCell<bool> = crate::SyncCell::new(false);
+static LAST_START: crate::SyncCell<f64> = crate::SyncCell::new(f64::NEG_INFINITY);
+
+/// Scan in the background when the guest has asked for space since the last scan, or never has.
+pub(crate) fn refresh_if_due(wanted: bool) {
+    let now = js_sys::Date::now();
+    // SAFETY: only the system worker calls exports; see the `SESSIONS` comment.
+    let (in_flight, last) = unsafe { (&mut *IN_FLIGHT.get(), *LAST_START.get()) };
+    let never = last == f64::NEG_INFINITY;
+    if *in_flight || !(never || wanted && now - last >= REFRESH_INTERVAL_MS) {
+        return;
+    }
+    *in_flight = true;
+    spawn_local(async {
+        refresh().await;
+        unsafe { *IN_FLIGHT.get() = false };
+    });
+}
+
+/// Measure now and hand the result to the core.
+pub(crate) async fn refresh() {
+    unsafe { *LAST_START.get() = js_sys::Date::now() };
+    let usage = measure().await;
+    let Some(s) = session_if_live() else {
+        return;
+    };
+    match usage {
+        Ok(usage) => s.cpu.set_storage_usage(usage),
+        Err(err) => s.cpu.log(
+            switch_core::trace::Level::Warn,
+            &format!("[fs] could not measure storage: {err:?}"),
+        ),
+    }
+}
+
+async fn measure() -> Result<StorageUsage, JsValue> {
+    let scope: WorkerGlobalScope = js_sys::global().unchecked_into();
+    let estimate: StorageEstimate = JsFuture::from(scope.navigator().storage().estimate()?)
+        .await?
+        .unchecked_into();
+    let quota = estimate.get_quota().unwrap_or(0.0);
+    let used = estimate.get_usage().unwrap_or(0.0);
+    let factory = scope.indexed_db()?.ok_or("no IndexedDB")?;
+    let present = databases(&factory).await?;
+    let mut usage = StorageUsage {
+        free: (quota - used).max(0.0) as u64,
+        system: match crate::opfs::dir(NAND_OPFS_DIR, false).await {
+            Some(dir) => crate::opfs::files(&dir)
+                .await?
+                .iter()
+                .map(|(_, size)| size)
+                .sum(),
+            None => 0,
+        },
+        ..StorageUsage::default()
+    };
+    if present.iter().any(|name| name == NAND_DB) {
+        usage.system += store_bytes(&factory, NAND_DB, NAND_CONTENT, content_bytes).await?;
+    }
+    // The session holds the whole card and every save, whichever store keeps them.
+    if let Some(s) = session_if_live() {
+        usage.sd = s.cpu.fs.bytes();
+        usage.user = s
+            .cpu
+            .save_keys()
+            .into_iter()
+            .filter_map(|key| s.cpu.save_data(key).map(|vfs| vfs.bytes()))
+            .sum();
+    }
+    Ok(usage)
+}
+
+/// Names of the databases that exist, so a missing one is not created by being opened.
+async fn databases(factory: &IdbFactory) -> Result<Vec<String>, JsValue> {
+    let list = Reflect::get(factory, &"databases".into())?
+        .dyn_into::<Function>()?
+        .call0(factory)?;
+    let list: Array = JsFuture::from(list.unchecked_into::<Promise>())
+        .await?
+        .unchecked_into();
+    Ok(list
+        .iter()
+        .filter_map(|info| Reflect::get(&info, &"name".into()).ok()?.as_string())
+        .collect())
+}
+
+/// Total of `size` over every value of `store`, read one at a time.
+async fn store_bytes(
+    factory: &IdbFactory,
+    db: &str,
+    store: &str,
+    size: fn(&JsValue) -> u64,
+) -> Result<u64, JsValue> {
+    let opened = Rc::new(RefCell::new(JsValue::UNDEFINED));
+    let request = factory.open(db)?;
+    let slot = opened.clone();
+    drive(&request, move |result| {
+        *slot.borrow_mut() = result;
+        true
+    })
+    .await?;
+    let db: IdbDatabase = opened.borrow().clone().unchecked_into();
+    let total = Rc::new(Cell::new(0u64));
+    let outcome = if db.object_store_names().contains(store) {
+        let request = db
+            .transaction_with_str(store)?
+            .object_store(store)?
+            .open_cursor()?;
+        let total = total.clone();
+        drive(&request, move |result| {
+            match result.dyn_into::<IdbCursorWithValue>() {
+                Ok(cursor) => {
+                    total.set(total.get() + size(&cursor.value().unwrap_or(JsValue::UNDEFINED)));
+                    cursor.continue_().is_err()
+                }
+                Err(_) => true,
+            }
+        })
+        .await
+    } else {
+        Ok(())
+    };
+    db.close();
+    outcome.map(|()| total.get())
+}
+
+/// A NAND content file, stored as a `Blob` (an `ArrayBuffer` in older stores).
+fn content_bytes(content: &JsValue) -> u64 {
+    if let Some(blob) = content.dyn_ref::<Blob>() {
+        blob.size() as u64
+    } else if let Some(buffer) = content.dyn_ref::<ArrayBuffer>() {
+        u64::from(buffer.byte_length())
+    } else {
+        0
+    }
+}

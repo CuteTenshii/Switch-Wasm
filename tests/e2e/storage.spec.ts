@@ -1,15 +1,11 @@
 import type { Page } from '@playwright/test';
-import { expect, openPage, test } from './page';
+import { expect, openPage, openPanel, reloadPage, rowNamed, test } from './page';
 
-// The row whose name is exactly `name` (folders carry a trailing slash).
-const row = (page: Page, name: string) =>
-  page.locator('.files-row').filter({
-    has: page.locator('.files-name').getByText(name, { exact: true }),
-  });
+// Folders carry a trailing slash.
+const row = (page: Page, name: string) => rowNamed(page, '.files-row', '.files-name', name);
 
 async function openStorage(page: Page): Promise<void> {
-  await page.locator('#btn-panel').click();
-  await page.locator('.panel .tab[data-tab="files"]').click();
+  await openPanel(page, 'Files');
   await page.locator('#btn-files').click();
   await expect(page.locator('#files')).toBeVisible();
 }
@@ -19,13 +15,15 @@ test.beforeEach(async ({ page }) => {
   await openStorage(page);
 });
 
-test('an empty card, no saves and no system titles say so', async ({ page }) => {
-  await expect(page.locator('.files-empty')).toContainText('Empty');
+test('a new card holds only the switch folder, and no saves or system titles say so', async ({ page }) => {
+  await expect(page.locator('.files-row')).toHaveCount(1);
+  await expect(row(page, 'switch/')).toBeVisible();
   await page.getByRole('tab', { name: 'Saves' }).click();
   await expect(page.locator('.files-empty')).toContainText('No save data yet');
   await page.getByRole('tab', { name: 'System titles' }).click();
   await expect(page.locator('.files-empty')).toContainText('Nothing installed');
-  await expect(page.locator('#files-install-label')).toBeVisible();
+  await expect(page.locator('#files-install-dir-label')).toBeVisible();
+  await expect(page.locator('#files-install-zip-label')).toBeVisible();
 });
 
 test('folders and files can be made, renamed, downloaded and deleted, and survive a reload', async ({ page }) => {
@@ -50,8 +48,7 @@ test('folders and files can be made, renamed, downloaded and deleted, and surviv
   await row(page, 'conf.lua').getByRole('button', { name: 'Download' }).click();
   expect((await download).suggestedFilename()).toBe('conf.lua');
 
-  await page.reload();
-  await expect(page.locator('#loading')).toHaveClass(/hidden/, { timeout: 30_000 });
+  await reloadPage(page);
   await openStorage(page);
   await row(page, 'game/').locator('.files-main').click();
   await expect(row(page, 'conf.lua')).toBeVisible();
@@ -63,7 +60,8 @@ test('folders and files can be made, renamed, downloaded and deleted, and surviv
   await page.locator('.files-crumb', { hasText: 'sdmc:' }).click();
   await row(page, 'game/').getByRole('button', { name: 'Delete' }).click();
   await row(page, 'game/').getByRole('button', { name: 'Delete' }).click();
-  await expect(page.locator('.files-empty')).toContainText('Empty');
+  await expect(row(page, 'game/')).toHaveCount(0);
+  await expect(page.locator('.files-row')).toHaveCount(1);
 });
 
 test('a name with a slash is refused', async ({ page }) => {
@@ -107,4 +105,28 @@ test('closing with unsaved edits asks first', async ({ page }) => {
   await expect(page.locator('#files-view-tools')).toContainText('Discard your edits?');
   await page.getByRole('button', { name: 'Keep editing' }).click();
   await expect(page.locator('.files-editor')).toHaveValue('changed');
+});
+
+test('a second tab says it cannot save, refuses changes, and leaves the first tab saving', async ({ page, context }) => {
+  const second = await context.newPage();
+  await openPage(second);
+  const dialog = second.locator('#read-only');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('heading')).toHaveText('Already open in another tab');
+  await dialog.getByRole('button', { name: 'Continue without saving' }).click();
+  await expect(dialog).toBeHidden();
+
+  await openStorage(second);
+  await second.locator('#btn-files-mkdir').click();
+  await second.locator('.files-name-form input').fill('from-second');
+  await second.locator('.files-name-form input').press('Enter');
+  await expect(second.locator('#files-status')).toContainText('the emulator is open in another tab');
+  await second.close();
+
+  await expect(page.locator('#read-only')).toBeHidden();
+  await page.locator('#btn-files-mkdir').click();
+  await page.locator('.files-name-form input').fill('from-first');
+  await page.locator('.files-name-form input').press('Enter');
+  await expect(row(page, 'from-first/')).toBeVisible();
+  await expect(row(page, 'from-second/')).toHaveCount(0);
 });

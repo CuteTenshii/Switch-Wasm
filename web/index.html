@@ -7,7 +7,7 @@
 <meta name="theme-color" content="#07080c">
 
 <title>switch-wasm - a Nintendo Switch emulator in your browser</title>
-<meta name="description" content="A from-scratch Nintendo Switch emulator core - an ARM64 interpreter and GM20B GPU emulation - compiled to WebAssembly. Boot homebrew NROs entirely in your browser; nothing is uploaded.">
+<meta name="description" content="A Nintendo Switch emulator written from scratch that runs in your browser with WebAssembly. Boot homebrew or your own dumped titles; nothing is uploaded.">
 <link rel="canonical" href="https://tenshii.moe/Switch-Wasm/">
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <link rel="manifest" href="./manifest.webmanifest">
@@ -21,7 +21,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="switch-wasm">
 <meta property="og:title" content="switch-wasm - a Nintendo Switch emulator in your browser">
-<meta property="og:description" content="An ARM64 interpreter and GM20B GPU emulation compiled to WebAssembly. Boot homebrew NROs entirely in your browser; nothing is uploaded.">
+<meta property="og:description" content="A Nintendo Switch emulator that runs in your browser with WebAssembly. Boot homebrew or your own dumped titles; nothing is uploaded.">
 <meta property="og:url" content="https://tenshii.moe/Switch-Wasm/">
 <meta property="og:image" content="https://tenshii.moe/Switch-Wasm/assets/og.png">
 <meta property="og:image:type" content="image/png">
@@ -31,11 +31,12 @@
 
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="switch-wasm - a Nintendo Switch emulator in your browser">
-<meta name="twitter:description" content="An ARM64 interpreter and GM20B GPU emulation compiled to WebAssembly. Boot homebrew NROs entirely in your browser; nothing is uploaded.">
+<meta name="twitter:description" content="A Nintendo Switch emulator that runs in your browser with WebAssembly. Boot homebrew or your own dumped titles; nothing is uploaded.">
 <meta name="twitter:image" content="https://tenshii.moe/Switch-Wasm/assets/og.png">
 <meta name="twitter:image:alt" content="switch-wasm: a Nintendo Switch emulator that runs in your browser, showing hbmenu booting at 1280x720.">
 
 <link rel="stylesheet" href="./style.css">
+<script defer data-domain="tenshii.moe" src="https://s.tenshii.moe/_s/script.js" integrity="sha384-TDBMBYT3vz715r8UIyVTB4AUTXubXmLI02DeDWgyDahvCXmPV4Vgx2m6yQvI19d/" crossorigin="anonymous"></script>
 </head>
 <body>
 
@@ -61,8 +62,8 @@
       <button id="btn-run" class="btn primary" title="Run / Pause">
         <span class="glyph" id="run-glyph"></span><span id="run-label">Run</span>
       </button>
-      <button id="btn-step" class="btn" title="Execute one instruction">Step</button>
-      <button id="btn-stop" class="btn" title="Stop the title and close the console">Stop</button>
+      <button id="btn-step" class="btn" title="Execute one instruction"><span>Step</span></button>
+      <button id="btn-stop" class="btn" title="Stop the title and close the console"><span>Stop</span></button>
     </div>
 
     <div class="spacer"></div>
@@ -73,8 +74,10 @@
       <button id="btn-motion" class="btn" aria-pressed="false" hidden>Motion</button>
       <button id="btn-dock" class="btn" title="Dock or undock the console (Handheld: 720p and a touchscreen; Docked: 1080p and boost clocks)"
               aria-pressed="false">Handheld</button>
-      <label class="btn" for="nro-file" title="Open an .nro, .elf, .nsp, .nsz, .xci or .nca">Open</label>
+      <label class="btn" id="btn-open" for="nro-file" title="Open an .nro, .elf, .nsp, .nsz, .xci or .nca">Open</label>
       <input type="file" id="nro-file" accept=".nro,.elf,.bin,.nsp,.nsz,.xci,.nca" hidden>
+      <a id="btn-discord" class="btn" href="https://discord.gg/uhy2P4vyhE" target="_blank" rel="noopener"
+         title="Join the Discord server"><span>Discord</span></a>
       <button id="btn-fullscreen" class="btn icon" title="Fullscreen" aria-label="Fullscreen">
         <span class="menu-label">Fullscreen</span>
       </button>
@@ -119,17 +122,58 @@
 
     <div class="overlay" id="overlay">
       <div class="overlay-inner">
-        <h1>Drop a homebrew <code>.nro</code> or a title <code>.nsp</code> / <code>.xci</code> to boot</h1>
-        <p class="muted">…or open one. Everything runs locally in your browser.</p>
+        <span class="overlay-mark" id="overlay-mark" aria-hidden="true"></span>
+        <h1>Drop a <code>.nro</code>, <code>.nsp</code> or <code>.xci</code> to boot</h1>
         <div class="overlay-actions">
-          <label class="btn primary big" for="nro-file">Open a file</label>
+          <label class="btn primary big" id="overlay-open" for="nro-file">Open a file</label>
+          <!-- Shown by library.ts where the browser can pick a folder. -->
+          <button type="button" class="btn big" id="overlay-open-folder" hidden>Open a folder</button>
+          <input type="file" id="library-dir" webkitdirectory hidden>
         </div>
-        <p class="muted tiny">A container is opened where it sits and read a range at a time, so a
-          retail <code>.nsp</code> or cartridge image never has to fit in memory. It needs <code>prod.keys</code>,
-          which the Files panel takes.</p>
-        <p class="muted tiny">Keyboard: arrows = D-pad · Z/X = A/B · A/S = X/Y · Q/E = L/R · Enter = + · Shift = −.
-          A connected gamepad is used automatically, and a touchscreen gets an on-screen controller.</p>
+        <!-- The picked folder's games; filled by library.ts. -->
+        <section class="library" id="library" aria-labelledby="library-title" hidden>
+          <div class="library-head">
+            <h2 class="library-title" id="library-title"></h2>
+            <div class="library-tools">
+              <button type="button" class="btn small" id="library-change">Change folder</button>
+              <button type="button" class="btn small ghost" id="library-close">Close</button>
+            </div>
+          </div>
+          <div class="library-status" id="library-status" role="status" aria-live="polite"></div>
+          <ul class="library-list" id="library-list"></ul>
+        </section>
       </div>
+
+      <!-- Mirrors KEY_MAP in input.ts: each Switch button with the key that presses it. -->
+      <figure class="keymap" aria-labelledby="keymap-title">
+        <figcaption class="keymap-title" id="keymap-title">Keyboard</figcaption>
+        <div class="keymap-pads">
+          <div class="keymap-pad">
+            <dl class="keymap-row">
+              <div class="keymap-key"><dt class="keymap-button wide">L</dt><dd><kbd>Q</kbd></dd></div>
+              <div class="keymap-key"><dt class="keymap-button">−</dt><dd><kbd>Shift</kbd></dd></div>
+            </dl>
+            <dl class="keymap-cross">
+              <div class="keymap-key up"><dt class="keymap-button" data-glyph="up"><span class="sr-only">Up</span></dt><dd><kbd>↑</kbd></dd></div>
+              <div class="keymap-key left"><dt class="keymap-button" data-glyph="left"><span class="sr-only">Left</span></dt><dd><kbd>←</kbd></dd></div>
+              <div class="keymap-key right"><dt class="keymap-button" data-glyph="right"><span class="sr-only">Right</span></dt><dd><kbd>→</kbd></dd></div>
+              <div class="keymap-key down"><dt class="keymap-button" data-glyph="down"><span class="sr-only">Down</span></dt><dd><kbd>↓</kbd></dd></div>
+            </dl>
+          </div>
+          <div class="keymap-pad">
+            <dl class="keymap-row">
+              <div class="keymap-key"><dt class="keymap-button">+</dt><dd><kbd>Enter</kbd></dd></div>
+              <div class="keymap-key"><dt class="keymap-button wide">R</dt><dd><kbd>E</kbd></dd></div>
+            </dl>
+            <dl class="keymap-cross">
+              <div class="keymap-key up"><dt class="keymap-button">X</dt><dd><kbd>A</kbd></dd></div>
+              <div class="keymap-key left"><dt class="keymap-button">Y</dt><dd><kbd>S</kbd></dd></div>
+              <div class="keymap-key right"><dt class="keymap-button">A</dt><dd><kbd>Z</kbd></dd></div>
+              <div class="keymap-key down"><dt class="keymap-button">B</dt><dd><kbd>X</kbd></dd></div>
+            </dl>
+          </div>
+        </div>
+      </figure>
     </div>
 
     <!-- Above the idle overlay and below the drop veil: it covers the stage
@@ -139,11 +183,13 @@
     <div class="loading" id="loading" role="status" aria-live="polite">
       <div class="loading-inner">
         <img class="loading-icon" id="loading-icon" alt="" hidden>
-        <div class="loading-title" id="loading-title">starting core</div>
-        <div class="loading-bar"><span id="loading-fill"></span></div>
-        <div class="loading-phase" id="loading-phase">fetching and compiling the WebAssembly module</div>
+        <div class="loading-title" id="loading-title">Starting core...</div>
+        <div class="loading-phase" id="loading-phase">Fetching and compiling the WebAssembly module</div>
         <div class="loading-detail" id="loading-detail"></div>
-        <button type="button" class="btn small ghost" id="loading-dismiss" hidden>Dismiss</button>
+        <div class="loading-actions">
+          <button type="button" class="btn small" id="loading-action" hidden></button>
+          <button type="button" class="btn small ghost" id="loading-dismiss" hidden>Dismiss</button>
+        </div>
       </div>
     </div>
 
@@ -171,12 +217,11 @@
       <button type="button" class="icon-btn" id="btn-profiles-close" aria-label="Close">
       </button>
     </header>
-    <p class="muted tiny">Titles save separately for each profile. Click a picture to change it.</p>
     <p class="muted tiny" id="profile-running-note" hidden>The running title keeps the profile it
       started with. A change applies to the next title you start.</p>
     <ul class="profile-list" id="profile-list"></ul>
     <form class="profile-add" id="profile-add">
-      <input class="text" id="profile-add-name" maxlength="10" placeholder="Name"
+      <input class="text" id="profile-add-name" placeholder="Name"
              aria-label="New profile name" required>
       <button type="submit" class="btn small" id="profile-add-submit">Add profile</button>
     </form>
@@ -207,6 +252,18 @@
     </form>
   </dialog>
 
+  <dialog class="keyboard" id="read-only" aria-labelledby="read-only-title" aria-describedby="read-only-text">
+    <form method="dialog">
+      <h2 id="read-only-title">Already open in another tab</h2>
+      <p id="read-only-text">Another tab is using your SD card, saves and installed firmware. This tab can still run games and show your files, but it can't change them: game progress made here is lost when the tab closes.</p>
+      <p>To play with saving, close the other tab, then reload this one.</p>
+      <div class="keyboard-actions">
+        <button type="button" class="btn" id="btn-read-only-reload">Reload</button>
+        <button type="submit" class="btn primary">Continue without saving</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog class="files" id="files" aria-labelledby="files-title">
     <header class="files-head">
       <h2 id="files-title">Storage</h2>
@@ -228,19 +285,18 @@
         <label class="btn small" id="files-upload-dir-label" for="files-upload-dir">Upload folder</label>
         <input type="file" id="files-upload-dir" webkitdirectory hidden>
         <button type="button" class="btn small" id="btn-files-export">Export as .zip</button>
-        <label class="btn small" id="files-install-label" for="firmware-ncas" hidden>Install firmware&hellip;</label>
+        <label class="btn small" id="files-install-dir-label" for="firmware-dir" hidden>Install from folder&hellip;</label>
+        <label class="btn small" id="files-install-zip-label" for="firmware-zip" hidden>Install from .zip&hellip;</label>
       </div>
     </div>
     <p class="files-status tiny" id="files-status" role="status" aria-live="polite"></p>
     <ul class="files-list" id="files-list"></ul>
     <section class="files-view" id="files-view" aria-label="File contents" hidden></section>
-    <p class="muted tiny" id="files-note"></p>
+    <p class="muted tiny" id="files-note" hidden>Removing a data archive takes effect once the running title is replaced.</p>
   </dialog>
 
   <footer class="statusbar">
-    <span class="item" id="instructions-item" hidden title="Guest instructions executed, and how many a second while running">Instructions <b id="instructions">0</b></span>
     <span class="item" id="ram-item" title="Guest RAM the emulated console has touched (wasm heap in brackets)">RAM <b id="ram">-</b></span>
-    <span class="item" id="res-item" hidden>Res <b id="res">-</b></span>
     <span class="item" id="input-item">Input <b id="input-state">none</b></span>
     <span class="spacer"></span>
     <span class="item readout" id="fps" title="Frames presented per second">- fps</span>
@@ -260,6 +316,7 @@
       <button class="tab" data-tab="debug" role="tab" aria-selected="false">Debug</button>
       <button class="tab" data-tab="files" role="tab" aria-selected="false">Files</button>
       <button class="tab" data-tab="nand" role="tab" aria-selected="false">NAND</button>
+      <button class="tab" data-tab="network" role="tab" aria-selected="false">Network</button>
     </div>
     <button class="icon-btn" id="btn-panel-close" title="Close panel" aria-label="Close panel">
     </button>
@@ -278,7 +335,7 @@
         <option value="trace">Trace</option>
       </select>
       <span class="spacer"></span>
-      <button id="btn-save-console" class="btn small ghost" title="Save the whole log as a file - including the lines the view has scrolled past">Save</button>
+      <button id="btn-save-console" class="btn small ghost" title="Save the whole log as a file - including the lines the view has scrolled past"><span id="save-console-label">Save</span></button>
       <button id="btn-save-previous" class="btn small ghost" title="Save what the previous session had said before it ended" hidden>Save previous</button>
       <button id="btn-clear-console" class="btn small ghost">Clear</button>
     </div>
@@ -293,17 +350,39 @@
         aria-pressed="false">Graphics</button>
       <button class="btn small debug-group" data-debug-group="memory"
         aria-pressed="false">Memory</button>
+      <button class="btn small debug-group" data-debug-group="audio"
+        aria-pressed="false">Audio</button>
     </div>
+
+    <details class="section" id="threads-debug-section" data-debug-section="cpu" open>
+      <summary class="section-head">
+        <span class="section-title">Threads</span>
+        <info-tip text="The title's threads, busiest first, read once a second. Share counts instructions, not time: a thread running SIMD-heavy code costs more per instruction than one shuffling integers. Only the running process is listed, so a library applet on screen shows its own threads. While paused, the last second before the pause stays up."></info-tip>
+        <span class="section-note" id="threads-badge"></span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny" id="threads-status">Start a title to see its threads.</p>
+        <table class="debug-timings threads-table" id="threads-table" hidden>
+          <caption>Instructions retired over the last reading</caption>
+          <thead><tr><th scope="col">Thread</th><th scope="col">Share</th>
+            <th scope="col">Per second</th></tr></thead>
+          <tbody id="threads-rows"></tbody>
+        </table>
+        <details class="threads-idle" id="threads-idle" hidden>
+          <summary id="threads-idle-summary"></summary>
+          <ul class="debug-list" id="threads-idle-list"></ul>
+        </details>
+      </div>
+    </details>
 
     <details class="section" data-debug-section="cpu" open>
       <summary class="section-head">
         <span class="section-title">Tracing</span>
+        <info-tip text="Tracing caps each run slice so the log stays readable. A fault dumps the register snapshot and the last instructions into the console on its own."></info-tip>
         <span class="section-note" id="trace-badge">off</span>
       </summary>
       <div class="section-body">
         <label class="check"><input type="checkbox" id="trace-cb"><span>Instruction trace</span></label>
-        <p class="muted tiny">Tracing caps each run slice so the log stays readable. A fault dumps the
-          register snapshot and the last instructions into the console on its own.</p>
         <div class="panel-tools">
           <button id="btn-dumptrace" class="btn small">Dump trace</button>
           <button id="btn-dumpregs" class="btn small">Dump regs</button>
@@ -314,13 +393,11 @@
     <details class="section" data-debug-section="cpu" open>
       <summary class="section-head">
         <span class="section-title">Translation</span>
+        <info-tip text="Guest code is compiled to pre-decoded blocks the first time it runs, so decoding is paid for once instead of on every instruction. Turn it off to run everything through the plain interpreter - the two execute identically, so a difference is a bug."></info-tip>
         <span class="section-note" id="jit-badge">on</span>
       </summary>
       <div class="section-body" id="jit-debug-section">
         <label class="check"><input type="checkbox" id="jit-cb" checked><span>Translate blocks</span></label>
-        <p class="muted tiny">Guest code is compiled to pre-decoded blocks the first time it runs, so
-          decoding is paid for once instead of on every instruction. Turn it off to run everything
-          through the plain interpreter - the two execute identically, so a difference is a bug.</p>
         <dl class="debug-totals" id="jit-debug-data">
           <div><dt>Blocks cached</dt><dd id="jit-blocks">0</dd></div>
           <div><dt>Translated</dt><dd id="jit-translated">0</dd></div>
@@ -330,6 +407,10 @@
           <div><dt>Entries per block</dt><dd id="jit-reuse">-</dd></div>
           <div><dt>Entered compiled</dt><dd id="jit-entered-emitted">0</dd></div>
           <div><dt>By a jump from compiled</dt><dd id="jit-chained">0</dd></div>
+          <div><dt>Instructions run compiled</dt><dd id="jit-retired-emitted">0</dd></div>
+          <div><dt>Run in blocks not yet hot</dt><dd id="jit-retired-cold">0</dd></div>
+          <div><dt>Run in blocks never compiled</dt><dd id="jit-retired-never">0</dd></div>
+          <div><dt>Compiled blocks dropped</dt><dd id="jit-dropped">0</dd></div>
         </dl>
       </div>
     </details>
@@ -337,10 +418,21 @@
     <details class="section" id="render-debug-section" data-debug-section="graphics" open hidden>
       <summary class="section-head">
         <span class="section-title">Rendering</span>
+        <info-tip id="render-tip"></info-tip>
         <span class="section-note" id="render-debug-badge"></span>
       </summary>
       <div class="section-body">
-        <p class="tiny"><span id="render-status"></span> <info-tip id="render-tip"></info-tip></p>
+        <p class="tiny" id="render-status" hidden></p>
+        <label class="check"><input type="checkbox" id="render-force-software"><span>Draw on the CPU</span></label>
+        <div class="debug-option">
+          <label for="render-device-time">Time on the GPU</label>
+          <select id="render-device-time" class="select"
+            title="Per draw gives every draw a pass of its own, which names the shaders a slow pass runs but makes the frame slower than usual.">
+            <option value="off" selected>Off</option>
+            <option value="passes">Per pass</option>
+            <option value="draws">Per draw</option>
+          </select>
+        </div>
         <div id="render-debug-data" hidden>
           <dl class="debug-totals">
             <div><dt>GPU adapter</dt><dd id="render-adapter">-</dd></div>
@@ -350,7 +442,11 @@
             <div><dt>Pipelines</dt><dd id="render-pipelines">0</dd></div>
             <div><dt>Shader modules</dt><dd id="render-modules">0</dd></div>
             <div><dt>Surfaces held</dt><dd id="render-held">0</dd></div>
+            <div><dt>Full syncs</dt><dd id="render-syncs">0</dd></div>
             <div><dt>Texture cache hits</dt><dd id="render-texture-hits">-</dd></div>
+            <div><dt>Bind group cache hits</dt><dd id="render-bind-hits">-</dd></div>
+            <div><dt>Draws opening a pass</dt><dd id="render-pass-splits">-</dd></div>
+            <div><dt>Held surfaces copied</dt><dd id="render-held-copies">-</dd></div>
           </dl>
           <p class="muted tiny debug-caption">Read from guest memory</p>
           <dl class="debug-totals">
@@ -360,7 +456,7 @@
             <div><dt>Indices</dt><dd id="render-read-index">0 B</dd></div>
           </dl>
           <table class="debug-timings">
-            <caption>Device time, milliseconds</caption>
+            <caption>Worker time per stage, milliseconds</caption>
             <thead><tr><th scope="col">Stage</th><th scope="col">Per frame</th>
               <th scope="col">Total</th></tr></thead>
             <tbody>
@@ -380,6 +476,14 @@
                 <td id="render-flush-total">-</td></tr>
             </tbody>
           </table>
+          <div id="render-device-time-block" hidden>
+            <p class="muted tiny debug-caption" id="render-device-time-summary"></p>
+            <table class="debug-timings device-time" id="render-device-time-table" hidden>
+              <thead><tr><th scope="col">Total ms</th><th scope="col">Longest</th>
+                <th scope="col">Passes</th><th scope="col">Pass and the shaders it ran</th></tr></thead>
+              <tbody id="render-device-time-rows"></tbody>
+            </table>
+          </div>
         </div>
         <div id="render-reasons-block" hidden>
           <p class="muted tiny">Fell back because</p>
@@ -395,11 +499,12 @@
     <details class="section" id="display-debug-section" data-debug-section="graphics" open hidden>
       <summary class="section-head">
         <span class="section-title">Display</span>
+        <info-tip text="The size of the newest frame the title presented, and worker-side timing of each run slice and of painting that frame on the canvas. Guest frames presented between paints are counted as skipped."></info-tip>
       </summary>
       <div class="section-body">
-        <p class="muted tiny">Worker-side timing of each run slice and of painting its newest frame on the canvas. Guest frames presented between paints are counted as skipped.</p>
         <div id="display-debug-data" hidden>
           <dl class="debug-totals">
+            <div><dt>Frame size</dt><dd id="display-frame-size">-</dd></div>
             <div><dt>Guest frames</dt><dd id="display-guest-frames">0</dd></div>
             <div><dt>Canvas updates</dt><dd id="display-canvas-updates">0</dd></div>
             <div><dt>Frames skipped</dt><dd id="display-skipped-frames">0</dd></div>
@@ -425,11 +530,10 @@
     <details class="section" id="memory-debug-section" data-debug-section="memory" open hidden>
       <summary class="section-head">
         <span class="section-title">Guest RAM</span>
+        <info-tip text="Pages of the title's address space that hold real memory. A page gets memory the first time the title writes to it and keeps it until the title unmaps it."></info-tip>
         <span class="section-note" id="memory-debug-badge"></span>
       </summary>
       <div class="section-body">
-        <p class="muted tiny">Pages of the title's address space that hold real memory. A page gets
-          memory the first time the title writes to it and keeps it until the title unmaps it.</p>
         <p class="tiny" id="memory-debug-error" hidden></p>
         <div id="memory-debug-data" hidden>
           <dl class="debug-totals">
@@ -465,12 +569,10 @@
     <details class="section" id="heap-debug-section" data-debug-section="memory" open hidden>
       <summary class="section-head">
         <span class="section-title">WebAssembly heap</span>
+        <info-tip text="The emulator's linear memory, which holds every process's guest RAM and the emulator's own data. It only grows: memory freed inside it stays counted here."></info-tip>
         <span class="section-note" id="heap-debug-badge"></span>
       </summary>
       <div class="section-body">
-        <p class="muted tiny">The emulator's linear memory, which holds every process's guest RAM
-          and the emulator's own data. It only grows: memory freed inside it stays counted
-          here.</p>
         <dl class="debug-totals">
           <div><dt>Size</dt><dd id="heap-size">-</dd></div>
           <div><dt>Guest RAM, all processes</dt><dd id="heap-guest">-</dd></div>
@@ -478,6 +580,65 @@
           <div><dt>Everything else</dt><dd id="heap-rest">-</dd></div>
         </dl>
         <p class="muted tiny" id="heap-device-textures"></p>
+      </div>
+    </details>
+
+    <details class="section" id="audio-mixer-section" data-debug-section="audio" open hidden>
+      <summary class="section-head">
+        <span class="section-title">Game mixer</span>
+        <info-tip text="The title's audio renderers, read once a second. A renderer is woken for every 5 ms frame, and titles like Just Dance mix one frame per wake, so their music keeps time only while updates per frame stay at 1.00. Underruns count voices that ran out of samples while playing."></info-tip>
+        <span class="section-note" id="audio-mixer-badge"></span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny" id="audio-mixer-status">Start a title to see its audio.</p>
+        <div id="audio-renderers"></div>
+      </div>
+    </details>
+
+    <details class="section" id="audio-clock-section" data-debug-section="audio" open hidden>
+      <summary class="section-head">
+        <span class="section-title">Clock</span>
+        <info-tip text="When the title falls behind real time, the emulator jumps its clock forward instead of slowing down. Audio frames come due by that clock, so each jump makes several due at once."></info-tip>
+        <span class="section-note" id="audio-clock-badge"></span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny" id="audio-clock-status">Start a title to see its clock.</p>
+        <dl class="debug-totals" id="audio-clock-data" hidden>
+          <div><dt>Catch-up jumps</dt><dd id="audio-clock-jumps">-</dd></div>
+          <div><dt>Time skipped</dt><dd id="audio-clock-skipped">-</dd></div>
+          <div><dt>Ahead of real time</dt><dd id="audio-clock-ahead">-</dd></div>
+        </dl>
+      </div>
+    </details>
+
+    <details class="section" id="audio-output-section" data-debug-section="audio" open hidden>
+      <summary class="section-head">
+        <span class="section-title">Sound output</span>
+        <info-tip text="The mixed sound on its way out: the ring the emulator writes it into, then the browser's audio output, which plays from the ring and drops the oldest sound once more than 200 ms is waiting."></info-tip>
+        <span class="section-note" id="audio-output-badge"></span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny" id="audio-output-status">Start a title to see its sound output.</p>
+        <div id="audio-output-data" hidden>
+          <p class="muted tiny debug-caption">Emulator ring</p>
+          <dl class="debug-totals">
+            <div><dt>Format</dt><dd id="audio-ring-format">-</dd></div>
+            <div><dt>Written</dt><dd id="audio-ring-produced">-</dd></div>
+            <div><dt>Taken by the page</dt><dd id="audio-ring-taken">-</dd></div>
+            <div><dt>Waiting</dt><dd id="audio-ring-backlog">-</dd></div>
+            <div><dt>Dropped</dt><dd id="audio-ring-dropped">-</dd></div>
+          </dl>
+          <p class="muted tiny debug-caption">Browser output</p>
+          <p class="muted tiny" id="audio-page-status" hidden></p>
+          <dl class="debug-totals" id="audio-page-data">
+            <div><dt>Output</dt><dd id="audio-page-format">-</dd></div>
+            <div><dt>Latency</dt><dd id="audio-page-latency">-</dd></div>
+            <div><dt>Played</dt><dd id="audio-page-played">-</dd></div>
+            <div><dt>Gaps</dt><dd id="audio-page-gaps">-</dd></div>
+            <div><dt>Dropped as too late</dt><dd id="audio-page-trimmed">-</dd></div>
+            <div><dt>Queued</dt><dd id="audio-page-queued">-</dd></div>
+          </dl>
+        </div>
       </div>
     </details>
 
@@ -500,31 +661,12 @@
     <details class="section" open>
       <summary class="section-head">
         <span class="section-title">Storage</span>
+        <info-tip text="The SD card, save data and installed system titles, kept in this browser."></info-tip>
       </summary>
       <div class="section-body">
-        <p class="muted tiny">The SD card, save data and installed system titles, kept in this browser.</p>
         <div class="panel-tools">
           <button type="button" id="btn-files" class="btn small">Browse storage</button>
         </div>
-      </div>
-    </details>
-
-    <details class="section" open>
-      <summary class="section-head">
-        <span class="section-title">Keys</span>
-        <span class="section-note" id="keys-badge">none</span>
-      </summary>
-      <div class="section-body">
-        <p class="muted tiny">An NCA from the CDN keeps its header encrypted, so
-          <code>prod.keys</code> is what makes one readable at all. Kept in this browser.</p>
-        <div class="panel-tools">
-          <label class="btn small" for="prod-keys">prod.keys</label>
-          <input type="file" id="prod-keys" accept=".keys,.txt" hidden>
-          <label class="btn small" for="title-keys">title.keys</label>
-          <input type="file" id="title-keys" accept=".keys,.txt" hidden>
-          <button id="btn-clear-keys" class="btn small ghost">Clear</button>
-        </div>
-        <p class="muted tiny" id="keys-state">no keys loaded</p>
       </div>
     </details>
 
@@ -545,6 +687,23 @@
   </section>
 
   <section class="tabpanel" data-panel="nand">
+    <details class="section" id="keys-section" open>
+      <summary class="section-head">
+        <span class="section-title">Keys</span>
+        <info-tip text="prod.keys decrypts NCA headers: installing firmware needs it, and so does any NCA from the CDN, whose header stays encrypted. Kept in this browser."></info-tip>
+        <span class="section-note" id="keys-badge">none</span>
+      </summary>
+      <div class="section-body">
+        <div class="panel-tools">
+          <label class="btn small" for="prod-keys">prod.keys</label>
+          <input type="file" id="prod-keys" accept=".keys" hidden>
+          <label class="btn small" for="title-keys">title.keys</label>
+          <input type="file" id="title-keys" accept=".keys" hidden>
+          <button id="btn-clear-keys" class="btn small ghost">Clear</button>
+        </div>
+      </div>
+    </details>
+
     <details class="section" open>
       <summary class="section-head">
         <span class="section-title">System &middot; NAND</span>
@@ -553,13 +712,96 @@
       <div class="section-body">
         <div id="nand-titles" class="nand-titles"></div>
         <div class="panel-tools">
-          <label class="btn small" for="firmware-ncas">Install firmware&hellip;</label>
-          <input type="file" id="firmware-ncas" accept=".nca" multiple hidden>
+          <label class="btn small" for="firmware-dir">Install from folder&hellip;</label>
+          <input type="file" id="firmware-dir" webkitdirectory hidden>
+          <label class="btn small" for="firmware-zip">Install from .zip&hellip;</label>
+          <input type="file" id="firmware-zip" accept=".zip" hidden>
           <span id="nand-tools" hidden>
             <button id="btn-erase-nand" class="btn small ghost danger">Erase NAND</button>
           </span>
         </div>
+        <p class="install-status tiny" id="firmware-status" role="status" aria-live="polite"></p>
         <p class="muted tiny" id="firmware-state">no system data archives</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="tabpanel" data-panel="network">
+    <details class="section" open>
+      <summary class="section-head">
+        <span class="section-title">switch-relay</span>
+      </summary>
+      <div class="section-body">
+        <p class="tiny">Run switch-relay on this computer to give the console Internet access. LAN access and its other settings are under Relay settings.</p>
+        <div class="panel-tools">
+          <a id="net-download" class="btn small" href="https://git.tenshii.moe/Tenshii/Switch-Wasm/releases/latest"
+             target="_blank" rel="noopener">Download switch-relay</a>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary class="section-head">
+        <span class="section-title">Internet</span>
+        <info-tip text="The console reaches the Internet through switch-relay, run on this computer. With this off it sees a network that never answers."></info-tip>
+        <span class="section-note" id="net-badge">off</span>
+      </summary>
+      <div class="section-body">
+        <div class="panel-tools">
+          <label class="field" for="net-url"><span class="field-label">Relay</span><input id="net-url"
+            type="text" class="addr" spellcheck="false" autocomplete="off"></label>
+          <button id="btn-net" class="btn small" aria-pressed="false">Turn on</button>
+        </div>
+        <p class="muted tiny" id="net-note" hidden></p>
+        <p class="muted tiny" id="net-link"></p>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary class="section-head">
+        <span class="section-title">Relay settings</span>
+        <info-tip text="Read from the relay at the address above, and saved in its switch-relay.toml. A change that lets the console reach more, or trusts another page, waits until you allow it in a window switch-relay opens on its own computer."></info-tip>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny relay-status" id="relay-note" role="status" aria-live="polite">Shown once the relay is connected: turn on Internet above.</p>
+        <form id="relay-form" class="relay-form" hidden>
+          <label class="check"><input type="checkbox" id="relay-private"><span>Let the console reach this computer and the local network <span class="relay-lock" id="relay-private-lock" hidden>(set by <code>--allow-private</code>)</span></span></label>
+          <label class="check"><input type="checkbox" id="relay-inbound"><span>Let other computers connect to the console <span class="relay-lock" id="relay-inbound-lock" hidden>(set by <code>--allow-inbound</code>)</span></span></label>
+          <div class="relay-port">
+            <label class="field" for="relay-port"><span class="field-label">Port</span><input id="relay-port"
+              type="number" class="num" min="1" max="65535" step="1" required></label>
+            <span class="relay-lock" id="relay-port-lock" hidden>(set by <code>--port</code>)</span>
+            <p class="muted tiny" id="relay-port-note" hidden></p>
+          </div>
+          <fieldset class="relay-origins">
+            <legend class="tiny">Trusted pages</legend>
+            <ul class="relay-origin-list" id="relay-origins"></ul>
+            <div class="panel-tools">
+              <label class="field" for="relay-origin"><span class="field-label">Page</span><input id="relay-origin"
+                type="url" class="addr" spellcheck="false" autocomplete="off" placeholder="https://example.org"></label>
+              <button id="relay-add" class="btn small" type="button">Trust</button>
+            </div>
+          </fieldset>
+          <div class="panel-tools">
+            <button id="relay-save" class="btn small" type="submit" disabled>Save</button>
+            <button id="relay-revert" class="btn small" type="button" disabled>Undo changes</button>
+          </div>
+        </form>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary class="section-head">
+        <span class="section-title">Connections</span>
+        <span class="section-note" id="net-count">0</span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny" id="net-empty">None yet.</p>
+        <table class="debug-timings net-table" id="net-table" hidden>
+          <thead><tr><th scope="col">Host</th><th scope="col">State</th>
+            <th scope="col">Out</th><th scope="col">In</th></tr></thead>
+          <tbody id="net-rows"></tbody>
+        </table>
       </div>
     </details>
   </section>

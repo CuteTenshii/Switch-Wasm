@@ -1,0 +1,285 @@
+/* status bar */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 12px;
+  background: var(--chrome);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-xs);
+  color: var(--muted);
+  user-select: none;
+  overflow: hidden;
+}
+.statusbar .item { white-space: nowrap; }
+/* Right-aligned, so the edge holds still as the digits change. */
+.statusbar .readout { text-align: right; }
+.statusbar b {
+  color: var(--text);
+  font-family: var(--mono);
+  font-weight: 500;
+}
+
+/* side panel */
+
+.panel {
+  position: relative;
+  flex: 0 0 var(--panel-w);
+  width: var(--panel-w);
+  height: 100%;
+  display: none;
+  flex-direction: column;
+  background: var(--chrome);
+  border-left: 1px solid var(--border);
+  min-height: 0;
+}
+body.panel-open .panel {
+  display: flex;
+  animation: panel-in .16s ease both;
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Draggable seam; the hit area straddles the border. */
+.panel-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  width: 9px;
+  z-index: 5;
+  cursor: col-resize;
+  touch-action: none;
+}
+.panel-grip::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 1px;
+  background: transparent;
+  transition: background .12s, box-shadow .12s;
+}
+.panel-grip:hover::after,
+.panel-grip:focus-visible::after,
+.panel-grip.dragging::after {
+  background: var(--accent);
+  box-shadow: 0 0 8px rgb(110 168 255 / 50%);
+}
+.panel-grip:focus-visible { outline: none; }
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/* panel head + tabs */
+
+.panel-head {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  height: var(--topbar-h);
+  padding: 0 6px 0 8px;
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+.tabstrip {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  overflow: auto hidden;
+}
+
+.tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 0 10px;
+  cursor: pointer;
+  transition: color .12s;
+}
+.tab svg { flex: none; }
+.tab::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: transparent;
+  transition: background .12s;
+}
+.tab:hover { color: var(--text); }
+.tab.is-active {
+  color: var(--text);
+  font-weight: 600;
+}
+.tab.is-active::after { background: var(--accent); }
+
+/* tab bodies */
+
+.tabpanel {
+  display: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  overflow: auto;
+}
+.tabpanel.is-active { display: flex; }
+/* The log scrolls itself; avoid a second scrollbar. */
+.tabpanel[data-panel="console"] { overflow: hidden; }
+
+.debug-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  flex: none;
+}
+.debug-group {
+  justify-content: center;
+  color: var(--muted);
+}
+.debug-group.is-active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--text);
+}
+
+.panel-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.panel-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.section-body code {
+  font-family: var(--mono);
+  font-size: .92em;
+  color: var(--accent);
+}
+
+.install-status {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.install-status:empty { display: none; }
+.install-status.is-error { color: var(--red); }
+
+/* collapsible section */
+
+.section {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--chrome-hi);
+  overflow: hidden;
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  list-style: none;
+}
+.section-head::-webkit-details-marker { display: none; }
+/* Chevron drawn from two borders, so it rotates with the disclosure. */
+.section-head::before {
+  content: "";
+  flex: none;
+  width: 5px;
+  height: 5px;
+  margin-right: 1px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform .15s ease;
+}
+.section[open] > .section-head::before { transform: rotate(45deg); }
+.section-head:hover { color: var(--text); }
+.section-head:hover::before { border-color: var(--text); }
+.section-title {
+  font-weight: 600;
+  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: .7px;
+}
+.section-note {
+  margin-left: auto;
+  max-width: 55%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.section-note.on { color: var(--green); }
+.section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 11px;
+  border-top: 1px solid var(--border);
+  background: var(--chrome);
+}
+
+/* info tips */
+.info-tip-button {
+  display: inline-flex;
+  padding: 2px;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+  vertical-align: middle;
+  cursor: help;
+}
+.info-tip-button:hover,
+.info-tip-button:focus-visible { color: var(--text); }
+.info-tip-button:focus-visible { outline: 2px solid var(--accent); }
+.info-tip-bubble {
+  position: fixed;
+  inset: auto;
+  max-width: min(280px, calc(100vw - 16px));
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--chrome-hi);
+  color: var(--text);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}

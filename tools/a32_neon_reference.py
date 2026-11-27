@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the expected-value table of `crates/switch-core/tests/a32_neon_reference_test.rs`.
+"""Print the expected-value table of `crates/core/tests/a32_neon_reference_test.rs`.
 
 Runs each case under `qemu-arm` with q8..q10 loaded and r2 = 0x9abcdef0, recording
 q8..q10 and r2 afterwards. Needs `llvm-mc`, `clang` with `lld`, and `qemu-arm`.

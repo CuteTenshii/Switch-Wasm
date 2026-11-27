@@ -2,7 +2,7 @@
 
 import type { Bytes } from '../shared/protocol';
 import { el } from './dom';
-import { fmtSize } from './format';
+import { fmtSize } from '../shared/format';
 
 // Larger text opens read-only: a textarea that size is slow to edit.
 const EDIT_LIMIT = 4 * 1024 * 1024;

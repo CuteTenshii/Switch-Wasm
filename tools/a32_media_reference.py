@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the expected-value table of `crates/switch-core/tests/a32_media_test.rs`.
+"""Print the expected-value table of `crates/core/tests/a32_media_test.rs`.
 
 Runs each case under `qemu-arm`; needs `llvm-mc`, `clang` with `lld`, and `qemu-arm`.
 

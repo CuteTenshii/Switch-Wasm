@@ -52,7 +52,6 @@ export function noteFrame(report: SliceReport): void {
   lastFrame = report.frame;
   width = report.width;
   height = report.height;
-  $('res').textContent = width + '×' + height;
 }
 
 export function resetDisplay(): void {
@@ -63,7 +62,6 @@ export function resetDisplay(): void {
   emulatedMs = 0;
   fpsSince = performance.now();
   resetDisplayMetrics();
-  $('res').textContent = '-';
   $('fps').textContent = '- fps';
   $('frame-ms').textContent = '- ms';
 }

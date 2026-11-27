@@ -1,0 +1,63 @@
+/* narrow screens: the panel becomes a bottom sheet */
+
+@media (width <= 820px) {
+  body { flex-direction: column; }
+  .panel {
+    flex: 0 0 45vh;
+    width: 100%;
+    height: 45vh;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+  /* No drag on the horizontal seam; the media query sets the height. */
+  .panel-grip { display: none; }
+  body.panel-open .panel {
+    animation-name: sheet-in;
+  }
+  .debug-group { min-height: 44px; }
+  .relay-form .btn,
+  .relay-form .check { min-height: 44px; }
+  .relay-form .check { align-items: center; }
+
+  @keyframes sheet-in {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  .brand .name { display: none; }
+  .transport .btn span:not(.glyph) { display: none; }
+  /* Only for titles with no icon to identify them. */
+  .running.has-icon .running-meta { display: none; }
+  .running { padding-left: 8px; }
+  .running-icon {
+    width: 26px;
+    height: 26px;
+    border-radius: var(--radius-sm);
+  }
+  .running-name { max-width: 14ch; }
+  .topbar { gap: 8px; }
+  #input-item { display: none; }
+  .profile-button-name { display: none; }
+  .profile-button { padding: 3px 4px; }
+
+  .crash {
+    place-items: start center;
+    overflow-y: auto;
+  }
+  .crash-inner {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+  .crash-mark {
+    width: 36px;
+    height: 36px;
+    font-size: var(--text-xl);
+  }
+  .crash-actions .btn {
+    min-height: 44px;
+  }
+}

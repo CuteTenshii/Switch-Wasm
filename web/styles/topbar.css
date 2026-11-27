@@ -1,0 +1,118 @@
+/* app shell */
+
+.app {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--topbar-h) 1fr var(--statusbar-h);
+  height: 100%;
+}
+
+.spacer { flex: 1 1 auto; }
+
+/* top bar */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 12px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.brand .mark {
+  width: 12px; height: 12px; border-radius: 3px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 12px rgb(110 168 255 / 45%);
+}
+.brand .name {
+  font-weight: 600;
+  letter-spacing: .2px;
+  font-size: var(--text-base);
+}
+
+/* Current title; the only part of the bar allowed to shrink. */
+.running {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding-left: 14px;
+  border-left: 1px solid var(--border);
+}
+.running-icon {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-sm);
+  background: var(--chrome-hi);
+  object-fit: cover;
+}
+/* Name over version; needs a tighter line height to fit the 48px bar. */
+.running-meta {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  line-height: 1.25;
+}
+.running-name {
+  font-size: var(--text-sm);
+  color: var(--text);
+  max-width: 26ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.running-version {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+.transport {
+  display: flex;
+  gap: 6px;
+}
+
+.topbar-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* Narrow screens only; see `placeMoreItems`. */
+.topbar .more-button { display: none; }
+
+@media (width <= 900px) {
+  .topbar .more-button { display: inline-flex; }
+}
+.more-menu {
+  position: fixed;
+  inset: calc(var(--topbar-h) + 4px) 8px auto auto;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
+  margin: 0;
+  padding: 6px;
+  background: var(--chrome);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.more-menu:popover-open { display: flex; }
+.more-menu .btn {
+  min-height: 44px;
+  justify-content: flex-start;
+}
+.more-menu .profile-button { padding: 3px 12px 3px 4px; }
+.more-menu .profile-button-name { display: inline; }
+.menu-label { display: none; }
+.more-menu .menu-label { display: inline; }

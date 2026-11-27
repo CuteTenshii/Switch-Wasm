@@ -1,4 +1,4 @@
-import { test as base, expect, type Page } from '@playwright/test';
+import { test as base, expect, type Locator, type Page } from '@playwright/test';
 
 // Fails any test during which the page threw or logged a console error.
 export const test = base.extend<{ pageErrors: string[] }>({
@@ -16,9 +16,33 @@ export const test = base.extend<{ pageErrors: string[] }>({
 
 export { expect };
 
+export type EmuState = 'idle' | 'running' | 'paused' | 'halted' | 'fault';
+
 export async function openPage(page: Page): Promise<void> {
   await page.goto('./');
   await expect(page.locator('#loading')).toHaveClass(/hidden/, { timeout: 30_000 });
+}
+
+export async function reloadPage(page: Page): Promise<void> {
+  await page.reload();
+  await expect(page.locator('#loading')).toHaveClass(/hidden/, { timeout: 30_000 });
+}
+
+export async function expectState(page: Page, state: EmuState): Promise<void> {
+  await expect(page.locator('body')).toHaveAttribute('data-state', state);
+}
+
+// Opens the side panel on `tab`, by its accessible name.
+export async function openPanel(page: Page, tab: string): Promise<void> {
+  if (!await page.locator('body').evaluate((body) => body.classList.contains('panel-open'))) {
+    await page.locator('#btn-panel').click();
+  }
+  await page.getByRole('tab', { name: tab, exact: true }).click();
+}
+
+// The item of `list` whose `name` element reads exactly `text` (`hasText` is a substring match).
+export function rowNamed(page: Page, list: string, name: string, text: string): Locator {
+  return page.locator(list).filter({ has: page.locator(name).getByText(text, { exact: true }) });
 }
 
 // A static AArch64 ELF whose one segment, at 0x0800_0000, runs `code` from its entry.
@@ -46,8 +70,36 @@ export function aarch64Elf(code: number[]): Buffer {
   return out;
 }
 
-export async function bootElf(page: Page, elf: Buffer): Promise<void> {
+export async function bootElf(page: Page, elf: Buffer, until?: EmuState): Promise<void> {
   await page.locator('#nro-file').setInputFiles({
     name: 'test.elf', mimeType: 'application/octet-stream', buffer: elf,
   });
+  if (until) await expectState(page, until);
+}
+
+// Instruction words for the test programs.
+export const ASM = {
+  // b .
+  spin: 0x14000000,
+  // svc #0: the host's halt trap.
+  halt: 0xd4000001,
+  // svc #0x7 (ExitProcess)
+  exitProcess: 0xd40000e1,
+  // svc #0x29 (GetInfo)
+  getInfo: 0xd4000521,
+  // movz x1, #0x1000; ldr x0, [x1]: a read below the guest address space, where a NULL lands.
+  unmappedRead: [0xd2820001, 0xf9400020],
+} as const;
+
+// A PFS0 holding one file that is not an NCA, so it has no Program NCA to launch.
+export function nspWithoutProgram(): Buffer {
+  const names = Buffer.from('a.txt\0\0\0');
+  const data = Buffer.from('not an NCA');
+  const header = Buffer.alloc(16);
+  header.write('PFS0');
+  header.writeUInt32LE(1, 4);
+  header.writeUInt32LE(names.length, 8);
+  const entry = Buffer.alloc(24);
+  entry.writeBigUInt64LE(BigInt(data.length), 8);
+  return Buffer.concat([header, entry, names, data]);
 }

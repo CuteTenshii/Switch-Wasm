@@ -1,0 +1,25 @@
+[package]
+name = "switch-relay"
+version = "0.2.0"
+edition = "2021"
+description = "WebSocket relay that carries the emulator's TCP and UDP traffic, see docs/relay.md"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+dirs = "7.0.0"
+futures-util = "0.3.34"
+serde = { version = "1.0.229", features = ["derive"] }
+socket2 = "0.6.5"
+switch-relay-proto = { path = "../relay-proto" }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time", "io-std", "signal"] }
+tokio-tungstenite = "0.30.0"
+toml = "1.2.3"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio-tungstenite = "0.30"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }

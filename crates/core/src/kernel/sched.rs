@@ -1,0 +1,551 @@
+//! Thread scheduling, display pacing and context switching.
+
+use crate::cpu::*;
+use crate::kernel::cores::Handback;
+use crate::trace::Level;
+
+/// Instructions per 60 Hz display refresh at 1.02 GHz; vsync fires even without a present.
+pub const VSYNC_PERIOD_CYCLES: u64 = 1_020_000_000 / 60;
+
+/// Instructions per 200 Hz `hid` sample; LIFOs advance even with no input.
+pub const HID_SAMPLE_PERIOD_CYCLES: u64 = 1_020_000_000 / 200;
+
+/// Cycles of the clock one [`Cpu::wait_for_cores`] wait stands for.
+const IDLE_WAIT_CYCLES: u64 = 1_020_000_000 / 5_000;
+
+/// Instructions a thread runs before preemption.
+pub(crate) const TIME_SLICE: u64 = 20_000;
+
+/// How far ahead of real time a paced clock has the host wait: 50 ms.
+const MAX_AHEAD_CYCLES: u64 = 1_020_000_000 / 20;
+
+/// What [`Cpu::pacing`] reports, in cycles of the guest clock.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pacing {
+    /// Cycles per second of that clock.
+    pub clock_hz: u32,
+    /// Times the clock was behind real time and jumped forward.
+    pub jumps: u64,
+    /// Cycles those jumps skipped: time the title never got to run in.
+    pub skipped_cycles: u64,
+    /// How far the clock is ahead of real time now, which the host waits out.
+    pub ahead_cycles: u64,
+}
+
+/// Default thread priority (also what most retail manifests declare); 0 is most urgent, 63 least.
+pub const DEFAULT_THREAD_PRIORITY: u8 = 44;
+
+pub(crate) const MAIN_THREAD_ID: u64 = 1;
+
+pub(crate) const LOWEST_PRIORITY: u8 = 63;
+/// The console has four cores, 0 to 3.
+pub(crate) const LAST_CORE: u8 = 3;
+
+/// Decisions a runnable thread may be passed over before it runs regardless, since
+/// all threads share one host core.
+pub(crate) const STARVE_DECISIONS: u32 = 8;
+
+impl Cpu {
+    /// Park the presenting thread until the next 60 Hz refresh, as a swapchain would.
+    /// Takes effect after the reply is written; see [`Cpu::pending_sleep`].
+    pub(crate) fn pace_present(&mut self) {
+        let tick = self.last_present_cycles.wrapping_add(VSYNC_PERIOD_CYCLES);
+        if self.cycles < tick {
+            self.pending_sleep = Some(tick);
+        }
+        // A title slower than the panel is not dragged backwards.
+        self.last_present_cycles = self.cycles.max(tick);
+    }
+
+    /// Present `buffer` now, or once the surfaces its frame drew into have come back from
+    /// the device. Frames present in the order they were submitted.
+    pub(crate) fn present_when_landed(
+        &mut self,
+        buffer: crate::gpu::DisplayBuffer,
+    ) -> crate::Result<()> {
+        use crate::gpu::renderer::Submit;
+        self.complete_pending_present();
+        // A layer over one the device showed needs that one's pixels: bring its frame back first.
+        for (pid, shown) in self.machine.nv.gpu.take_device_shown_below(self.pid) {
+            let Some(mem) = self.machine.processes.get(&pid).map(|p| p.mem.clone()) else {
+                continue;
+            };
+            match self.machine.nv.gpu.submit_frame(pid, &mem, &shown)? {
+                Submit::Done => self.machine.nv.gpu.present(pid, &mem, &shown)?,
+                Submit::Queued(generation) => {
+                    self.pending_present.push_back((pid, shown, generation));
+                }
+                Submit::Full => {}
+            }
+        }
+        if self.pending_present.is_empty()
+            && self
+                .machine
+                .nv
+                .gpu
+                .present_on_device(self.pid, &self.mem, &buffer)?
+        {
+            if crate::trace::enabled(crate::trace::Trace::Nv) {
+                crate::traceln!("[vi] presented frame {} on the device", self.nv.gpu.frames);
+            }
+            return Ok(());
+        }
+        match self
+            .machine
+            .nv
+            .gpu
+            .submit_frame(self.pid, &self.mem, &buffer)?
+        {
+            Submit::Done => {
+                self.machine.nv.gpu.present(self.pid, &self.mem, &buffer)?;
+                if crate::trace::enabled(crate::trace::Trace::Nv) {
+                    crate::traceln!("[vi] presented frame {}", self.nv.gpu.frames);
+                }
+            }
+            Submit::Queued(generation) => {
+                let pid = self.pid;
+                self.pending_present.push_back((pid, buffer, generation));
+            }
+            Submit::Full => {}
+        }
+        Ok(())
+    }
+
+    /// Present the queued frames whose surfaces have come back, oldest first.
+    pub(crate) fn complete_pending_present(&mut self) {
+        while let Some(&(pid, buffer, generation)) = self.pending_present.front() {
+            let Some(mem) = self.machine.processes.get(&pid).map(|p| p.mem.clone()) else {
+                self.pending_present.pop_front();
+                continue;
+            };
+            match self.machine.nv.gpu.frames_landed(pid, &mem) {
+                Ok(landed) if landed >= generation => {
+                    self.pending_present.pop_front();
+                    // The guest freed the buffer while its frame was in flight.
+                    if self.machine.nv.gpu.nvmap.by_id(buffer.nvmap_id).is_none() {
+                        continue;
+                    }
+                    if let Err(e) = self.machine.nv.gpu.present(pid, &mem, &buffer) {
+                        self.log(
+                            Level::Error,
+                            &format!("[vi] the deferred present failed: {e}"),
+                        );
+                    }
+                }
+                Ok(_) => return,
+                Err(e) => {
+                    // Drop the frame rather than stall the display.
+                    self.pending_present.pop_front();
+                    self.log(
+                        Level::Error,
+                        &format!("[vi] the deferred readback failed: {e}"),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Leave the request in the caller's buffer, unanswered, and have the call run again after
+    /// `wait_ns` of guest time: how a blocking service call waits for the host. The handler must
+    /// decide before it writes a reply, which would overwrite the request, and must give the
+    /// same answer on the second run as the first would have once the host has answered.
+    pub(crate) fn retry_after(&mut self, wait_ns: i64) {
+        self.pending_retry = self.wait_deadline(wait_ns.max(1));
+    }
+
+    pub(crate) fn sleep_until(&mut self, deadline: u64) {
+        self.ensure_main_thread();
+        self.machine.process_mut(self.pid).threads[self.current_thread].state =
+            ThreadState::Sleeping { deadline };
+        self.reschedule();
+    }
+
+    /// Off answers a blocking vsync wait at once instead of parking until the tick.
+    pub fn set_vsync_throttle(&mut self, on: bool) {
+        self.vsync_throttle = on;
+    }
+
+    /// The next display refresh, a deadline that always arrives.
+    pub(crate) fn next_display_tick(&self) -> u64 {
+        self.last_vsync_cycles.wrapping_add(VSYNC_PERIOD_CYCLES)
+    }
+
+    /// Park on awaited events until one fires or `deadline` passes; the `svc` is reissued.
+    pub(crate) fn park_on_events(&mut self, deadline: u64) {
+        self.ensure_main_thread();
+        self.machine.process_mut(self.pid).threads[self.current_thread].state =
+            ThreadState::WaitEvent { deadline };
+        self.reschedule();
+    }
+
+    /// Tie the clock to real time for a host that has it: `elapsed` cycles have passed since
+    /// the last call. A clock behind jumps forward, so a title that cannot keep up misses
+    /// frames rather than slowing down; a clock ahead is what this returns, for the host to
+    /// wait out, and idling past real time ends [`Cpu::run`] early. A host that never calls
+    /// this gets the instruction-counted clock, which replays exactly.
+    pub fn pace_to_real_time(&mut self, elapsed: u64) -> u64 {
+        let mut real = self.real_cycles.unwrap_or(self.cycles) + elapsed;
+        if self.cycles < real {
+            self.pace_jumps += 1;
+            self.pace_skipped += real - self.cycles;
+            self.cycles = real;
+            self.publish_clock();
+        }
+        // A long timeout may be the only thing left to idle to; no host waits for that.
+        real = real.max(self.cycles.saturating_sub(MAX_AHEAD_CYCLES));
+        self.real_cycles = Some(real);
+        self.cycles - real
+    }
+
+    /// How [`Cpu::pace_to_real_time`] has had to move the clock so far.
+    pub fn pacing(&self) -> Pacing {
+        Pacing {
+            clock_hz: crate::services::power::CLOCK_RATES_HZ[0],
+            jumps: self.pace_jumps,
+            skipped_cycles: self.pace_skipped,
+            ahead_cycles: self
+                .real_cycles
+                .map_or(0, |real| self.cycles.saturating_sub(real)),
+        }
+    }
+
+    /// Switch away after blocking. If nothing can run, idle or wake everything.
+    pub(crate) fn reschedule(&mut self) {
+        if self.switch_to_next_runnable() {
+            return;
+        }
+        // Take back what came home, which may be ready here, and lend what core 0 may not run.
+        if !self.machine.cores.is_empty() {
+            self.service_cores();
+            if self.settled() {
+                return;
+            }
+        }
+        // Only core 0 serves the other cores, so a clock ahead of real time, which the host
+        // waits out, must not leave them unserved: wait here for what they do first.
+        let hold = self.cores_busy()
+            && self.real_cycles.is_some_and(|real| {
+                self.earliest_deadline()
+                    .is_some_and(|deadline| deadline > real)
+            });
+        if !hold && self.idle_to_earliest_deadline() {
+            return;
+        }
+        // A thread out on another core may yet wake one here.
+        while self.cores_busy() {
+            self.wait_for_cores();
+            // Time passes while core 0 waits, which a thread polling the tick may need.
+            self.cycles += IDLE_WAIT_CYCLES;
+            self.publish_clock();
+            self.expire_timed_waits();
+            if self.settled() {
+                return;
+            }
+        }
+        if hold && self.idle_to_earliest_deadline() {
+            return;
+        }
+        // No deadline either: wake everything rather than hang.
+        for pid in self.pids() {
+            self.in_process(pid, Cpu::wake_all_waiters);
+        }
+        self.switch_to_next_runnable();
+    }
+
+    /// Idle the clock to the earliest deadline of any kind, as the console idles. Whether
+    /// that let something run.
+    fn idle_to_earliest_deadline(&mut self) -> bool {
+        let Some(deadline) = self.earliest_deadline() else {
+            return false;
+        };
+        if deadline > self.cycles {
+            self.cycles = deadline;
+            self.publish_clock();
+            // Whoever runs next does so once real time has come this far.
+            if self.real_cycles.is_some_and(|real| deadline > real) {
+                self.handback = Some(Handback::Paced);
+            }
+        }
+        self.expire_timed_waits();
+        if !self.machine.cores.is_empty() {
+            self.service_cores();
+        }
+        self.settled()
+    }
+
+    pub(crate) fn wake_all_waiters(&mut self) {
+        for index in 0..self.process().threads.len() {
+            match self.process().threads[index].state {
+                ThreadState::WaitKey { mutex, .. } | ThreadState::WaitMutex(mutex) => {
+                    self.wake_condvar_waiter(index, mutex)
+                }
+                ThreadState::WaitAddress { .. } | ThreadState::WaitEvent { .. } => {
+                    self.process_mut().threads[index].state = ThreadState::Runnable;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Switched to another thread, or the running one may go on after all.
+    fn settled(&mut self) -> bool {
+        self.switch_to_next_runnable()
+            || self
+                .process()
+                .threads
+                .get(self.current_thread)
+                .is_some_and(|t| t.ready())
+    }
+
+    /// Account one retired instruction: a cycle and a step. Both engines call this.
+    #[inline(always)]
+    pub(crate) fn retire(&mut self) {
+        self.cycles += 1;
+        self.steps += 1;
+    }
+
+    /// Record a run of `count` instructions from `start` in the fault trail.
+    #[inline(always)]
+    pub(crate) fn record_run(&mut self, start: u32, count: u32) {
+        // A single step that continues the last run extends it.
+        if count == 1 && self.recent_len != 0 {
+            let index = (self.recent_len - 1) & (RECENT_LEN - 1);
+            let (last_start, last_count) = self.recent[index];
+            if last_count < RECENT_LEN as u32 && last_start.wrapping_add(last_count * 4) == start {
+                self.recent[index].1 = last_count + 1;
+                return;
+            }
+        }
+        self.push_run(start, count);
+    }
+
+    /// [`Cpu::record_run`] without the single-step merge, which only pays off
+    /// for the interpreter's steps.
+    #[inline(always)]
+    pub(crate) fn push_run(&mut self, start: u32, count: u32) {
+        self.recent[self.recent_len % RECENT_LEN] = (start, count);
+        self.recent_len = self.recent_len.wrapping_add(1);
+    }
+
+    /// Switch to the thread [`Cpu::pick_next`] chooses. Returns false if there
+    /// is none (in which case the running thread keeps going).
+    pub(crate) fn switch_to_next_runnable(&mut self) -> bool {
+        let Some((pid, candidate)) = self.pick_next() else {
+            return false;
+        };
+        self.ensure_main_thread();
+        let start = self.current_thread;
+        self.pass_over_all_but((pid, candidate));
+        self.account_slice(start);
+        self.save_context(start);
+        self.enter_process(pid);
+        self.process_mut().threads[candidate].switches += 1;
+        self.load_context(candidate);
+        true
+    }
+
+    fn save_context(&mut self, index: usize) {
+        let mut thread = self.process().threads[index].clone();
+        self.registers_into(&mut thread);
+        self.machine.process_mut(self.pid).threads[index] = thread;
+    }
+
+    fn load_context(&mut self, index: usize) {
+        let thread = self.process().threads[index].clone();
+        self.load_registers(&thread);
+        self.current_thread = index;
+    }
+
+    /// The running thread's registers, PC and modes into `thread`.
+    pub(crate) fn registers_into(&self, thread: &mut ThreadContext) {
+        thread.regs = self.regs;
+        thread.pc = self.pc;
+        thread.nzcv = self.nzcv;
+        thread.mode = self.mode;
+        thread.thumb = self.thumb;
+        thread.it_state = self.it_state;
+        thread.cpsr_q = self.cpsr_q;
+        thread.cpsr_ge = self.cpsr_ge;
+        thread.fpscr_nzcv = self.fpscr_nzcv;
+        thread.vregs = self.vregs;
+        thread.fpcr = self.fpcr;
+        thread.fpsr = self.fpsr;
+        thread.tpidr = self.tpidr;
+        thread.tpidr_rw = self.tpidr_rw;
+    }
+
+    /// Start running `thread`'s registers on a fresh slice.
+    pub(crate) fn load_registers(&mut self, thread: &ThreadContext) {
+        self.slice_used = 0;
+        // A switch clears the local monitor.
+        self.exclusive.clear();
+        self.regs = thread.regs;
+        self.pc = thread.pc;
+        self.nzcv = thread.nzcv;
+        self.mode = thread.mode;
+        self.thumb = thread.thumb;
+        self.it_state = thread.it_state;
+        self.cpsr_q = thread.cpsr_q;
+        self.cpsr_ge = thread.cpsr_ge;
+        self.fpscr_nzcv = thread.fpscr_nzcv;
+        self.vregs = thread.vregs;
+        self.fpcr = thread.fpcr;
+        self.fpsr = thread.fpsr;
+        self.tpidr = thread.tpidr;
+        self.tpidr_rw = thread.tpidr_rw;
+    }
+
+    pub fn current_thread_handle(&self) -> u64 {
+        self.process()
+            .threads
+            .get(self.current_thread)
+            .map_or(MAIN_THREAD_HANDLE, |t| t.handle)
+    }
+
+    /// Threads created, including the main thread.
+    pub fn thread_count(&self) -> usize {
+        self.process().threads.len().max(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cpu::{
+        Cpu, CURRENT_THREAD_PSEUDO_HANDLE, DEFAULT_THREAD_PRIORITY, MAIN_THREAD_HANDLE,
+    };
+
+    #[test]
+    fn real_time_pulls_a_clock_behind_forward_and_reports_one_ahead() {
+        let mut cpu = Cpu::new();
+        cpu.cycles = 1_000;
+        assert_eq!(
+            cpu.pace_to_real_time(500),
+            0,
+            "behind is nothing to wait for"
+        );
+        assert_eq!(cpu.cycles, 1_500, "the clock caught up");
+        cpu.cycles += 700;
+        assert_eq!(cpu.pace_to_real_time(200), 500, "ahead by what ran past it");
+        assert_eq!(cpu.cycles, 2_200, "a clock never runs backwards");
+    }
+
+    #[test]
+    fn pacing_counts_the_jumps_and_what_they_skipped() {
+        let mut cpu = Cpu::new();
+        cpu.cycles = 1_000;
+        cpu.pace_to_real_time(0);
+        cpu.pace_to_real_time(300);
+        cpu.cycles += 100;
+        cpu.pace_to_real_time(250);
+        cpu.cycles += 400;
+        cpu.pace_to_real_time(100);
+        let pacing = cpu.pacing();
+        assert_eq!((pacing.jumps, pacing.skipped_cycles), (2, 450));
+        assert_eq!(pacing.ahead_cycles, 300, "what ran past real time");
+    }
+
+    #[test]
+    fn a_long_idle_costs_a_paced_host_a_short_wait() {
+        let mut cpu = Cpu::new();
+        cpu.bootstrap();
+        cpu.pace_to_real_time(0);
+        cpu.sleep_until(cpu.cycles + 4_000 * 1_020_000_000);
+        assert_eq!(cpu.pace_to_real_time(0), super::MAX_AHEAD_CYCLES);
+    }
+
+    #[test]
+    fn idling_past_real_time_ends_the_slice_only_when_a_host_paces_the_clock() {
+        let mut unpaced = Cpu::new();
+        unpaced.bootstrap();
+        unpaced.sleep_until(unpaced.cycles + 1_000_000);
+        assert!(unpaced.handback.is_none(), "a replay runs straight on");
+
+        let mut paced = Cpu::new();
+        paced.bootstrap();
+        paced.pace_to_real_time(0);
+        paced.sleep_until(paced.cycles + 1_000_000);
+        assert!(matches!(
+            paced.handback,
+            Some(crate::kernel::cores::Handback::Paced)
+        ));
+    }
+
+    #[test]
+    fn the_idle_moves_the_clock_and_leaves_the_step_count_alone() {
+        // Idling advances the clock but not the instruction count.
+        let mut cpu = Cpu::new();
+        cpu.bootstrap();
+        let (clock, steps) = (cpu.cycles, cpu.steps);
+
+        cpu.sleep_until(clock + 1_000_000);
+
+        assert_eq!(
+            cpu.cycles,
+            clock + 1_000_000,
+            "the clock idled to the deadline"
+        );
+        assert_eq!(cpu.steps, steps, "the idle executed nothing");
+    }
+
+    /// Run `rounds` yielding decisions and count how often each thread got the CPU.
+    fn shares(cpu: &mut Cpu, rounds: usize) -> Vec<usize> {
+        let mut held = vec![0; cpu.process().threads.len()];
+        for _ in 0..rounds {
+            cpu.yield_thread();
+            held[cpu.current_thread] += 1;
+        }
+        held
+    }
+
+    /// The most urgent thread gets most of the CPU; others still run within `STARVE_DECISIONS`.
+    #[test]
+    fn the_most_urgent_thread_runs_most_and_starves_nobody() {
+        let mut cpu = Cpu::new();
+        let urgent = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, 30, 0);
+        let idle = cpu.create_thread(0x0800_0000, 0, 0x1100_0000, 50, 0);
+        assert!(cpu.start_thread(urgent) && cpu.start_thread(idle));
+
+        let held = shares(&mut cpu, 900);
+        assert!(
+            held[1] > held[0] * 4,
+            "the urgent thread dominates: {held:?}"
+        );
+        assert!(
+            held[1] > held[2] * 4,
+            "the urgent thread dominates: {held:?}"
+        );
+        assert!(held[0] > 0 && held[2] > 0, "nobody is starved: {held:?}");
+    }
+
+    /// Equal priorities take turns.
+    #[test]
+    fn threads_of_one_priority_take_turns() {
+        let mut cpu = Cpu::new();
+        let a = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, DEFAULT_THREAD_PRIORITY, 0);
+        let b = cpu.create_thread(0x0800_0000, 0, 0x1100_0000, DEFAULT_THREAD_PRIORITY, 0);
+        assert!(cpu.start_thread(a) && cpu.start_thread(b));
+        assert_eq!(shares(&mut cpu, 300), vec![100, 100, 100]);
+    }
+
+    /// `svcSetThreadPriority` through the pseudo handle affects the next decision.
+    #[test]
+    fn a_priority_set_through_the_pseudo_handle_is_the_one_scheduled_on() {
+        let mut cpu = Cpu::new();
+        let worker = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, DEFAULT_THREAD_PRIORITY, 0);
+        assert!(cpu.start_thread(worker));
+        assert_eq!(cpu.thread_priority(CURRENT_THREAD_PSEUDO_HANDLE), Some(44));
+        assert_eq!(cpu.thread_priority(worker), Some(44));
+        assert_eq!(cpu.thread_priority(0xdead), None, "not a thread");
+
+        assert!(cpu.set_thread_priority(CURRENT_THREAD_PSEUDO_HANDLE, 10));
+        assert_eq!(cpu.thread_priority(MAIN_THREAD_HANDLE), Some(10));
+        cpu.yield_thread();
+        assert_eq!(
+            cpu.current_thread, 0,
+            "the more urgent main thread keeps running"
+        );
+
+        cpu.set_main_thread_priority(20);
+        assert_eq!(cpu.thread_priority(MAIN_THREAD_HANDLE), Some(20));
+    }
+}

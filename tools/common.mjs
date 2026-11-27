@@ -26,11 +26,32 @@ export function commandLine() {
   };
 }
 
+/**
+ * The environment a tool's browser runs in. An overlay's Vulkan layer loaded into the GPU process
+ * (MangoHud with `MANGOHUD=1` in the session) slows what is measured, so it is turned off.
+ */
+const BROWSER_ENV = { ...process.env, MANGOHUD: '0', DISABLE_MANGOHUD: '1' };
+
+/** Playwright's Firefox with WebGPU on in pages and workers, past the adapter blocklist. */
+export async function launchFirefox() {
+  const { firefox } = await import('playwright');
+  return firefox.launch({
+    headless: false,
+    env: BROWSER_ENV,
+    firefoxUserPrefs: {
+      'dom.webgpu.enabled': true,
+      'dom.webgpu.workers.enabled': true,
+      'gfx.webgpu.ignore-blocklist': true,
+    },
+  });
+}
+
 // Imported here so that tools with no browser do not need Playwright.
-export async function launchChromium({ headed = true, webGpu = true, args = [] } = {}) {
+export async function launchChromium({ webGpu = true, args = [], headless = false } = {}) {
   const { chromium } = await import('playwright');
   return chromium.launch({
-    headless: !headed,
+    headless,
+    env: BROWSER_ENV,
     args: [...(webGpu ? ['--enable-unsafe-webgpu'] : []), ...args],
   });
 }

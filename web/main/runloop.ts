@@ -8,15 +8,14 @@ import { traceEnabled } from './debug';
 import { countEmulation, noteFrame } from './display';
 import { recordRunSlice } from './display-metrics';
 import { $ } from './dom';
-import { fmtCount } from '../shared/format';
-import { formatBytes } from './format';
+import { formatBytes } from '../shared/format';
 import { icon } from './icons';
 import { dropErrors, offerErrors } from './errors';
 import { dropKeyboard, offerKeyboard } from './keyboard';
 import { endLoad } from './loading';
 import { log } from './log';
 import { noteRam } from './memory';
-import { call, onLoopEvents } from './rpc';
+import { call, onWorker } from './rpc';
 import { pullProfileEdits, reloadProfiles } from './users';
 import { loaded, setState } from './shell';
 import { holdWakeLock, releaseWakeLock } from './wakelock';
@@ -47,7 +46,6 @@ export async function run(): Promise<void> {
   if (nothingLoaded()) return;
   running = true;
   aborted = false;
-  countedAt = 0;
   setRunButton(true);
   setState('running');
   holdWakeLock();
@@ -60,13 +58,11 @@ function loopEnded(): void {
   releaseWakeLock();
 }
 
-onLoopEvents({
-  slice: (report) => void onSlice(report),
-  failed: (error) => void onFailed(error),
-  keyboard: offerKeyboard,
-  errorDialog: (dialog) => offerErrors([dialog]),
-  profilesEdited: () => void reloadProfiles(),
-});
+onWorker('slice', ({ report }) => void onSlice(report));
+onWorker('loop_failed', ({ error }) => void onFailed(error));
+onWorker('keyboard', offerKeyboard);
+onWorker('error_dialog', (dialog) => offerErrors([dialog]));
+onWorker('profiles_edited', () => void reloadProfiles());
 
 async function onSlice(report: SliceReport): Promise<void> {
   countEmulation(report.ms);
@@ -145,7 +141,6 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
   if (steps < 0) {
     const err = await call('lastError');
     setState('fault');
-    log('Fault: ' + err, 'error');
     showGuestCrash(err || 'The guest returned a fault without a message.');
   } else if (await call('halted')) {
     const [fatal, next] = await Promise.all([call('guestFatal'), call('nextLoad')]);
@@ -154,7 +149,6 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
       showGuestCrash(fatal);
     } else {
       setState('halted');
-      log('Halted (ExitProcess)', 'info');
       if (next) launchNext(next);
     }
   } else if (!stepped) {
@@ -165,26 +159,14 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
   await Promise.all([call('flushStorage'), pullProfileEdits(), updateReadouts()]);
 }
 
-let countedInstructions = 0;
-let countedAt = 0;
-
 export async function updateReadouts(): Promise<void> {
   const [steps, ram] = await Promise.all([call('getSteps'), call('ram')]);
   showReadouts(steps, ram);
 }
 
-// Instructions retired, not the clock, which jumps while threads idle.
+// The CPU tab shows the rate; the total stays on `<body data-instructions>` for the tools.
 function showReadouts(instructions: number, ram: Housekeeping['ram']): void {
-  const at = performance.now();
-  // Only while running; a count that went backwards is a new session.
-  const seconds = (at - countedAt) / 1000;
-  const ran = instructions - countedInstructions;
-  const rate = running && countedAt && seconds > 0 && ran >= 0
-    ? ` (${fmtCount(ran / seconds)}/s)`
-    : '';
-  $('instructions').textContent = fmtCount(instructions) + rate;
-  countedInstructions = instructions;
-  countedAt = at;
+  document.body.dataset.instructions = String(instructions);
   showRam(ram);
 }
 

@@ -38,9 +38,14 @@ if (samples.length) {
 }
 
 heading('Faults');
-const faults = unique(lines.filter((line) =>
-  /svcBreak|Halted|did not start|device was lost|the page crashed|\[fatal\]|terminate result/.test(line))
-  .map((line) => line.slice(0, 160)));
+// A guest fault is a block whose next two lines are its reason and where it stopped.
+const faultBlocks = lines.flatMap((line, i) =>
+  /=== FAULT ===/.test(line) ? lines.slice(i + 1, i + 3) : []);
+const faults = unique([
+  ...faultBlocks,
+  ...lines.filter((line) =>
+    /svcBreak|Halted|did not start|device was lost|the page crashed|\[fatal\]|terminate result/.test(line)),
+].map((line) => line.slice(0, 160)));
 console.log(faults.length ? faults.slice(0, LIST_ROWS).join('\n') : 'none');
 
 heading('Refused commands');

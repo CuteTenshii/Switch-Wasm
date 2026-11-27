@@ -1,12 +1,15 @@
-// The NAND in IndexedDB: NCA content as Blobs by file name, and an index of titles by id.
+// The NAND: NCA content by file name (OPFS, or IndexedDB without it) and an index of titles by id.
 
-import type { NandEntry } from '../shared/db';
+import { NAND_KIND, type NandEntry } from '../shared/protocol';
 import { $, el } from './dom';
-import { beginLoad } from './loading';
+import { gatherNcas, type FirmwareFound } from './firmware';
+import { hasProdKeys, onKeysChanged } from './keys';
 import { log } from './log';
-import { call, onNandProgress } from './rpc';
+import { nandBusy, nandOperation, onNandBusy } from './nandbusy';
+import { call, onWorker } from './rpc';
 import { setNote } from './shell';
-import { doLaunchNca } from './container';
+import { launchProgram } from './container';
+import { zipExtract, zipMembers, type ZipMember } from './unzip';
 
 // Shared data archives (applet assets, Mii and amiibo models) registered by title id.
 let archiveCount = 0;
@@ -49,14 +52,14 @@ let registering = false;
 
 let restoreProgress: { done: number; total: number } | null = null;
 
-onNandProgress((done, total) => {
+onWorker('nand_progress', ({ done, total }) => {
   restoreProgress = { done, total };
   updateFirmwareState();
 });
 
 // Resolves to the number of archives registered.
 function beginArchiveRestore(): Promise<number> {
-  const run = restoring.catch(() => {}).then(async () => {
+  const run = restoring.catch(() => {}).then(() => nandOperation('Registering system data archives and applets', async () => {
     registering = true;
     restoreProgress = null;
     updateFirmwareState();
@@ -67,7 +70,7 @@ function beginArchiveRestore(): Promise<number> {
       registering = false;
       updateFirmwareState();
     }
-  });
+  }));
   restoring = run.catch(() => null);
   return run;
 }
@@ -85,12 +88,14 @@ export async function initNand(): Promise<void> {
   }
   renderNandTitles();
   updateFirmwareState();
-  void beginArchiveRestore().then((registered) => {
-    if (registered) log('NAND: ' + registered + ' system data archive(s) restored.', 'info');
-  }, (err) => {
+  // The core logs how many archives it restored.
+  void beginArchiveRestore().catch((err) => {
     log('NAND: the archives could not be registered (' + (err as Error).message + ')', 'error');
   });
 }
+
+// Launching waits for NAND operations, so the rows say so while one runs.
+onNandBusy(() => renderNandTitles());
 
 export function titleLabel(id: string): string {
   return SYSTEM_TITLES[id] || id;
@@ -100,12 +105,12 @@ export function titleLabel(id: string): string {
 function renderNandTitles(): void {
   const host = $('nand-titles');
   host.textContent = '';
-  const programs = nandTitles.filter(([id, entry]) => entry.kind === 0 && STANDALONE_TITLES.has(id));
+  const programs = nandTitles.filter(([id, entry]) => entry.kind === NAND_KIND.program && STANDALONE_TITLES.has(id));
   programs.sort((a, b) => titleLabel(a[0]).localeCompare(titleLabel(b[0])));
   $('nand-tools').hidden = nandTitles.length === 0;
   if (!programs.length) {
     host.appendChild(el('p', 'muted tiny empty-note',
-      'Nothing installed - point "Install firmware" at a dump to put the system applets here.'));
+      'Nothing installed. Install a firmware dump from a folder or a .zip to put the system applets here.'));
     return;
   }
   for (const [id, entry] of programs) host.appendChild(nandRow(id, entry));
@@ -120,23 +125,23 @@ function nandRow(id: string, entry: NandEntry): HTMLButtonElement {
   main.appendChild(el('span', 'row-sub', id));
   row.appendChild(main);
   row.appendChild(el('span', 'row-action', '\u25B6 Launch'));
+  row.disabled = nandBusy() !== null;
   row.addEventListener('click', () => launchInstalled(id, entry));
   return row;
 }
 
 function launchInstalled(id: string, entry: NandEntry): Promise<void> {
-  const name = titleLabel(id);
-  beginLoad(name, 'reading ' + entry.name + ' from the NAND');
-  return doLaunchNca(name, () => call('nandLaunch', entry.name));
+  return launchProgram(titleLabel(id), () => call('nandLaunch', entry.name),
+    { phase: 'Reading ' + entry.name + ' from the NAND' });
 }
 
 // Content and index entry go together; a registered archive stays until the session is replaced.
 export async function removeNandTitle(id: string): Promise<void> {
-  await call('nandRemove', id);
+  await nandOperation('Removing a title', () => call('nandRemove', id));
   nandTitles = nandTitles.filter(([titleId]) => titleId !== id);
   renderNandTitles();
   updateFirmwareState();
-  document.dispatchEvent(new Event('nand-changed'));
+  nandChanged();
 }
 
 function updateFirmwareState(): void {
@@ -158,34 +163,90 @@ function updateFirmwareState(): void {
     nandTitles.length > 0);
 }
 
-$('firmware-ncas').addEventListener('change', async (e) => {
-  const input = e.target as HTMLInputElement;
-  const picked = Array.from(input.files || []);
-  input.value = '';
-  if (!picked.length) return;
-  const files = picked.filter((f) => /\.nca$/i.test(f.name));
-  if (picked.length !== files.length) {
-    log('Ignoring ' + (picked.length - files.length) + ' file(s) that are not .nca.');
+const installListeners: ((text: string, error: boolean) => void)[] = [];
+const changeListeners: (() => void)[] = [];
+
+// The Files tab shows an install's progress and outcome too, since it offers the same buttons.
+export function onInstallStatus(handler: (text: string, error: boolean) => void): void {
+  installListeners.push(handler);
+}
+
+/** Call `handler` whenever titles are installed, removed or erased. */
+export function onNandChanged(handler: () => void): void {
+  changeListeners.push(handler);
+}
+
+function nandChanged(): void {
+  for (const handler of changeListeners) handler();
+}
+
+function installStatus(text: string, error = false): void {
+  const status = $('firmware-status');
+  status.textContent = text;
+  status.classList.toggle('is-error', error);
+  for (const handler of installListeners) handler(text, error);
+}
+
+// Plain `x.nca` files, and the `x.nca/00`, `x.nca/01`… pieces the console's own Contents folder splits them into.
+
+function installFirmware(
+  source: string,
+  found: FirmwareFound,
+): Promise<void> {
+  if (refuseInstallWithoutKeys()) return Promise.resolve();
+  return nandOperation('Installing firmware', () => installFirmwareNcas(source, found));
+}
+
+// Each NCA is identified from its encrypted header before it is stored, which needs prod.keys.
+const NEEDS_KEYS = 'Load prod.keys in the NAND tab to install firmware: each NCA is identified'
+  + ' from its encrypted header before it is stored.';
+
+function refuseInstallWithoutKeys(): boolean {
+  if (hasProdKeys()) return false;
+  installStatus(NEEDS_KEYS, true);
+  return true;
+}
+
+// The install buttons are labels for the two inputs; a disabled input opens no picker.
+function updateInstallButtons(): void {
+  const ready = hasProdKeys();
+  for (const id of ['firmware-dir', 'firmware-zip']) {
+    $<HTMLInputElement>(id).disabled = !ready;
+    for (const label of document.querySelectorAll<HTMLLabelElement>('label[for="' + id + '"]')) {
+      label.setAttribute('aria-disabled', String(!ready));
+      label.title = ready ? '' : NEEDS_KEYS;
+    }
   }
-  if (!files.length) {
-    log('Nothing in that selection is an .nca.', 'error');
+  const status = $('firmware-status');
+  if (!ready && !status.textContent) installStatus(NEEDS_KEYS);
+  else if (ready && status.textContent === NEEDS_KEYS) installStatus('');
+}
+
+onKeysChanged(updateInstallButtons);
+updateInstallButtons();
+
+async function installFirmwareNcas(
+  source: string,
+  { ncas, ignored, failures }: FirmwareFound,
+): Promise<void> {
+  if (!ncas.length && !failures.length) {
+    installStatus('Nothing in ' + source + ' is an NCA.', true);
     return;
   }
-  log('Reading ' + files.length + ' firmware file(s) ...');
   let installed = 0;
-  const stateEl = $('firmware-state');
-  for (const [index, f] of files.entries()) {
-    stateEl.textContent = 'Reading ' + (index + 1) + ' of ' + files.length + ': ' + f.name;
-    setNote('nand-badge', (index + 1) + '/' + files.length, false);
+  for (const [index, nca] of ncas.entries()) {
+    installStatus('Reading ' + (index + 1) + ' of ' + ncas.length + ' from ' + source + ' (' + nca.name + ')');
+    setNote('nand-badge', (index + 1) + '/' + ncas.length, false);
     try {
-      // Identify from the header without reading the file.
-      const what = await call('nandIdentify', f);
-      if (!what || what.kind === 2) continue;
-      // Store the File itself so the browser owns the bytes.
-      await call('nandInstall', f, what.id, what.kind);
+      const blob = await nca.open();
+      // Identify from the header without reading the rest.
+      const what = await call('nandIdentify', blob);
+      if (what.kind === NAND_KIND.other) continue;
+      // Store the Blob itself so the browser owns the bytes.
+      await call('nandInstall', blob, nca.name, what.id, what.kind);
       installed++;
     } catch (err) {
-      log('Could not read ' + f.name + ': ' + (err as Error).message, 'error');
+      failures.push(nca.name + ' (' + (err as Error).message + ')');
     }
   }
   try {
@@ -195,16 +256,56 @@ $('firmware-ncas').addEventListener('change', async (e) => {
   // Registered from the NAND so an archive counts once across repeated installs.
   const registered = await beginArchiveRestore();
   updateFirmwareState();
-  log('Installed ' + installed + ' title(s) of ' + files.length + ' file(s); '
-    + registered + ' registered as system data archives.',
-  installed ? 'info' : 'log');
-  document.dispatchEvent(new Event('nand-changed'));
+  let outcome = 'Installed ' + installed + ' title(s) from ' + source + '; '
+    + registered + ' system data archive(s) registered.';
+  if (ignored) outcome += ' Skipped ' + ignored + ' file(s) that are not NCAs.';
+  if (failures.length) outcome += ' ' + failures.length + ' could not be installed: ' + failures.join(', ') + '.';
+  installStatus(outcome, failures.length > 0);
+  nandChanged();
+}
+
+function takeFiles(e: Event): File[] {
+  const input = e.target as HTMLInputElement;
+  const picked = Array.from(input.files || []);
+  input.value = '';
+  return picked;
+}
+
+$('firmware-dir').addEventListener('change', (e) => {
+  const files = takeFiles(e);
+  if (!files.length) return;
+  const folder = files[0].webkitRelativePath.split('/')[0] || 'the folder';
+  void installFirmware(folder, gatherNcas(
+    files.map((file) => ({ path: file.webkitRelativePath || file.name, item: file })),
+    (pieces) => Promise.resolve(pieces.length === 1 ? pieces[0] : new Blob(pieces)),
+    true,
+  ));
+});
+
+$('firmware-zip').addEventListener('change', async (e) => {
+  const [zip] = takeFiles(e);
+  if (!zip || refuseInstallWithoutKeys()) return;
+  let members: ZipMember[];
+  try {
+    members = await zipMembers(zip);
+  } catch (err) {
+    installStatus(zip.name + ' could not be read (' + (err as Error).message + ').', true);
+    return;
+  }
+  await installFirmware(zip.name, gatherNcas(
+    members.filter((member) => !member.path.endsWith('/')).map((member) => ({ path: member.path, item: member })),
+    async (pieces) => {
+      const blobs: Blob[] = [];
+      for (const piece of pieces) blobs.push(await zipExtract(zip, piece));
+      return blobs.length === 1 ? blobs[0] : new Blob(blobs);
+    },
+  ));
 });
 
 $('btn-erase-nand').addEventListener('click', async () => {
 // Already registered content stays registered until the session is replaced.
   try {
-    await call('nandErase');
+    await nandOperation('Erasing the NAND', () => call('nandErase'));
   } catch (err) {
     log('NAND: could not be erased (' + (err as Error).message + ')', 'error');
     return;
@@ -213,5 +314,5 @@ $('btn-erase-nand').addEventListener('click', async () => {
   renderNandTitles();
   updateFirmwareState();
   log('NAND erased.', 'info');
-  document.dispatchEvent(new Event('nand-changed'));
+  nandChanged();
 });

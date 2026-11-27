@@ -1,27 +1,12 @@
 // A store-only zip writer for exporting folders; no compression, no zip64.
 
+import { crc32 } from '../shared/crc32';
 import type { Bytes } from '../shared/protocol';
 
 export interface ZipEntry {
   // Relative, `/`-separated; a directory ends with `/`.
   name: string;
   data: Bytes;
-}
-
-const CRC_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
-    table[n] = c >>> 0;
-  }
-  return table;
-})();
-
-function crc32(data: Bytes): number {
-  let c = 0xFFFFFFFF;
-  for (const byte of data) c = CRC_TABLE[(c ^ byte) & 0xFF] ^ (c >>> 8);
-  return (c ^ 0xFFFFFFFF) >>> 0;
 }
 
 // Throws past 4 GiB or 65535 entries, which need zip64.

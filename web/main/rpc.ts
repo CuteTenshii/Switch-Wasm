@@ -1,45 +1,40 @@
 // Promise-based RPC to the emulator worker over postMessage.
 
-import type {
-  CallRequest, Commands, ErrorDialog, KeyboardRequest, SliceReport, WorkerMessage,
-} from '../shared/protocol';
-import { setAudioFormat, setAudioRing } from './audio';
+import type { CallRequest, Commands, PageMessage, WorkerMessage } from '../shared/protocol';
+import { spawnWorker } from '../shared/spawn';
+import workerUrl from '../worker/index.ts?worker&url';
 import { log } from './log';
-import { setMailbox } from './mailbox';
 
 let worker: Worker | null = null;
-let ready = false;
-let readyResolve!: () => void;
-const readyPromise = new Promise<void>((r) => {
-  readyResolve = r;
+let startResolve!: () => void;
+let startReject!: (err: Error) => void;
+const started = new Promise<void>((resolve, reject) => {
+  startResolve = resolve;
+  startReject = reject;
 });
+// Never settles when the start fails, so work queued behind it is dropped.
+const readyPromise = started.catch(() => new Promise<void>(() => undefined));
+
+// Why the worker could not start, once it has failed.
+let startFailure: string | null = null;
 
 // Whether the worker has loaded the core, which builds its session.
 let loaded = false;
 
-// The run loop's handlers for what the worker's loop reports; set by `runloop.ts`.
-let loopEvents: {
-  slice: (report: SliceReport) => void;
-  failed: (error: string) => void;
-  keyboard: (request: KeyboardRequest) => void;
-  errorDialog: (dialog: ErrorDialog) => void;
-  profilesEdited: () => void;
-} | null = null;
+/** A message the worker sends unprompted; `rpc.ts` handles replies, readiness and log lines itself. */
+export type WorkerEvent = Exclude<WorkerMessage['type'], 'reply' | 'ready' | 'log'>;
 
-let nandProgress: ((done: number, total: number) => void) | null = null;
+type EventOf<T extends WorkerEvent> = Extract<WorkerMessage, { type: T }>;
 
-let motionChanged: ((device: string | null) => void) | null = null;
+const listeners: { [T in WorkerEvent]?: ((message: EventOf<T>) => void)[] } = {};
 
-export function onMotionChanged(handler: NonNullable<typeof motionChanged>): void {
-  motionChanged = handler;
-}
-
-export function onNandProgress(handler: NonNullable<typeof nandProgress>): void {
-  nandProgress = handler;
-}
-
-export function onLoopEvents(handlers: NonNullable<typeof loopEvents>): void {
-  loopEvents = handlers;
+/**
+ * Call `handler` with every `type` message from the worker. Messages sent once at startup are
+ * seen only by modules imported before `initWorker` runs.
+ */
+export function onWorker<T extends WorkerEvent>(type: T, handler: (message: EventOf<T>) => void): void {
+  const list: ((message: EventOf<T>) => void)[] = listeners[type] ??= [];
+  list.push(handler);
 }
 
 let msgId = 0;
@@ -48,12 +43,13 @@ const pending = new Map<number, {
   reject: (err: Error) => void;
 }>();
 
-export function isReady(): boolean {
-  return ready;
-}
-
 export function whenReady(): Promise<void> {
   return readyPromise;
+}
+
+// Settles once the worker has loaded the core, rejecting with the reason when it could not.
+export function whenStarted(): Promise<void> {
+  return started;
 }
 
 export function hasSession(): boolean {
@@ -66,7 +62,7 @@ export function call<K extends keyof Commands>(
 ): Promise<ReturnType<Commands[K]>> {
   return new Promise<ReturnType<Commands[K]>>((resolve, reject) => {
     if (!worker) {
-      reject(new Error('the emulator worker has not been started'));
+      reject(new Error(startFailure ?? 'the emulator worker has not been started'));
       return;
     }
     const id = ++msgId;
@@ -76,72 +72,51 @@ export function call<K extends keyof Commands>(
   });
 }
 
-// `{ type: 'module' }` must match Vite's `worker.format: 'es'`.
 export function initWorker(): void {
-  worker = new Worker(new URL('../worker/index.ts', import.meta.url), {
-    type: 'module',
-    name: 'Emulator',
+  worker = spawnWorker(workerUrl, 'Emulator', (why) => {
+    if (loaded) log(why, 'error');
+    else failStart(why);
   });
   worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
     const d = e.data;
-    if (!('type' in d)) {
-      const p = pending.get(d.id);
-      if (!p) return;
-      pending.delete(d.id);
-      if (d.ok) p.resolve(d.result);
-      else p.reject(new Error(d.error || 'unknown error'));
-      return;
-    }
     switch (d.type) {
+      case 'reply': {
+        const p = pending.get(d.id);
+        if (!p) break;
+        pending.delete(d.id);
+        if (d.ok) p.resolve(d.result);
+        else p.reject(new Error(d.error || 'unknown error'));
+        break;
+      }
       case 'log':
         log(d.text, d.level);
         break;
-      case 'slice':
-        loopEvents?.slice(d.report);
-        break;
-      case 'loop_failed':
-        loopEvents?.failed(d.error);
-        break;
-      case 'keyboard':
-        loopEvents?.keyboard(d);
-        break;
-      case 'error_dialog':
-        loopEvents?.errorDialog(d);
-        break;
-      case 'profiles_edited':
-        loopEvents?.profilesEdited();
-        break;
-      case 'input_mailbox':
-        setMailbox(d.buffer, d.at);
-        break;
-      case 'motion':
-        motionChanged?.(d.device);
-        break;
-      case 'audio_ring':
-        setAudioRing(d);
-        break;
-      case 'audio_format':
-        setAudioFormat(d.format);
-        break;
-      case 'nand_progress':
-        nandProgress?.(d.done, d.total);
-        break;
       case 'ready':
-        ready = true;
         // A core that failed to load still reports ready, with the error.
-        if (d.error) log('core failed to load: ' + d.error, 'error');
-        else loaded = true;
-        readyResolve();
+        if (d.error) {
+          failStart(`The WebAssembly core did not load (${d.error})`);
+          break;
+        }
+        loaded = true;
+        startResolve();
         break;
+      default:
+        for (const handler of (listeners[d.type] ?? []) as ((message: WorkerMessage) => void)[]) handler(d);
     }
   };
-  worker.onerror = (e) => {
-    readyResolve();
-    log('worker error: ' + e.message, 'error');
-  };
+}
+
+// A worker that never started answers nothing, so its calls fail now rather than hang.
+function failStart(why: string): void {
+  startFailure = why;
+  worker?.terminate();
+  worker = null;
+  for (const p of pending.values()) p.reject(new Error(why));
+  pending.clear();
+  startReject(new Error(why));
 }
 
 // Give the worker the canvas; it paints every frame from then on.
 export function attachScreen(canvas: OffscreenCanvas): void {
-  worker?.postMessage({ type: 'screen', canvas }, [canvas]);
+  worker?.postMessage({ type: 'screen', canvas } satisfies PageMessage, [canvas]);
 }

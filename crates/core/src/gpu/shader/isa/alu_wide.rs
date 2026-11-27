@@ -1,0 +1,1026 @@
+//! ALU ops outside the 0xfff8 group, plus `ffma` and `xmad` forms.
+
+use super::*;
+
+/// The ops whose opcode field is wider or narrower than the 0xfff8 group [`decode_alu`] handles.
+pub(super) fn decode_alu_wide(insn: u64) -> Op {
+    // The half-precision group first.
+    decode_half(insn)
+        .or_else(|| decode_shf(insn))
+        .or_else(|| decode_compare(insn))
+        .or_else(|| decode_bitfield(insn))
+        .or_else(|| decode_predicate(insn))
+        .or_else(|| decode_mufu_lop3(insn))
+        .or_else(|| decode_video(insn))
+        .or_else(|| decode_lop3_wide(insn))
+        .or_else(|| decode_ffma_xmad(insn))
+        .or_else(|| decode_fset(insn))
+        .or_else(|| decode_ipa_texture(insn))
+        .or_else(|| decode_imm32(insn))
+        .unwrap_or(Op::Unimplemented { raw: insn })
+}
+
+/// `shf.l` and `shf.r`.
+#[inline]
+fn decode_shf(insn: u64) -> Option<Op> {
+    let un = Op::Unimplemented { raw: insn };
+    let form = insn >> 48;
+    // shf.l and shf.r share bfi's twelve opcode bits, told apart by bit 51 (Eden's `maxwell.inc`).
+    let left = form & 0xfff8 == 0x5bf8 || form & 0xfef8 == 0x36f8;
+    if left || form & 0xfff8 == 0x5cf8 || form & 0xfef8 == 0x38f8 {
+        let max = match field(insn, 37, 2) {
+            0 => ShfMax::U32,
+            2 => ShfMax::U64,
+            3 => ShfMax::S64,
+            _ => return Some(un),
+        };
+        // Eden leaves `.cc` and the extended modes unimplemented.
+        if field(insn, 47, 1) != 0 || field(insn, 48, 2) != 0 {
+            return Some(un);
+        }
+        // The immediate stops below `MaxShift` at 37; reading on would add that field to the count.
+        let shift = if form >> 12 == 0x5 {
+            Operand::Reg(reg(insn, 20, 8))
+        } else {
+            Operand::Imm(field(insn, 20, 17) as u32)
+        };
+        return Some(Op::Shf {
+            dst: reg(insn, 0, 8),
+            lo: reg(insn, 8, 8),
+            shift,
+            hi: reg(insn, 39, 8),
+            left,
+            wrap: field(insn, 50, 1) != 0,
+            max,
+        });
+    }
+    None
+}
+
+/// The 0xfff0-masked compares: `fsetp`, `isetp`, `iset`, `fcmp` and `icmp`.
+#[inline]
+fn decode_compare(insn: u64) -> Option<Op> {
+    let un = Op::Unimplemented { raw: insn };
+    let form = insn >> 48;
+    // Each immediate form is listed twice, as `0x36…`/`0x38…` and one above.
+    match form >> 4 {
+        // fsetp, cmp 48..52, ftz 47, bop 45..47.
+        0x5bb | 0x4bb | 0x36b | 0x37b => {
+            let b = match form >> 12 {
+                0x5 => Operand::Reg(reg(insn, 20, 8)),
+                0x4 => const_operand(insn),
+                _ => Operand::Imm(imm20f(insn)),
+            };
+            let Some(bop) = bool_op(field(insn, 45, 2)) else {
+                return Some(un);
+            };
+            return Some(Op::Fsetp {
+                p0: reg(insn, 3, 3),
+                p1: reg(insn, 0, 3),
+                a: reg(insn, 8, 8),
+                am: FMod {
+                    neg: field(insn, 43, 1) != 0,
+                    abs: field(insn, 7, 1) != 0,
+                },
+                b,
+                bm: FMod {
+                    neg: field(insn, 6, 1) != 0,
+                    abs: field(insn, 44, 1) != 0,
+                },
+                cmp: fcmp(field(insn, 48, 4)),
+                bop,
+                src: src_pred(insn, 39, 42),
+            });
+        }
+        // isetp, cmp 49..52, signed 48, bop 45..47, x 43.
+        0x5b6 | 0x4b6 | 0x366 | 0x376 => {
+            let b = match form >> 12 {
+                0x5 => Operand::Reg(reg(insn, 20, 8)),
+                0x4 => const_operand(insn),
+                _ => Operand::Imm(imm20(insn)),
+            };
+            let Some(bop) = bool_op(field(insn, 45, 2)) else {
+                return Some(un);
+            };
+            return Some(Op::Isetp {
+                p0: reg(insn, 3, 3),
+                p1: reg(insn, 0, 3),
+                a: reg(insn, 8, 8),
+                b,
+                cmp: icmp(field(insn, 49, 3)),
+                signed: field(insn, 48, 1) != 0,
+                bop,
+                src: src_pred(insn, 39, 42),
+                x: field(insn, 43, 1) != 0,
+            });
+        }
+        // iset, the register-writing form of isetp.
+        0x5b5 | 0x4b5 | 0x365 | 0x375 => {
+            let b = match form >> 12 {
+                0x5 => Operand::Reg(reg(insn, 20, 8)),
+                0x4 => const_operand(insn),
+                _ => Operand::Imm(imm20(insn)),
+            };
+            let Some(bop) = bool_op(field(insn, 45, 2)) else {
+                return Some(un);
+            };
+            // Eden leaves the flags of an extended compare unimplemented.
+            if field(insn, 43, 1) != 0 && field(insn, 47, 1) != 0 {
+                return Some(un);
+            }
+            return Some(Op::Iset {
+                dst: reg(insn, 0, 8),
+                a: reg(insn, 8, 8),
+                b,
+                cmp: icmp(field(insn, 49, 3)),
+                signed: field(insn, 48, 1) != 0,
+                bop,
+                src: src_pred(insn, 39, 42),
+                bf: field(insn, 44, 1) != 0,
+                x: field(insn, 43, 1) != 0,
+                cc: field(insn, 47, 1) != 0,
+            });
+        }
+        // fcmp: ftz 47, cmp 48..52.
+        0x5ba | 0x4ba | 0x53a | 0x36a | 0x37a => {
+            let test = Operand::Reg(reg(insn, 39, 8));
+            let (b, test) = match form >> 4 {
+                0x5ba => (Operand::Reg(reg(insn, 20, 8)), test),
+                0x4ba => (const_operand(insn), test),
+                0x53a => (test, const_operand(insn)),
+                _ => (Operand::Imm(imm20f(insn)), test),
+            };
+            return Some(Op::Fcmp {
+                dst: reg(insn, 0, 8),
+                a: reg(insn, 8, 8),
+                b,
+                test,
+                cmp: fcmp(field(insn, 48, 4)),
+                ftz: field(insn, 47, 1) != 0,
+            });
+        }
+        // icmp.
+        0x5b4 | 0x4b4 | 0x534 | 0x364 | 0x374 => {
+            let (b, c) = match form >> 4 {
+                0x5b4 => (Operand::Reg(reg(insn, 20, 8)), reg(insn, 39, 8)),
+                0x364 | 0x374 => (Operand::Imm(imm20(insn)), reg(insn, 39, 8)),
+                _ => (const_operand(insn), reg(insn, 39, 8)),
+            };
+            return Some(Op::Icmp {
+                dst: reg(insn, 0, 8),
+                a: reg(insn, 8, 8),
+                b,
+                c,
+                cmp: icmp(field(insn, 49, 3)),
+                signed: field(insn, 48, 1) != 0,
+            });
+        }
+        _ => {}
+    }
+    None
+}
+
+/// The 0xfff0-masked `bfi`, `iadd3` and `lea`, then `lea.hi` with a bank base.
+#[inline]
+fn decode_bitfield(insn: u64) -> Option<Op> {
+    let un = Op::Unimplemented { raw: insn };
+    let form = insn >> 48;
+    // Each immediate form is listed twice, as `0x36…`/`0x38…` and one above.
+    match form >> 4 {
+        // bfi; bit 51 set is shf (handled above) or idp, which Eden leaves unimplemented.
+        0x5bf | 0x4bf | 0x53f | 0x36f | 0x37f => {
+            if field(insn, 51, 1) != 0 {
+                return Some(un);
+            }
+            let (src, base) = match form >> 4 {
+                0x5bf => (
+                    Operand::Reg(reg(insn, 20, 8)),
+                    Operand::Reg(reg(insn, 39, 8)),
+                ),
+                0x4bf => (const_operand(insn), Operand::Reg(reg(insn, 39, 8))),
+                0x53f => (Operand::Reg(reg(insn, 39, 8)), const_operand(insn)),
+                _ => (Operand::Imm(imm20(insn)), Operand::Reg(reg(insn, 39, 8))),
+            };
+            return Some(Op::Bfi {
+                dst: reg(insn, 0, 8),
+                insert: reg(insn, 8, 8),
+                src,
+                base,
+            });
+        }
+        // iadd3: three-way add, negation per source.
+        0x5cc | 0x4cc | 0x38c | 0x39c => {
+            let (b, c) = match form >> 12 {
+                0x5 => (
+                    Operand::Reg(reg(insn, 20, 8)),
+                    Operand::Reg(reg(insn, 39, 8)),
+                ),
+                0x4 => (const_operand(insn), Operand::Reg(reg(insn, 39, 8))),
+                _ => (Operand::Imm(imm20(insn)), Operand::Reg(reg(insn, 39, 8))),
+            };
+            let half = |pos| match field(insn, pos, 2) {
+                0 => Some(Half16::All),
+                1 => Some(Half16::Lower),
+                2 => Some(Half16::Upper),
+                _ => None,
+            };
+            let register = form >> 12 == 0x5;
+            let (halves, shift) = if register {
+                let shift = match field(insn, 37, 2) {
+                    0 => Iadd3Shift::None,
+                    1 => Iadd3Shift::Right,
+                    2 => Iadd3Shift::Left,
+                    _ => return Some(un),
+                };
+                let (Some(a), Some(b), Some(c)) = (half(35), half(33), half(31)) else {
+                    return Some(un);
+                };
+                ([a, b, c], shift)
+            } else {
+                ([Half16::All; 3], Iadd3Shift::None)
+            };
+            let extended = field(insn, 48, 1) != 0;
+            // Eden leaves the flags of an extended add, and an extended right shift, unimplemented.
+            if extended && (field(insn, 47, 1) != 0 || shift == Iadd3Shift::Right) {
+                return Some(un);
+            }
+            return Some(Op::Iadd3 {
+                dst: reg(insn, 0, 8),
+                a: reg(insn, 8, 8),
+                aneg: field(insn, 51, 1) != 0,
+                b,
+                bneg: field(insn, 50, 1) != 0,
+                c,
+                cneg: field(insn, 49, 1) != 0,
+                x: extended,
+                cc: field(insn, 47, 1) != 0,
+                halves,
+                shift,
+            });
+        }
+        // lea, 0x5bd0/0xfff0 (bit 51 picks `.hi`), 0x4bd0 and the `.lo`-only immediate.
+        0x5bd | 0x4bd | 0x36d | 0x37d => {
+            let hi = form >> 8 != 0x4b && field(insn, 51, 1) != 0;
+            return Some(match form >> 12 {
+                0x5 if hi => decode_lea(
+                    insn,
+                    Operand::Reg(reg(insn, 20, 8)),
+                    Some(reg(insn, 39, 8)),
+                    field(insn, 28, 5),
+                    37,
+                ),
+                0x5 => decode_lea(
+                    insn,
+                    Operand::Reg(reg(insn, 20, 8)),
+                    None,
+                    field(insn, 39, 5),
+                    45,
+                ),
+                0x4 => decode_lea(insn, const_operand(insn), None, field(insn, 39, 5), 45),
+                _ if hi => un,
+                _ => decode_lea(
+                    insn,
+                    Operand::Imm(imm20(insn)),
+                    None,
+                    field(insn, 39, 5),
+                    45,
+                ),
+            });
+        }
+        // psetp, a pure predicate op.
+        _ => {}
+    }
+
+    // lea.hi with a bank base, 0x1800/0xfc00.
+    if insn >> 58 == 0b000110 {
+        return Some(decode_lea(
+            insn,
+            const_operand(insn),
+            Some(reg(insn, 39, 8)),
+            field(insn, 51, 5),
+            56,
+        ));
+    }
+    None
+}
+
+/// The 0xfff8-masked predicate, vote and shuffle-add ops.
+#[inline]
+fn decode_predicate(insn: u64) -> Option<Op> {
+    let un = Op::Unimplemented { raw: insn };
+    if insn & 0xfff8_0000_0000_0000 == 0x5090_0000_0000_0000 {
+        let (Some(op1), Some(op2)) = (bool_op(field(insn, 24, 2)), bool_op(field(insn, 45, 2)))
+        else {
+            return Some(un);
+        };
+        return Some(Op::Psetp {
+            p0: reg(insn, 3, 3),
+            p1: reg(insn, 0, 3),
+            a: src_pred(insn, 12, 15),
+            b: src_pred(insn, 29, 32),
+            c: src_pred(insn, 39, 42),
+            op1,
+            op2,
+        });
+    }
+
+    // pset, 0x5088/0xfff8: Eden's `PSET`.
+    if insn & 0xfff8_0000_0000_0000 == 0x5088_0000_0000_0000 {
+        let (Some(op1), Some(op2)) = (bool_op(field(insn, 24, 2)), bool_op(field(insn, 45, 2)))
+        else {
+            return Some(un);
+        };
+        return Some(Op::Pset {
+            dst: reg(insn, 0, 8),
+            a: src_pred(insn, 12, 15),
+            b: src_pred(insn, 29, 32),
+            c: src_pred(insn, 39, 42),
+            op1,
+            op2,
+            float: field(insn, 44, 1) != 0,
+            cc: field(insn, 47, 1) != 0,
+        });
+    }
+
+    // csetp, 0x50a0/0xfff8: Eden's `CSETP`.
+    if insn & 0xfff8_0000_0000_0000 == 0x50a0_0000_0000_0000 {
+        let Some(op) = bool_op(field(insn, 45, 2)) else {
+            return Some(un);
+        };
+        return Some(Op::Csetp {
+            p0: reg(insn, 3, 3),
+            p1: reg(insn, 0, 3),
+            test: field(insn, 8, 5) as u8,
+            src: src_pred(insn, 39, 42),
+            op,
+        });
+    }
+
+    // cset, 0x5098/0xfff8: Eden's `CSET`, `csetp` writing a register.
+    if insn & 0xfff8_0000_0000_0000 == 0x5098_0000_0000_0000 {
+        let Some(op) = bool_op(field(insn, 45, 2)) else {
+            return Some(un);
+        };
+        return Some(Op::Cset {
+            dst: reg(insn, 0, 8),
+            test: field(insn, 8, 5) as u8,
+            src: src_pred(insn, 39, 42),
+            op,
+            bf: field(insn, 44, 1) != 0,
+            cc: field(insn, 47, 1) != 0,
+        });
+    }
+
+    // nop, 0x50b0/0xfff8.
+    if insn & 0xfff8_0000_0000_0000 == 0x50b0_0000_0000_0000 {
+        return Some(Op::Nop);
+    }
+
+    // vote.vtg.
+    if insn & 0xfff8_0000_0000_0000 == 0x50e0_0000_0000_0000 {
+        return Some(Op::Nop);
+    }
+
+    // vote.
+    if insn & 0xfff8_0000_0000_0000 == 0x50d8_0000_0000_0000 {
+        let mode = match field(insn, 48, 2) {
+            0 => VoteMode::All,
+            1 => VoteMode::Any,
+            2 => VoteMode::Eq,
+            _ => return Some(Op::Unimplemented { raw: insn }),
+        };
+        return Some(Op::Vote {
+            dst: reg(insn, 0, 8),
+            pred: reg(insn, 45, 3),
+            src: src_pred(insn, 39, 42),
+            mode,
+        });
+    }
+
+    // fswzadd.
+    if insn & 0xfff8_0000_0000_0000 == 0x50f8_0000_0000_0000 {
+        if field(insn, 47, 1) != 0 || field(insn, 39, 2) != 0 {
+            return Some(un); // `.cc`, or an explicit rounding mode
+        }
+        return Some(Op::Fswzadd {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            b: reg(insn, 20, 8),
+            swizzle: field(insn, 28, 8) as u8,
+            ftz: field(insn, 44, 1) != 0,
+        });
+    }
+    None
+}
+
+/// `mufu`, and `lop3` with a register `b`.
+#[inline]
+fn decode_mufu_lop3(insn: u64) -> Option<Op> {
+    let un = Op::Unimplemented { raw: insn };
+    // mufu: subop at 20..24, sat 50, src: neg 48 / abs 46.
+    if insn & 0xfff8_0000_0000_0000 == 0x5080_0000_0000_0000 {
+        let mufu = match field(insn, 20, 4) {
+            0 => MufuOp::Cos,
+            1 => MufuOp::Sin,
+            2 => MufuOp::Ex2,
+            3 => MufuOp::Lg2,
+            4 => MufuOp::Rcp,
+            5 => MufuOp::Rsq,
+            8 => MufuOp::Sqrt,
+            _ => return Some(un),
+        };
+        return Some(Op::Mufu {
+            dst: reg(insn, 0, 8),
+            src: reg(insn, 8, 8),
+            sm: FMod {
+                neg: field(insn, 48, 1) != 0,
+                abs: field(insn, 46, 1) != 0,
+            },
+            op: mufu,
+            sat: field(insn, 50, 1) != 0,
+        });
+    }
+
+    // lop3: the LUT byte sits in a different field in each form.
+    if insn & 0xfff8_0000_0000_0000 == 0x5be0_0000_0000_0000 {
+        if field(insn, 38, 1) != 0 || field(insn, 47, 1) != 0 {
+            return Some(un); // `.x` or `.cc`
+        }
+        return Some(Op::Lop3 {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            b: Operand::Reg(reg(insn, 20, 8)),
+            c: Operand::Reg(reg(insn, 39, 8)),
+            lut: field(insn, 28, 8) as u8,
+            pred: lop_pred(insn, 36),
+        });
+    }
+    None
+}
+
+/// The video ops `vmad`, `vsetp` and `vmnmx`.
+#[inline]
+fn decode_video(insn: u64) -> Option<Op> {
+    let un = Op::Unimplemented { raw: insn };
+    // vmad, 0x5f00/0xff00, as Eden reads it: no `.cc`, saturation, scale or negation.
+    if insn >> 56 == 0x5f {
+        if field(insn, 47, 1) != 0 || field(insn, 51, 5) != 0 {
+            return Some(un);
+        }
+        let (a, b) = video_operands(insn, false);
+        return Some(Op::Vmad {
+            dst: reg(insn, 0, 8),
+            a,
+            b,
+            c: reg(insn, 39, 8),
+        });
+    }
+    // vsetp, 0x50f0/0xfff8. Eden reads the compare from five bits that cover the boolean
+    // operation's two, so only `.AND` has a compare it knows.
+    if insn & 0xfff8_0000_0000_0000 == 0x50f0_0000_0000_0000 {
+        let cmp = match field(insn, 43, 5) {
+            0 => ICmp::Never,
+            1 => ICmp::Lt,
+            2 => ICmp::Eq,
+            3 => ICmp::Le,
+            16 => ICmp::Gt,
+            17 => ICmp::Ne,
+            18 => ICmp::Ge,
+            19 => ICmp::Always,
+            _ => return Some(un),
+        };
+        let (a, b) = video_operands(insn, true);
+        // An immediate's selector past its one half extracts past the word.
+        if b.sel > 1 && matches!(b.src, Operand::Imm(_)) {
+            return Some(un);
+        }
+        return Some(Op::Vsetp {
+            p0: reg(insn, 3, 3),
+            p1: reg(insn, 0, 3),
+            a,
+            b,
+            cmp,
+            signed: b.signed,
+            bop: BoolOp::And,
+            src: src_pred(insn, 39, 42),
+        });
+    }
+    // vmnmx, 0x3a00/0xfe00.
+    if insn & 0xfe00_0000_0000_0000 == 0x3a00_0000_0000_0000 {
+        const WORD: u64 = 3;
+        const MIN: u64 = 5;
+        const MAX: u64 = 6;
+        let then = field(insn, 51, 3);
+        let whole_words = field(insn, 37, 2) == WORD && field(insn, 29, 2) == WORD;
+        let signed = field(insn, 48, 1) != 0;
+        if !whole_words
+            || field(insn, 50, 1) == 0
+            || signed != (field(insn, 49, 1) != 0)
+            || field(insn, 47, 1) != 0
+            || field(insn, 55, 1) != 0
+            || !matches!(then, MIN | MAX)
+        {
+            return Some(Op::Unimplemented { raw: insn });
+        }
+        return Some(Op::Vmnmx {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            b: reg(insn, 20, 8),
+            c: reg(insn, 39, 8),
+            max: field(insn, 56, 1) != 0,
+            then_max: then == MAX,
+            signed,
+            then_signed: field(insn, 54, 1) != 0,
+        });
+    }
+    None
+}
+
+/// `lop3` with an immediate or bank `b`, and `iscadd32i`.
+#[inline]
+fn decode_lop3_wide(insn: u64) -> Option<Op> {
+    if insn & 0xfc00_0000_0000_0000 == 0x3c00_0000_0000_0000 {
+        if field(insn, 47, 1) != 0 {
+            return Some(Op::Unimplemented { raw: insn }); // `.cc`
+        }
+        return Some(Op::Lop3 {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            b: Operand::Imm(imm20(insn)),
+            c: Operand::Reg(reg(insn, 39, 8)),
+            lut: field(insn, 48, 8) as u8,
+            pred: None,
+        });
+    }
+
+    // lop3 with a constant-bank `b`, 0x0200/0xfe00; the LUT is at 48 as in the immediate form.
+    if insn >> 57 == 0b000_0001 {
+        if field(insn, 47, 1) != 0 {
+            return Some(Op::Unimplemented { raw: insn }); // `.cc`
+        }
+        return Some(Op::Lop3 {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            b: const_operand(insn),
+            c: Operand::Reg(reg(insn, 39, 8)),
+            lut: field(insn, 48, 8) as u8,
+            pred: None,
+        });
+    }
+    // iscadd32i, 0x1400/0xfc00.
+    if insn >> 58 == 0b0001_01 {
+        return Some(Op::Iscadd {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            aneg: false,
+            b: Operand::Imm(field(insn, 20, 32) as u32),
+            bneg: false,
+            shift: field(insn, 53, 5) as u8,
+            cout: field(insn, 52, 1) != 0,
+        });
+    }
+    None
+}
+
+/// `ffma` and `xmad` in each operand form.
+#[inline]
+fn decode_ffma_xmad(insn: u64) -> Option<Op> {
+    // ffma, three operand orders across four opcodes.
+    if insn & 0xff80_0000_0000_0000 == 0x5980_0000_0000_0000 {
+        return Some(decode_ffma(
+            insn,
+            Operand::Reg(reg(insn, 20, 8)),
+            Operand::Reg(reg(insn, 39, 8)),
+        ));
+    }
+    if insn & 0xff80_0000_0000_0000 == 0x4980_0000_0000_0000 {
+        return Some(decode_ffma(
+            insn,
+            const_operand(insn),
+            Operand::Reg(reg(insn, 39, 8)),
+        ));
+    }
+    if insn & 0xff80_0000_0000_0000 == 0x5180_0000_0000_0000 {
+        // The register/constant operands are the other way round here.
+        return Some(decode_ffma(
+            insn,
+            Operand::Reg(reg(insn, 39, 8)),
+            const_operand(insn),
+        ));
+    }
+    if insn & 0xfe80_0000_0000_0000 == 0x3280_0000_0000_0000 {
+        return Some(decode_ffma(
+            insn,
+            Operand::Imm(imm20f(insn)),
+            Operand::Reg(reg(insn, 39, 8)),
+        ));
+    }
+
+    // xmad, 16x16 multiply-accumulate, in each of its four operand forms.
+    if insn & 0xffc0_0000_0000_0000 == 0x5b00_0000_0000_0000 {
+        return Some(decode_xmad(
+            insn,
+            XmadForm {
+                b: Operand::Reg(reg(insn, 20, 8)),
+                c: Operand::Reg(reg(insn, 39, 8)),
+                bh: field(insn, 35, 1) != 0,
+                mode: field(insn, 50, 3),
+                x: field(insn, 38, 1) != 0,
+                psl: field(insn, 36, 1) != 0,
+                mrg: field(insn, 37, 1) != 0,
+            },
+        ));
+    }
+    // The `rc` form multiplies by the register and adds the bank; `cr` is the other way round.
+    if insn & 0xff80_0000_0000_0000 == 0x5100_0000_0000_0000 {
+        return Some(decode_xmad(
+            insn,
+            XmadForm {
+                b: Operand::Reg(reg(insn, 39, 8)),
+                c: const_operand(insn),
+                bh: field(insn, 52, 1) != 0,
+                mode: field(insn, 50, 2),
+                x: field(insn, 54, 1) != 0,
+                psl: false,
+                mrg: false,
+            },
+        ));
+    }
+    if insn & 0xfe00_0000_0000_0000 == 0x4e00_0000_0000_0000 {
+        return Some(decode_xmad(
+            insn,
+            XmadForm {
+                b: const_operand(insn),
+                c: Operand::Reg(reg(insn, 39, 8)),
+                bh: field(insn, 52, 1) != 0,
+                mode: field(insn, 50, 2),
+                x: field(insn, 54, 1) != 0,
+                psl: field(insn, 55, 1) != 0,
+                mrg: field(insn, 56, 1) != 0,
+            },
+        ));
+    }
+    // The immediate form carries a **16-bit** `b` at 20..36 and multiplies by its low half always.
+    if insn & 0xfec0_0000_0000_0000 == 0x3600_0000_0000_0000 {
+        return Some(decode_xmad(
+            insn,
+            XmadForm {
+                b: Operand::Imm(field(insn, 20, 16) as u32),
+                c: Operand::Reg(reg(insn, 39, 8)),
+                bh: false,
+                mode: field(insn, 50, 3),
+                x: field(insn, 38, 1) != 0,
+                psl: field(insn, 36, 1) != 0,
+                mrg: field(insn, 37, 1) != 0,
+            },
+        ));
+    }
+    None
+}
+
+/// `fset`.
+#[inline]
+fn decode_fset(insn: u64) -> Option<Op> {
+    let un = Op::Unimplemented { raw: insn };
+    // fset, the register-writing form of fsetp. Its constant-bank form is all of 0x48; 0x49 is dset.
+    if insn & 0xff00_0000_0000_0000 == 0x5800_0000_0000_0000
+        || insn & 0xff00_0000_0000_0000 == 0x4800_0000_0000_0000
+        || insn & 0xfe00_0000_0000_0000 == 0x3000_0000_0000_0000
+    {
+        let b = match insn >> 57 {
+            0x2c => Operand::Reg(reg(insn, 20, 8)),
+            0x24 => const_operand(insn),
+            _ => Operand::Imm(imm20f(insn)),
+        };
+        let Some(bop) = bool_op(field(insn, 45, 2)) else {
+            return Some(un);
+        };
+        return Some(Op::Fset {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            am: FMod {
+                neg: field(insn, 43, 1) != 0,
+                abs: field(insn, 54, 1) != 0,
+            },
+            b,
+            bm: FMod {
+                neg: field(insn, 53, 1) != 0,
+                abs: field(insn, 44, 1) != 0,
+            },
+            cmp: fcmp(field(insn, 48, 4)),
+            bop,
+            src: src_pred(insn, 39, 42),
+            bf: field(insn, 52, 1) != 0,
+            cc: field(insn, 47, 1) != 0,
+        });
+    }
+    None
+}
+
+/// `ipa` and the texture ops.
+#[inline]
+fn decode_ipa_texture(insn: u64) -> Option<Op> {
+    let un = Op::Unimplemented { raw: insn };
+    // ipa, a[]-relative, non-indexed.
+    if insn & 0xff00_0040_0000_ff00 == 0xe000_0000_0000_ff00 {
+        // The interpolation mode (bits 54..56).
+        let mode = field(insn, 54, 2);
+        // The sample mode (`SampleMode` in Eden's decode).
+        let sample = field(insn, 52, 2);
+        if sample > 1 {
+            return Some(un);
+        }
+        let multiply = mode == 1;
+        return Some(Op::Ipa {
+            dst: reg(insn, 0, 8),
+            offset: field(insn, 28, 10) as u16,
+            mul: opt_reg(reg(insn, 20, 8)).filter(|_| multiply),
+            perspective: multiply,
+            sat: field(insn, 51, 1) != 0,
+            centroid: sample == 1,
+        });
+    }
+
+    // texs.
+    if insn & 0xf600_0000_0000_0000 == 0xd000_0000_0000_0000 {
+        let dst = reg(insn, 0, 8);
+        let dst2 = reg(insn, 28, 8);
+        let (a, b) = (reg(insn, 8, 8), reg(insn, 20, 8));
+        if let (Some((dim, coords, dref)), Some(mask)) = (
+            texs_encoding(field(insn, 53, 4), a, b),
+            decode_tex_mask(field(insn, 50, 3), dst, dst2),
+        ) {
+            return Some(Op::Texs {
+                dst,
+                dst2,
+                coords,
+                dref,
+                handle: field(insn, 36, 13) as u16,
+                dim,
+                mask,
+                f16: field(insn, 59, 1) == 0,
+            });
+        }
+        return Some(un);
+    }
+
+    // tld, 0xdc00/0xff00, and tld.b, 0xdd00/0xff00 (Eden's `maxwell.inc`).
+    match insn >> 56 {
+        0xdc => return Some(decode_tld(insn, false)),
+        0xdd => return Some(decode_tld(insn, true)),
+        _ => {}
+    }
+
+    // tlds, `texs`'s neighbour in the opcode space.
+    if insn & 0xf600_0000_0000_0000 == 0xd200_0000_0000_0000 {
+        return Some(decode_tlds(insn));
+    }
+
+    // tex.b: the bindless sample, 0xdeb8/0xfff8.
+    if insn & 0xfff8_0000_0000_0000 == 0xdeb8_0000_0000_0000 {
+        return Some(decode_tex(insn, true));
+    }
+    // txq and txq.b: a texture's size, 0xdf48 and 0xdf50 over 0xfff8.
+    match insn >> 51 {
+        0x1be9 => return Some(decode_txq(insn, false)),
+        0x1bea => return Some(decode_txq(insn, true)),
+        _ => {}
+    }
+    // tmml and tmml.b: 0xdf58 and 0xdf60, over 0xfff8.
+    if matches!(insn >> 51, 0x1beb | 0x1bec) {
+        return Some(decode_tmml(insn));
+    }
+    // tld4s: the gather with `texs`'s layout, 0xdf00 with bit 54 clear (`txq`'s is set).
+    if insn >> 56 == 0xdf && field(insn, 54, 1) == 0 {
+        return Some(decode_tld4s(insn));
+    }
+    // txd and txd.b: 0xde00 and 0xde40 over 0xffc0.
+    match insn >> 54 {
+        0b11_0111_1000 => return Some(decode_txd(insn, false)),
+        0b11_0111_1001 => return Some(decode_txd(insn, true)),
+        _ => {}
+    }
+    // tld4.b: the bindless gather, 0xdec0/0xffc0.
+    if insn >> 54 == 0b11_0111_1011 {
+        return Some(decode_tld4(insn, true));
+    }
+    // tld4: the gather, `110010` at the top.
+    if insn >> 58 == 0b11_0010 {
+        return Some(decode_tld4(insn, false));
+    }
+    // tex.
+    if insn & 0xf800_0000_0000_0000 == 0xc000_0000_0000_0000 {
+        return Some(decode_tex(insn, false));
+    }
+    None
+}
+
+/// The 32-bit-immediate forms.
+#[inline]
+fn decode_imm32(insn: u64) -> Option<Op> {
+    // The 32-bit-immediate forms.
+    if insn & 0xfff0_0000_0000_0000 == 0x0100_0000_0000_0000 {
+        return Some(Op::Mov32i {
+            dst: reg(insn, 0, 8),
+            imm: field(insn, 20, 32) as u32,
+        });
+    }
+    if insn & 0xfc00_0000_0000_0000 == 0x0800_0000_0000_0000 {
+        // fadd32i
+        if field(insn, 52, 1) != 0 {
+            return Some(Op::Unimplemented { raw: insn }); // `.cc`
+        }
+        return Some(Op::Fadd {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            am: FMod {
+                neg: field(insn, 56, 1) != 0,
+                abs: field(insn, 54, 1) != 0,
+            },
+            b: Operand::Imm(field(insn, 20, 32) as u32),
+            bm: FMod {
+                neg: field(insn, 53, 1) != 0,
+                abs: field(insn, 57, 1) != 0,
+            },
+            ftz: field(insn, 55, 1) != 0,
+            sat: false,
+        });
+    }
+    if insn & 0xfc00_0000_0000_0000 == 0x0c00_0000_0000_0000 {
+        // ffma32i: the destination is also the addend.
+        if field(insn, 52, 1) != 0 || field(insn, 53, 2) == 3 {
+            return Some(Op::Unimplemented { raw: insn }); // `.cc` (Eden: unimplemented) or an invalid mode
+        }
+        let dst = reg(insn, 0, 8);
+        return Some(Op::Ffma {
+            dst,
+            a: reg(insn, 8, 8),
+            b: Operand::Imm(field(insn, 20, 32) as u32),
+            bneg: field(insn, 56, 1) != 0,
+            c: Operand::Reg(dst),
+            cneg: field(insn, 57, 1) != 0,
+            ftz: field(insn, 53, 2) == 1,
+            fmz: field(insn, 53, 2) == 2,
+            sat: field(insn, 55, 1) != 0,
+        });
+    }
+    if insn & 0xff00_0000_0000_0000 == 0x1e00_0000_0000_0000 {
+        // fmul32i
+        if field(insn, 52, 1) != 0 || field(insn, 53, 2) == 3 {
+            return Some(Op::Unimplemented { raw: insn }); // `.cc` or an invalid mode
+        }
+        return Some(Op::Fmul {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            b: Operand::Imm(field(insn, 20, 32) as u32),
+            bm: FMod::NONE,
+            ftz: field(insn, 53, 2) == 1,
+            fmz: field(insn, 53, 2) == 2,
+            sat: field(insn, 55, 1) != 0,
+            scale: FmulScale::None,
+        });
+    }
+    if insn & 0xfe80_0000_0000_0000 == 0x1c00_0000_0000_0000 {
+        // iadd32i
+        return Some(Op::Iadd {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            aneg: field(insn, 56, 1) != 0,
+            b: Operand::Imm(field(insn, 20, 32) as u32),
+            bneg: false,
+            cin: false,
+            // `iadd32i` writes the carry from bit 52.
+            cout: field(insn, 52, 1) != 0,
+        });
+    }
+    if insn & 0xfc00_0000_0000_0000 == 0x0400_0000_0000_0000 {
+        // lop32i
+        let op = match field(insn, 53, 2) {
+            0 => LogicOp::And,
+            1 => LogicOp::Or,
+            2 => LogicOp::Xor,
+            _ => LogicOp::PassB,
+        };
+        return Some(Op::Lop {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            ainv: field(insn, 55, 1) != 0,
+            b: Operand::Imm(field(insn, 20, 32) as u32),
+            binv: field(insn, 56, 1) != 0,
+            op,
+            pred: None,
+            cc: field(insn, 52, 1) != 0,
+        });
+    }
+    None
+}
+
+/// Every `lea` form keeps `.x` just above `neg`, and the carry and predicate outputs at 47 and 48.
+fn decode_lea(insn: u64, b: Operand, hi: Option<u8>, shift: u64, neg: u32) -> Op {
+    if field(insn, neg + 1, 1) != 0 || field(insn, 47, 1) != 0 || field(insn, 48, 3) != 7 {
+        return Op::Unimplemented { raw: insn }; // `.x`, `.cc` or a predicate written
+    }
+    Op::Lea {
+        dst: reg(insn, 0, 8),
+        a: reg(insn, 8, 8),
+        hi,
+        b,
+        neg: field(insn, neg, 1) != 0,
+        shift: shift as u8,
+    }
+}
+
+fn decode_ffma(insn: u64, b: Operand, c: Operand) -> Op {
+    if field(insn, 47, 1) != 0 || field(insn, 51, 2) != 0 || field(insn, 53, 2) == 3 {
+        return Op::Unimplemented { raw: insn }; // `.cc`, an explicit rounding mode or an invalid mode
+    }
+    Op::Ffma {
+        dst: reg(insn, 0, 8),
+        a: reg(insn, 8, 8),
+        b,
+        bneg: field(insn, 48, 1) != 0,
+        c,
+        cneg: field(insn, 49, 1) != 0,
+        ftz: field(insn, 53, 2) == 1,
+        fmz: field(insn, 53, 2) == 2,
+        sat: field(insn, 50, 1) != 0,
+    }
+}
+
+/// What one `xmad` form supplies.
+struct XmadForm {
+    b: Operand,
+    c: Operand,
+    bh: bool,
+    mode: u64,
+    x: bool,
+    psl: bool,
+    mrg: bool,
+}
+
+fn decode_xmad(insn: u64, form: XmadForm) -> Op {
+    let un = Op::Unimplemented { raw: insn };
+    if form.x {
+        return un; // the extended-carry form
+    }
+    let cmode = match form.mode {
+        0 => XmadC::Full,
+        1 => XmadC::Lo,
+        2 => XmadC::Hi,
+        4 => XmadC::Bcc,
+        // `csfu` folds a sign into an unsigned product.
+        _ => return un,
+    };
+    let sign = field(insn, 48, 2);
+    Op::Xmad {
+        dst: reg(insn, 0, 8),
+        a: reg(insn, 8, 8),
+        ah: field(insn, 53, 1) != 0,
+        asigned: sign == 1 || sign == 3,
+        b: form.b,
+        bh: form.bh,
+        bsigned: sign == 2 || sign == 3,
+        c: form.c,
+        cmode,
+        psl: form.psl,
+        mrg: form.mrg,
+    }
+}
+
+/// A video instruction's `a` and `b` with Eden's fields, whose selectors overlap their widths.
+/// An immediate `b` is a 16-bit half; `vsetp` keeps the selector bits inside it, `vmad` drops them.
+fn video_operands(insn: u64, imm_keeps_sel: bool) -> (VideoOperand, VideoOperand) {
+    // `VideoWidth`: byte, unknown (read as a byte), short and word.
+    let bits = |width: u64| match width {
+        0 | 1 => 8,
+        2 => 16,
+        _ => 32,
+    };
+    let a = VideoOperand {
+        src: Operand::Reg(reg(insn, 8, 8)),
+        bits: bits(field(insn, 37, 2)),
+        sel: field(insn, 36, 2) as u8,
+        signed: field(insn, 48, 1) != 0,
+    };
+    let signed = field(insn, 49, 1) != 0;
+    let b = if field(insn, 50, 1) == 0 {
+        VideoOperand {
+            src: Operand::Imm(field(insn, 20, 16) as u32),
+            bits: 16,
+            sel: if imm_keeps_sel {
+                field(insn, 28, 2) as u8
+            } else {
+                0
+            },
+            signed,
+        }
+    } else {
+        VideoOperand {
+            src: Operand::Reg(reg(insn, 20, 8)),
+            bits: bits(field(insn, 29, 2)),
+            sel: field(insn, 28, 2) as u8,
+            signed,
+        }
+    };
+    (a, b)
+}

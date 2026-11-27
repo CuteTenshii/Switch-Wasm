@@ -56,14 +56,11 @@ export default defineConfig(({ command }) => ({
     // Keep every asset a file so it gets a hashed URL.
     assetsInlineLimit: 0,
   },
-  // Must match `{ type: 'module' }` in `main/rpc.ts`, in dev and production alike.
+  // Must match `{ type: 'module' }` in `shared/spawn.ts`, in dev and production alike.
   worker: { format: 'es' },
   resolve: {
     alias: {
       '@core': coreDir(command),
-      // The `host_read` import named by wasm-bindgen's generated glue.
-      '@host/files': fileURLToPath(
-        new URL('./web/worker/hostfiles.ts', import.meta.url)),
     },
   },
   server: {

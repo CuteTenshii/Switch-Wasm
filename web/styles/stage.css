@@ -1,0 +1,412 @@
+/* readouts */
+
+.readout {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--muted);
+  min-width: 58px;
+}
+
+/* stage */
+
+.stage {
+  position: relative;
+  background: #000;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#screen {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  /* Smooth scaling: the frame is not pixel art. */
+  image-rendering: auto;
+  /* The canvas is a touchscreen: no browser scroll, zoom or double-tap handling. */
+  touch-action: none;
+  user-select: none;
+}
+
+/* On-screen controller: over the game's sides in landscape, below it in portrait. */
+.touchpad {
+  display: none;
+  position: absolute;
+  inset: 0;
+  justify-content: space-between;
+  padding:
+    8px max(12px, env(safe-area-inset-right))
+    max(8px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  pointer-events: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-state="paused"]) .touchpad {
+  display: flex;
+}
+.tp-side {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  pointer-events: auto;
+}
+.tp-right { align-items: flex-end; }
+.tp-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.tp-btn {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid rgb(255 255 255 / 22%);
+  border-radius: 50%;
+  background: rgb(255 255 255 / 10%);
+  color: rgb(255 255 255 / 80%);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.tp-btn.is-down { background: rgb(255 255 255 / 32%); }
+.tp-shoulder {
+  width: 64px;
+  height: 40px;
+  border-radius: var(--radius-lg);
+  font-size: var(--text-sm);
+}
+.tp-small {
+  width: 40px;
+  height: 40px;
+  font-size: var(--text-xl);
+}
+/* The D-pad and the face buttons: four around an empty middle. */
+.tp-cross {
+  display: grid;
+  grid-template: repeat(3, 48px) / repeat(3, 48px);
+}
+.tp-cross:not(.tp-face) .tp-btn { border-radius: 10px; }
+.tp-up { grid-area: 1 / 2; }
+.tp-west { grid-area: 2 / 1; }
+.tp-east { grid-area: 2 / 3; }
+.tp-down { grid-area: 3 / 2; }
+.tp-stick {
+  display: grid;
+  place-items: center;
+  width: 104px;
+  height: 104px;
+  border: 1px solid rgb(255 255 255 / 22%);
+  border-radius: 50%;
+  background: rgb(255 255 255 / 6%);
+}
+.tp-knob {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: rgb(255 255 255 / 28%);
+  pointer-events: none;
+}
+
+/* Portrait: the game on top, the controller in the room below it. */
+@media (orientation: portrait) {
+  body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-state="paused"]) .stage {
+    display: flex;
+    flex-direction: column;
+  }
+  body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-state="paused"]) #screen {
+    height: auto;
+    aspect-ratio: 16 / 9;
+  }
+  body.touch-controls:is([data-state="loaded"], [data-state="running"], [data-state="paused"]) .touchpad {
+    position: static;
+    flex: 1 1 auto;
+    align-items: center;
+  }
+  .tp-side { gap: 20px; }
+}
+
+/* Landscape phones: the bars give the game the full height while a program runs. */
+.chrome-toggle { display: none; }
+
+@media (orientation: landscape) and (height <= 500px) {
+  body:is([data-state="loaded"], [data-state="running"], [data-state="paused"]):not(.chrome-shown) .topbar,
+  body:is([data-state="loaded"], [data-state="running"], [data-state="paused"]):not(.chrome-shown) .statusbar {
+    display: none;
+  }
+  body:is([data-state="loaded"], [data-state="running"], [data-state="paused"]):not(.chrome-shown) .app {
+    grid-template-rows: minmax(0, 1fr);
+  }
+  body:is([data-state="loaded"], [data-state="running"], [data-state="paused"]) .chrome-toggle {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 28px;
+    padding: 0;
+    transform: translateX(-50%);
+    border: 1px solid rgb(255 255 255 / 18%);
+    border-top: none;
+    border-radius: 0 0 10px 10px;
+    background: rgb(0 0 0 / 45%);
+    color: rgb(255 255 255 / 75%);
+  }
+  body.chrome-shown .chrome-toggle svg { transform: rotate(180deg); }
+}
+
+/* Idle overlay: the "insert cartridge" state. */
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  place-items: center;
+  gap: 20px;
+  padding: 24px;
+  overflow-y: auto;
+  text-align: center;
+  background:
+    radial-gradient(120% 80% at 50% 0%, var(--bg-glow) 0%, var(--bg) 60%);
+  transition: opacity .25s ease, visibility .25s;
+}
+.overlay.hidden {
+  opacity: 0;
+  visibility: hidden;
+}
+.overlay-inner { max-width: 560px; }
+.overlay-mark {
+  display: inline-flex;
+  margin-bottom: 14px;
+  color: var(--accent);
+}
+.overlay-mark svg {
+  width: 40px;
+  height: 40px;
+  stroke-width: 1.5;
+}
+.overlay h1 {
+  margin: 0 0 6px;
+  font-size: var(--text-xl);
+  font-weight: 600;
+}
+.overlay code {
+  font-family: var(--mono);
+  font-size: .92em;
+  color: var(--accent);
+}
+.overlay-actions {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
+  gap: 10px; margin: 20px 0 18px;
+}
+
+/* A picked folder's games take the place of the drop prompt. */
+.overlay.has-library .overlay-mark,
+.overlay.has-library h1,
+.overlay.has-library .overlay-actions { display: none; }
+.overlay.has-library .overlay-inner { width: min(560px, 100%); }
+.library { text-align: left; }
+.library-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+}
+.library-title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.library-tools {
+  display: flex;
+  gap: 6px;
+}
+.library-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+.library-status:empty { display: none; }
+.library-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.library-row {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.library-row:hover { background: var(--hover-bg); }
+.library-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.library-icon {
+  display: block;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-sm);
+  background: var(--chrome-hi);
+  object-fit: cover;
+}
+.library-icon.blank { border: 1px solid var(--border); }
+.library-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.library-name {
+  font-size: var(--text-md);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.library-detail {
+  font-size: var(--text-xs);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.library-format {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--dim);
+}
+
+.muted { color: var(--muted); }
+.tiny {
+  font-size: var(--text-xs);
+  line-height: 1.55;
+}
+
+/* The keyboard map: two Joy-Con halves, each Switch button over the key that presses it. */
+.keymap {
+  margin: 0;
+  color: var(--muted);
+}
+.keymap-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  font-size: var(--text-xs);
+}
+.keymap-pads {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+}
+.keymap-pad {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: rgb(14 16 23 / 60%);
+}
+.keymap-row {
+  display: flex;
+  gap: 18px;
+  margin: 0;
+}
+.keymap-cross {
+  display: grid;
+  grid-template:
+    ". up ." auto
+    "left . right" auto
+    ". down ." auto / 48px 48px 48px;
+  row-gap: 2px;
+  margin: 0;
+}
+.keymap-key {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.keymap-key.up { grid-area: up; }
+.keymap-key.left { grid-area: left; }
+.keymap-key.right { grid-area: right; }
+.keymap-key.down { grid-area: down; }
+.keymap-key dd { margin: 0; }
+.keymap-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border-hi);
+  border-radius: 50%;
+  background: var(--chrome-hi);
+  color: var(--text);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.keymap-button.wide {
+  width: 40px;
+  border-radius: var(--radius-sm);
+}
+.keymap kbd {
+  display: inline-block;
+  min-width: 20px;
+  padding: 1px 5px;
+  border: 1px solid var(--border-hi);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-xs);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--text);
+}
+
+/* Touch devices get the on-screen controller instead. */
+@media (hover: none) and (pointer: coarse) {
+  .keymap { display: none; }
+}
+
+/* Drag-and-drop veil over the stage. */
+.dropveil {
+  position: absolute;
+  z-index: 3;
+  inset: 10px;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-lg);
+  background: rgb(14 30 58 / 72%);
+  display: grid;
+  place-items: center;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity .12s;
+}
+.dropveil.on {
+  opacity: 1;
+  visibility: visible;
+}

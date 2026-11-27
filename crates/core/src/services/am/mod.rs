@@ -1,0 +1,739 @@
+//! `am`: the applet framework (`appletOE`/`appletAE`), the proxies and channels
+//! they hand out, and the library applets a title can launch.
+
+use std::collections::VecDeque;
+
+use crate::cpu::{AppletMessage, Cpu, Ending, SHARED_BUFFER_USABLE_SLOTS};
+use crate::trace::Level;
+use crate::Result;
+
+mod request;
+mod swkbd;
+
+pub use swkbd::KeyboardRequest;
+pub(crate) use swkbd::PendingKeyboard;
+
+/// `am` 2, NoDataInChannel.
+const AM_NO_DATA_IN_CHANNEL: u32 = 128 | (2 << 9);
+
+/// `am` 511, InvalidStorageType.
+const AM_INVALID_STORAGE_TYPE: u32 = 128 | (511 << 9);
+
+/// `LaunchParameterKind::PreselectedUser`.
+pub(crate) const LAUNCH_PARAMETER_PRESELECTED_USER: u32 = 2;
+
+/// The `PreselectedUser` launch parameter: magic, version, then the uid, in 0x88 bytes.
+pub(crate) fn preselected_user_parameter(user: [u8; 16]) -> Vec<u8> {
+    const MAGIC: u32 = 0xC794_97CA;
+    const VERSION: u8 = 1;
+    const LEN: usize = 0x88;
+    const UID_OFFSET: usize = 0x8;
+    let mut data = Vec::with_capacity(LEN);
+    data.extend_from_slice(&MAGIC.to_le_bytes());
+    data.push(VERSION);
+    data.resize(UID_OFFSET, 0);
+    data.extend_from_slice(&user);
+    data.resize(LEN, 0);
+    data
+}
+
+/// A library applet created through `ILibraryAppletCreator`: answered here, or run as a
+/// process of its own once started.
+#[derive(Debug, Default)]
+pub(crate) struct LibraryApplet {
+    id: u32,
+    /// `LibraryAppletMode`.
+    mode: u32,
+    finished: bool,
+    events: [Option<u64>; 3],
+    /// Ended with a result rather than cancelled.
+    answered: bool,
+    /// Storages it pushed out, not yet popped.
+    answers: VecDeque<Vec<u8>>,
+    /// Interactive storages it pushed out, not yet popped.
+    interactive_out: VecDeque<Vec<u8>>,
+    /// Storages the caller pushed with `PushInData`, in order.
+    in_data: Vec<Vec<u8>>,
+    /// The process running it, once started.
+    process: Option<u64>,
+}
+
+impl LibraryApplet {
+    fn new(id: u32, mode: u32, answer: Option<Vec<u8>>) -> Self {
+        Self {
+            id,
+            mode,
+            answered: answer.is_some(),
+            answers: answer.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+
+    fn answer_with(&mut self, storage: Vec<u8>) {
+        self.answered = true;
+        self.answers.push_back(storage);
+    }
+
+    /// A storage the caller can pop: one a running applet pushed, or a host answer once
+    /// the applet has ended.
+    fn has_unpopped_answer(&self) -> bool {
+        !self.answers.is_empty() && (self.finished || self.process.is_some())
+    }
+
+    fn finish(&mut self) {
+        self.finished = true;
+    }
+
+    fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    /// For an error applet, the error it was asked to show.
+    fn error_shown(&self) -> Option<(String, ErrorDialog)> {
+        (self.id == APPLET_ERROR).then(|| {
+            let arg = self.in_data.last().map_or(&[][..], |d| d);
+            (describe_error_arg(arg), ErrorDialog::from_arg(arg))
+        })
+    }
+}
+
+const STATE_CHANGED_EVENT: usize = 0;
+
+const POP_OUT_DATA_EVENT: usize = 1;
+
+const POP_INTERACTIVE_OUT_DATA_EVENT: usize = 2;
+
+const LIBRARY_APPLET_EVENT_NAMES: [&str; 3] = [
+    "am:library-applet-state",
+    "am:library-applet-out-data",
+    "am:library-applet-interactive-out-data",
+];
+
+/// The two queues a library applet pops storages from.
+#[derive(Clone, Copy)]
+enum AppletQueue {
+    InData,
+    InteractiveInData,
+}
+
+impl AppletQueue {
+    const ALL: [Self; 2] = [Self::InData, Self::InteractiveInData];
+
+    fn slot(self) -> usize {
+        match self {
+            Self::InData => 0,
+            Self::InteractiveInData => 1,
+        }
+    }
+
+    fn event_name(self) -> &'static str {
+        match self {
+            Self::InData => "am:applet-in-data",
+            Self::InteractiveInData => "am:applet-interactive-in-data",
+        }
+    }
+
+    fn empty_message(self) -> &'static str {
+        match self {
+            Self::InData => {
+                "[am] PopInData: the applet has popped every storage seeded for it and asked \
+                 for another"
+            }
+            Self::InteractiveInData => {
+                "[am] PopInteractiveInData: the applet is waiting on an answer from the caller \
+                 that launched it, and nothing here launched it"
+            }
+        }
+    }
+}
+
+/// How many interactive messages are kept for the host; the oldest are dropped.
+const MAX_INTERACTIVE_MESSAGES: usize = 8;
+
+/// The firmware applet an `AppletId` names, the inverse of [`applet_id_for`].
+fn applet_name(applet_id: u32) -> &'static str {
+    match applet_id {
+        0x01 => "application",
+        0x02 => "overlayDisp",
+        0x03 => "qlaunch",
+        0x04 => "system application",
+        0x0A => "auth",
+        0x0B => "cabinet",
+        0x0C => "controller",
+        0x0D => "dataErase",
+        0x0E => "error",
+        0x0F => "netConnect",
+        0x10 => "playerSelect",
+        0x11 => "swkbd",
+        0x12 => "miiEdit",
+        0x13 => "web",
+        0x14 => "shop",
+        0x15 => "photoViewer",
+        0x16 => "set",
+        0x17 => "offlineWeb",
+        0x18 => "loginShare",
+        0x19 => "wifiWebAuth",
+        0x1A => "myPage",
+        _ => "unknown applet",
+    }
+}
+
+/// `AppletId_LibraryAppletPlayerSelect`.
+const APPLET_PLAYER_SELECT: u32 = 0x10;
+
+/// `PselUiReturnArg { u64 result; AccountUid uid }`, a successful pick of `user`.
+fn player_select_answer(user: [u8; 16]) -> Vec<u8> {
+    let mut data = vec![0u8; 8];
+    data.extend_from_slice(&user);
+    data
+}
+
+/// Whether a title id is one of the firmware's library applets.
+pub fn is_library_applet(program_id: u64) -> bool {
+    matches!(applet_id_for(program_id), 0x0A..=0x1A)
+}
+
+/// The `LibAppletCommonArguments::LaVersion` an applet expects.
+pub(crate) fn applet_interface_version(program_id: u64) -> u32 {
+    match applet_id_for(program_id) {
+        0x12 => 3, // miiEdit
+        // swkbd: 6.0.0+.
+        APPLET_SWKBD => 0x8_000D,
+        // Controller: 11.0.0+, the 0x430-byte `ControllerSupportArg`.
+        APPLET_CONTROLLER => 8,
+        // myPage: 9.0.0+.
+        APPLET_MY_PAGE => 0x1_0000,
+        // Web: 8.0.0+.
+        APPLET_WEB => 0x8_0000,
+        _ => 1,
+    }
+}
+
+const APPLET_SWKBD: u32 = 0x11;
+const APPLET_ERROR: u32 = 0x0E;
+
+/// What an error applet's argument storage asks to show: its `ErrorCommonHeader`
+/// type, the result or code after it, and any message text, as one log line.
+fn describe_error_arg(arg: &[u8]) -> String {
+    let byte = |at: usize| arg.get(at).copied().unwrap_or(0);
+    let word = |at: usize| u32::from_le_bytes(std::array::from_fn(|i| byte(at + i)));
+    let result = |r: u32| format!("{:04}-{:04}", 2000 + (r & 0x1FF), (r >> 9) & 0x1FFF);
+    let mut line = format!("type {}", byte(0));
+    // ErrorCommonArg: an error code at 8 and, with the result flag, a Result at 0x10.
+    if byte(0) == 0 && byte(6) != 0 {
+        line += &format!(", result {}", result(word(0x10)));
+    } else {
+        line += &format!(", code {:#x}/{:#x}", word(8), word(12));
+    }
+    let text = error_text(arg, 200);
+    if !text.is_empty() {
+        line += &format!(", \"{text}\"");
+    }
+    line
+}
+
+/// The dialog message after the header, the same offset in every type that has one.
+fn error_text(arg: &[u8], limit: usize) -> String {
+    let bytes: Vec<u8> = arg
+        .get(0x18..)
+        .unwrap_or_default()
+        .iter()
+        .take_while(|&&b| b != 0)
+        .take(limit)
+        .copied()
+        .collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// What an error applet shows the player: the code as the console prints it, and the message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorDialog {
+    pub code: Option<String>,
+    pub message: String,
+}
+
+impl ErrorDialog {
+    pub(crate) fn from_arg(arg: &[u8]) -> ErrorDialog {
+        let byte = |at: usize| arg.get(at).copied().unwrap_or(0);
+        let word = |at: usize| u32::from_le_bytes(std::array::from_fn(|i| byte(at + i)));
+        let code = match byte(0) {
+            // A Result, as `2xxx-yyyy`.
+            0 if byte(6) != 0 => {
+                let r = word(0x10);
+                Some(format!(
+                    "{:04}-{:04}",
+                    2000 + (r & 0x1FF),
+                    (r >> 9) & 0x1FFF
+                ))
+            }
+            // `ErrorApplicationArg`: one number the title chose.
+            2 => (word(8) != 0).then(|| word(8).to_string()),
+            // An `ErrorCode` of category and number.
+            _ => (word(8) != 0 || word(12) != 0).then(|| format!("{:04}-{:04}", word(8), word(12))),
+        };
+        ErrorDialog {
+            code,
+            message: error_text(arg, 0x800),
+        }
+    }
+}
+const APPLET_CONTROLLER: u32 = 0x0C;
+const APPLET_MY_PAGE: u32 = 0x1A;
+const APPLET_WEB: u32 = 0x13;
+
+/// The launch storages a library applet's caller pushes after the common arguments.
+pub(crate) fn applet_launch_storages(program_id: u64, user: [u8; 16]) -> Vec<Vec<u8>> {
+    const GENERIC_SIZE: usize = 0x100;
+    match applet_id_for(program_id) {
+        APPLET_SWKBD => vec![swkbd_config(), vec![0u8; SWKBD_WORK_BUFFER_SIZE]],
+        APPLET_CONTROLLER => vec![controller_support_arg_private(), controller_support_arg()],
+        APPLET_MY_PAGE => vec![my_page_arg(user)],
+        APPLET_WEB => vec![web_arg()],
+        _ => vec![vec![0u8; GENERIC_SIZE]],
+    }
+}
+
+/// `nn::swkbd::KeyboardConfig`: `SwkbdConfigCommon` then `SwkbdConfigNew`.
+fn swkbd_config() -> Vec<u8> {
+    const CONFIG_SIZE: usize = 0x4C8;
+    const OK_TEXT: usize = 0x004;
+    const MAX_TEXT_LENGTH: usize = 0x3AC;
+    const MIN_TEXT_LENGTH: usize = 0x3B0;
+    let mut config = vec![0u8; CONFIG_SIZE];
+    // SwkbdType_Normal.
+    config[0..4].copy_from_slice(&0u32.to_le_bytes());
+    for (index, unit) in "OK".encode_utf16().enumerate() {
+        let at = OK_TEXT + index * 2;
+        config[at..at + 2].copy_from_slice(&unit.to_le_bytes());
+    }
+    config[MAX_TEXT_LENGTH..MAX_TEXT_LENGTH + 4].copy_from_slice(&32u32.to_le_bytes());
+    config[MIN_TEXT_LENGTH..MIN_TEXT_LENGTH + 4].copy_from_slice(&0u32.to_le_bytes());
+    config
+}
+
+/// The keyboard's third storage: its initial-string and dictionary buffer.
+const SWKBD_WORK_BUFFER_SIZE: usize = 0x1000;
+
+/// The friend-list applet's argument: the page to open and the user it belongs to.
+fn my_page_arg(user: [u8; 16]) -> Vec<u8> {
+    const ARG_SIZE: usize = 0x10A8;
+    const USER_ID: usize = 0x8;
+    let mut arg = vec![0u8; ARG_SIZE];
+    // ShowFriendList.
+    arg[..4].copy_from_slice(&0u32.to_le_bytes());
+    arg[USER_ID..USER_ID + 16].copy_from_slice(&user);
+    arg
+}
+
+/// The browser's argument: a `WebArgHeader`, then `{u16 type, u16 size, u32 pad}` entries.
+fn web_arg() -> Vec<u8> {
+    /// `ShimKind_Web`.
+    const SHIM_WEB: u32 = 5;
+    const TLV_INITIAL_URL: u16 = 1;
+    const WEB_URL_SIZE: usize = 0xC00;
+    const WEB_ARG_SIZE: usize = 0x2000;
+    const HEADER_SIZE: usize = 8;
+    const TLV_SIZE: usize = 8;
+    /// A deliberately unreachable start page.
+    const DEFAULT_URL: &str = "http://localhost/";
+
+    let mut arg = vec![0u8; WEB_ARG_SIZE];
+    arg[0..2].copy_from_slice(&1u16.to_le_bytes());
+    arg[4..8].copy_from_slice(&SHIM_WEB.to_le_bytes());
+    arg[8..10].copy_from_slice(&TLV_INITIAL_URL.to_le_bytes());
+    arg[10..12].copy_from_slice(&(WEB_URL_SIZE as u16).to_le_bytes());
+    let url = DEFAULT_URL.as_bytes();
+    let at = HEADER_SIZE + TLV_SIZE;
+    arg[at..at + url.len()].copy_from_slice(url);
+    arg
+}
+
+/// A library applet's result storage, summarised for the log.
+fn applet_result_summary(program_id: u64, data: &[u8]) -> String {
+    let word = |at: usize| -> u32 {
+        data.get(at..at + 4)
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+            .unwrap_or(0)
+    };
+    match applet_id_for(program_id) {
+        // `ControllerSupportResultInfo { s8 player_count, pad[3], u32 selected_id, u32 result }`.
+        APPLET_CONTROLLER if data.len() >= 0xC => {
+            let outcome = match word(8) {
+                0 => "confirmed".to_owned(),
+                2 => "cancelled".to_owned(),
+                other => format!("result {other:#x}"),
+            };
+            format!("{outcome}, {} player(s), npad {}", data[0] as i8, word(4))
+        }
+        // `u32 SwkbdResult`, then the UTF-16 text.
+        APPLET_SWKBD if data.len() >= 4 => {
+            let text: Vec<u16> = data[4..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .take_while(|&unit| unit != 0)
+                .collect();
+            let outcome = if word(0) == 0 {
+                "submitted"
+            } else {
+                "cancelled"
+            };
+            format!("{outcome} {:?}", String::from_utf16_lossy(&text))
+        }
+        _ => format!("{} bytes, starting {:#010x}", data.len(), word(0)),
+    }
+}
+
+/// `AppletIdentityInfo { AppletId, pad, u64 title_id }` for the home menu.
+/// `AppletIdentityInfo` for the running applet's caller, the home menu when none started it.
+fn caller_identity(cpu: &Cpu) -> [u8; 16] {
+    let Some((caller, _)) = cpu.process().caller else {
+        return home_menu_identity();
+    };
+    let caller = &cpu.processes[&caller];
+    let program = caller.program_id;
+    let homebrew = caller
+        .module_names
+        .iter()
+        .any(|(_, _, name)| name == "homebrew");
+    let applet_id = if homebrew {
+        0x01
+    } else {
+        applet_id_for(program)
+    };
+    let mut info = [0u8; 16];
+    info[..4].copy_from_slice(&applet_id.to_le_bytes());
+    info[8..].copy_from_slice(&program.to_le_bytes());
+    info
+}
+
+/// The `LibraryAppletMode` the running applet's caller created it with; AllForeground when
+/// nothing started it.
+pub(crate) fn library_applet_mode(cpu: &Cpu) -> u32 {
+    cpu.process()
+        .caller
+        .and_then(|(caller, accessor)| cpu.processes.get(&caller)?.am_applets.get(&accessor))
+        .map_or(0, |applet| applet.mode)
+}
+
+fn home_menu_identity() -> [u8; 16] {
+    const QLAUNCH_TITLE_ID: u64 = 0x0100_0000_0000_1000;
+    const SYSTEM_APPLET_MENU: u32 = 3;
+    let mut info = [0u8; 16];
+    info[..4].copy_from_slice(&SYSTEM_APPLET_MENU.to_le_bytes());
+    info[8..].copy_from_slice(&QLAUNCH_TITLE_ID.to_le_bytes());
+    info
+}
+
+/// `nn::hid::system::ControllerSupportArgPrivate`, as the Home Menu opens the applet: it is
+/// only launched this way with no caller, and otherwise answers "cancelled" at once.
+fn controller_support_arg_private() -> Vec<u8> {
+    const SIZE: u32 = 0x14;
+    let mut arg = Vec::with_capacity(SIZE as usize);
+    arg.extend_from_slice(&SIZE.to_le_bytes());
+    arg.extend_from_slice(&(CONTROLLER_SUPPORT_ARG_SIZE as u32).to_le_bytes());
+    // IsHomeMenu, Flag1, ShowControllerSupport, caller Application.
+    arg.extend_from_slice(&[1, 1, 0, 0]);
+    // No style set, and hold type Vertical.
+    arg.extend_from_slice(&0u32.to_le_bytes());
+    arg.extend_from_slice(&0u32.to_le_bytes());
+    arg
+}
+
+/// `nn::hid::ControllerSupportArg`, the 0x430-byte shape.
+const CONTROLLER_SUPPORT_ARG_SIZE: usize = 0x430;
+
+fn controller_support_arg() -> Vec<u8> {
+    let mut arg = vec![0u8; CONTROLLER_SUPPORT_ARG_SIZE];
+    // Players 1 to 4, connections may be taken over, dual Joy-Con permitted.
+    arg[..5].copy_from_slice(&[1, 4, 1, 0, 1]);
+    arg
+}
+
+/// The title id of the library applet an `AppletId` names, the inverse of [`applet_id_for`].
+fn library_applet_program_id(applet_id: u32) -> Option<u64> {
+    const BASE: u64 = 0x0100_0000_0000_0000;
+    let low = match applet_id {
+        0x0A..=0x14 => 0x1001 + u64::from(applet_id - 0x0A),
+        0x15..=0x19 => 0x100D + u64::from(applet_id - 0x15),
+        APPLET_MY_PAGE => 0x1013,
+        _ => return None,
+    };
+    Some(BASE | low)
+}
+
+/// The `AppletId` a system applet reports for itself, from its title id.
+fn applet_id_for(program_id: u64) -> u32 {
+    if program_id & !0xFFFF != 0x0100_0000_0000_0000 {
+        return 0x01; // AppletId_Application
+    }
+    match program_id & 0xFFFF {
+        0x1000 => 0x03, // qlaunch -> SystemAppletMenu
+        0x100C => 0x02, // overlayDisp -> OverlayApplet
+        // auth, cabinet, controller, dataErase, error, netConnect,
+        // playerSelect, swkbd, miiEdit, web, shop.
+        low @ 0x1001..=0x100B => 0x0A + (low as u32 - 0x1001),
+        low @ 0x100D..=0x1011 => 0x15 + (low as u32 - 0x100D),
+        // `starter` sits in the range but is not a library applet.
+        0x1012 => 0x04, // starter -> SystemApplication
+        0x1013 => 0x1A, // myPage
+        _ => 0x01,
+    }
+}
+
+impl Cpu {
+    /// Start the installed applet behind `accessor` as a process with what its caller
+    /// pushed. False if it is not installed or answered here instead.
+    fn start_installed_applet(&mut self, accessor: u64) -> bool {
+        let Some(applet) = self.process().am_applets.get(&accessor) else {
+            return false;
+        };
+        if applet.answered || applet.id == APPLET_ERROR {
+            return false;
+        }
+        let Some(program) =
+            library_applet_program_id(applet.id).filter(|&program| self.is_installed(program))
+        else {
+            return false;
+        };
+        let (name, in_data) = (applet_name(applet.id), applet.in_data.clone());
+        match self.spawn_installed(program) {
+            Ok(pid) => {
+                let caller = self.pid;
+                let process = self.machine.process_mut(pid);
+                process.caller = Some((caller, accessor));
+                process.am_in_data = in_data.into();
+                if let Some(applet) = self.process_mut().am_applets.get_mut(&accessor) {
+                    applet.process = Some(pid);
+                }
+                self.set_application_focus(false);
+                self.log(
+                    Level::Info,
+                    &format!("[am] started the {name} applet as process {pid}"),
+                );
+                true
+            }
+            Err(e) => {
+                self.log(
+                    Level::Error,
+                    &format!("[am] the {name} applet could not start, so it ends cancelled: {e}"),
+                );
+                false
+            }
+        }
+    }
+
+    /// End the applet behind `accessor`, with a result when it `exited` rather than crashed.
+    pub(crate) fn finish_library_applet(&mut self, accessor: u64, exited: bool) {
+        let Some(applet) = self.process_mut().am_applets.get_mut(&accessor) else {
+            return;
+        };
+        applet.answered |= exited;
+        applet.process = None;
+        applet.finish();
+        self.signal_library_applet_event(accessor, STATE_CHANGED_EVENT);
+        self.set_application_focus(true);
+    }
+
+    /// Hand a storage the running applet pushed to its caller's accessor; false if no
+    /// caller started it.
+    fn push_to_caller(&mut self, storage: Vec<u8>, interactive: bool) -> bool {
+        let Some((caller, accessor)) = self.process().caller else {
+            return false;
+        };
+        self.in_process(caller, |cpu| {
+            let Some(applet) = cpu.process_mut().am_applets.get_mut(&accessor) else {
+                return;
+            };
+            let slot = if interactive {
+                applet.interactive_out.push_back(storage);
+                POP_INTERACTIVE_OUT_DATA_EVENT
+            } else {
+                applet.answer_with(storage);
+                POP_OUT_DATA_EVENT
+            };
+            cpu.signal_library_applet_event(accessor, slot);
+        });
+        true
+    }
+
+    /// Ask the applet process behind `accessor` to exit; false if none runs.
+    fn request_library_applet_exit(&mut self, accessor: u64) -> bool {
+        let Some(pid) = self
+            .process()
+            .am_applets
+            .get(&accessor)
+            .and_then(|applet| applet.process)
+        else {
+            return false;
+        };
+        self.in_process(pid, |cpu| {
+            cpu.queue_applet_message(AppletMessage::ExitRequest)
+        });
+        true
+    }
+
+    /// End the applet process behind `accessor` at once, if one runs.
+    fn terminate_library_applet(&mut self, accessor: u64) {
+        let running = self
+            .process_mut()
+            .am_applets
+            .get_mut(&accessor)
+            .and_then(|applet| applet.process.take());
+        if let Some(pid) = running {
+            self.end_process(pid, Ending::Terminated);
+        }
+    }
+
+    /// Pop the front storage an applet pushed out, or 2128-0002 if there is none.
+    fn pop_library_applet_storage(
+        &mut self,
+        tls: u64,
+        handle: u64,
+        accessor: u64,
+        interactive: bool,
+    ) -> Result<()> {
+        let slot = if interactive {
+            POP_INTERACTIVE_OUT_DATA_EVENT
+        } else {
+            POP_OUT_DATA_EVENT
+        };
+        let popped = self
+            .process_mut()
+            .am_applets
+            .get_mut(&accessor)
+            .filter(|applet| applet.finished || applet.process.is_some())
+            .and_then(|applet| {
+                let queue = if interactive {
+                    &mut applet.interactive_out
+                } else {
+                    &mut applet.answers
+                };
+                let storage = queue.pop_front()?;
+                Some((storage, applet.events[slot].filter(|_| queue.is_empty())))
+            });
+        let Some((storage, drained_event)) = popped else {
+            return self.write_ipc_response(tls, AM_NO_DATA_IN_CHANNEL, &[], &[], &[]);
+        };
+        if let Some(event) = drained_event {
+            self.clear_event(event);
+        }
+        let key = self.reply_with_interface(tls, handle, "am:storage")?;
+        self.process_mut().am_storages.insert(key, storage);
+        Ok(())
+    }
+
+    /// The event an `ILibraryAppletAccessor` hands out for `slot`, allocated once.
+    fn library_applet_event(&mut self, key: u64, slot: usize) -> u64 {
+        if let Some(event) = self
+            .process()
+            .am_applets
+            .get(&key)
+            .and_then(|applet| applet.events[slot])
+        {
+            return event;
+        }
+        // Not auto-clearing: an ended applet stays ended.
+        let event = self.alloc_event(LIBRARY_APPLET_EVENT_NAMES[slot], false);
+        self.process_mut().am_applets.entry(key).or_default().events[slot] = Some(event);
+        event
+    }
+
+    /// Pop the front of a library applet's queue as an `IStorage`, or 2128-0002 if empty.
+    fn pop_applet_storage(&mut self, tls: u64, handle: u64, queue: AppletQueue) -> Result<()> {
+        let data = match queue {
+            AppletQueue::InData => self.process_mut().am_in_data.pop_front(),
+            AppletQueue::InteractiveInData => self.process_mut().am_interactive_in.pop_front(),
+        };
+        self.refresh_applet_pop_events();
+        match data {
+            Some(data) => {
+                let key = self.reply_with_interface(tls, handle, "am:storage")?;
+                self.process_mut().am_storages.insert(key, data);
+                Ok(())
+            }
+            None => {
+                if self
+                    .unimplemented_ipc
+                    .insert((queue.event_name().to_string(), None))
+                {
+                    self.log(Level::Warn, queue.empty_message());
+                }
+                self.write_ipc_response(tls, AM_NO_DATA_IN_CHANNEL, &[], &[], &[])
+            }
+        }
+    }
+
+    /// The event a pop queue hands out, allocated once and not auto-clearing.
+    fn applet_queue_event(&mut self, queue: AppletQueue) -> u64 {
+        if let Some(event) = self.process().am_pop_events[queue.slot()] {
+            return event;
+        }
+        let event = self.alloc_event(queue.event_name(), false);
+        self.process_mut().am_pop_events[queue.slot()] = Some(event);
+        event
+    }
+
+    /// Signal each pop event whose queue is non-empty and clear the rest.
+    pub(crate) fn refresh_applet_pop_events(&mut self) {
+        for queue in AppletQueue::ALL {
+            let Some(event) = self.process().am_pop_events[queue.slot()] else {
+                continue;
+            };
+            let waiting = match queue {
+                AppletQueue::InData => !self.process().am_in_data.is_empty(),
+                AppletQueue::InteractiveInData => !self.process().am_interactive_in.is_empty(),
+            };
+            if waiting {
+                self.signal_event(event);
+            } else {
+                self.clear_event(event);
+            }
+        }
+    }
+
+    /// Fire one of an applet's events, if the caller has taken it.
+    fn signal_library_applet_event(&mut self, key: u64, slot: usize) {
+        if let Some(event) = self
+            .process()
+            .am_applets
+            .get(&key)
+            .and_then(|applet| applet.events[slot])
+        {
+            self.signal_event(event);
+        }
+    }
+
+    /// Whether the applet behind an accessor has ended with a storage not yet popped.
+    fn library_applet_has_answer(&self, key: u64) -> bool {
+        self.process()
+            .am_applets
+            .get(&key)
+            .is_some_and(LibraryApplet::has_unpopped_answer)
+    }
+
+    /// Whether the applet behind an accessor has ended.
+    fn library_applet_finished(&self, key: u64) -> bool {
+        self.process()
+            .am_applets
+            .get(&key)
+            .is_some_and(LibraryApplet::is_finished)
+    }
+
+    /// The `ILockAccessor` event, created signalled and manual-reset.
+    fn am_lock_accessor_event(&mut self) -> u64 {
+        match self.process().lock_accessor_event {
+            Some(h) => h,
+            None => {
+                let h = self.alloc_event("am:lock-accessor", false);
+                self.signal_event(h);
+                self.process_mut().lock_accessor_event = Some(h);
+                h
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

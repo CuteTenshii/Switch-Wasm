@@ -1,16 +1,15 @@
 // The run loop: the worker runs slices back to back and reports each to the page.
 
-import type { Housekeeping, SliceReport, WorkerMessage } from '../shared/protocol';
+import type { Housekeeping, SliceReport } from '../shared/protocol';
 import { reportActivity } from './activity';
 import { CMD } from './commands';
 import { tryGpu } from './gpu';
 import { flushLog } from './log';
 import {
-  switch_fb_size, switch_frame_count, switch_halted, switch_pace, switch_present,
+  switch_fb_size, switch_frame_count, switch_halted, switch_pace, switch_present, switch_run,
 } from '@core/switch_wasm.js';
+import { postToPage } from './post';
 import { explainFailure } from './wasm';
-
-const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
 // Slices sized to about one display frame, so input and commands interleave.
 const SLICE_TARGET_MS = 16;
@@ -37,14 +36,17 @@ let tracing = false;
 let budget = FIRST_SLICE;
 let tick = 0;
 let lastPace = 0;
+// Bumped by every start and stop, so a slice scheduled by an earlier loop does not run.
+let generation = 0;
 
 // A zero-delay task: a `setTimeout` chain is clamped to 4 ms after a few calls.
 const wake = new MessageChannel();
-wake.port1.onmessage = () => slice();
+wake.port1.onmessage = (e: MessageEvent<number>) => slice(e.data);
 
 export function startLoop(trace: boolean): void {
   if (running) return;
   running = true;
+  generation++;
   pauseRequested = false;
   tracing = trace;
   budget = trace ? TRACE_SLICE : FIRST_SLICE;
@@ -52,7 +54,7 @@ export function startLoop(trace: boolean): void {
   lastPace = performance.now();
   // Every title draws: open the device as it starts rather than once it asks.
   tryGpu();
-  wake.port2.postMessage(null);
+  wake.port2.postMessage(generation);
 }
 
 // Ends the loop after the slice in flight.
@@ -63,13 +65,11 @@ export function pauseLoop(): void {
 // For a session being freed: nothing more runs on it.
 export function stopLoop(): void {
   running = false;
+  generation++;
 }
 
-function slice(): void {
-  if (!running) {
-    running = false;
-    return;
-  }
+function slice(scheduledBy: number): void {
+  if (!running || scheduledBy !== generation) return;
   const at = performance.now();
   // A trace replays an exact run, which real time would change.
   if (!tracing) {
@@ -77,16 +77,16 @@ function slice(): void {
     lastPace = at;
     const aheadMs = switch_pace(Math.round(credit * CYCLES_PER_MS)) / CYCLES_PER_MS;
     if (aheadMs >= MIN_WAIT_MS && !pauseRequested) {
-      setTimeout(slice, Math.min(aheadMs, MAX_WAIT_MS));
+      setTimeout(() => slice(scheduledBy), Math.min(aheadMs, MAX_WAIT_MS));
       return;
     }
   }
   let steps: number;
   try {
-    steps = CMD.run(budget);
+    steps = switch_run(budget);
   } catch (err) {
     running = false;
-    ctx.postMessage({ type: 'loop_failed', error: explainFailure(err) } satisfies WorkerMessage);
+    postToPage({ type: 'loop_failed', error: explainFailure(err) });
     return;
   }
   const ms = performance.now() - at;
@@ -112,7 +112,7 @@ function slice(): void {
     paintMs,
     housekeeping: stopped || ++tick % HOUSEKEEPING_EVERY === 0 ? housekeeping() : null,
   };
-  ctx.postMessage({ type: 'slice', report } satisfies WorkerMessage);
+  postToPage({ type: 'slice', report });
 
   if (!tracing) {
     const scale = Math.min(2, Math.max(0.5, SLICE_TARGET_MS / Math.max(ms, 0.1)));
@@ -122,7 +122,7 @@ function slice(): void {
     running = false;
     return;
   }
-  wake.port2.postMessage(null);
+  wake.port2.postMessage(scheduledBy);
 }
 
 // Paint a new frame on the page's canvas; how long it took, or null if there was none.

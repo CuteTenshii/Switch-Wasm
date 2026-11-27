@@ -12,19 +12,9 @@ const autoscrollCb = $<HTMLInputElement>('autoscroll-cb');
 const levelSelect = $<HTMLSelectElement>('log-level');
 
 const LEVELS: LogLevel[] = ['error', 'warn', 'info', 'log', 'debug', 'trace'];
-const LEVEL_KEY = 'switch-wasm-log-level';
-
-function storedLevel(): LogLevel {
-  try {
-    const stored = localStorage.getItem(LEVEL_KEY) as LogLevel | null;
-    return stored && LEVELS.includes(stored) ? stored : 'log';
-  } catch {
-    return 'log';
-  }
-}
 
 // The least severe level the console shows.
-let threshold = storedLevel();
+let threshold: LogLevel = 'log';
 levelSelect.value = threshold;
 
 function shown(level: LogLevel): boolean {
@@ -43,9 +33,6 @@ export function onLogLevel(listener: (level: LogLevel) => void): void {
 
 levelSelect.addEventListener('change', () => {
   threshold = levelSelect.value as LogLevel;
-  try {
-    localStorage.setItem(LEVEL_KEY, threshold);
-  } catch { /* the choice still holds for this session */ }
   renderConsole();
   for (const listener of levelListeners) listener(threshold);
 });
@@ -67,11 +54,18 @@ const backlog: Entry[] = [];
 let lastRow: HTMLElement | null = null;
 
 // One entry per line.
-export function log(text: string, level: LogLevel = 'log'): void {
-  for (const line of text.replace(/\n$/, '').split('\n')) logLine(line, level);
+/** Options for `log`. `openConsole: false` keeps an error from opening the Console tab, for one
+ * the page already explains where the user is looking. */
+export interface LogOptions {
+  openConsole?: boolean;
 }
 
-function logLine(msg: string, level: LogLevel): void {
+export function log(text: string, level: LogLevel = 'log', options: LogOptions = {}): void {
+  const reveal = level === 'error' && options.openConsole !== false;
+  for (const line of text.replace(/\n$/, '').split('\n')) logLine(line, level, reveal);
+}
+
+function logLine(msg: string, level: LogLevel, reveal: boolean): void {
   mirrorDirty = true;
   const visible = shown(level);
 
@@ -93,7 +87,7 @@ function logLine(msg: string, level: LogLevel): void {
   lastRow = row({ text: msg, level, count: 1 });
   newRows.push(lastRow);
   if (!frame) frame = requestAnimationFrame(flushRows);
-  if (level === 'error') openPanel('console');
+  if (reveal) openPanel('console');
 }
 
 // Rows reach the page once per frame: a flood of lines must not lay out the console per line.
@@ -144,7 +138,7 @@ function clearConsole(): void {
 $('btn-clear-console').addEventListener('click', clearConsole);
 
 // Includes entries the view has dropped.
-export function consoleText(): string {
+function consoleText(): string {
   return backlog.map(asLine).join('\n');
 }
 
@@ -153,18 +147,18 @@ function asLine(entry: Entry): string {
   return entry.count > 1 ? `${line}  (x${entry.count})` : line;
 }
 
-const saveBtn = $('btn-save-console');
+const saveLabel = $('save-console-label');
 
 let saveLabelTimer = 0;
 function flashSaveLabel(text: string): void {
   clearTimeout(saveLabelTimer);
-  saveBtn.textContent = text;
+  saveLabel.textContent = text;
   saveLabelTimer = setTimeout(() => {
-    saveBtn.textContent = 'Save';
+    saveLabel.textContent = 'Save';
   }, 1400);
 }
 
-export function download(name: string, text: string, type = 'text/plain'): void {
+function download(name: string, text: string, type = 'text/plain'): void {
   const url = URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` }));
   const link = el('a');
   link.href = url;
@@ -174,7 +168,7 @@ export function download(name: string, text: string, type = 'text/plain'): void 
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
-export function stamp(): string {
+function stamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-').replace('Z', '');
 }
 
@@ -198,7 +192,7 @@ async function mirrorLog(): Promise<void> {
 }
 
 // Read once at startup and then cleared.
-export async function takePreviousLog(): Promise<string> {
+async function takePreviousLog(): Promise<string> {
   try {
     const db = await logIdb();
     const previous = await idbGet<string>(db, LOG_STORE, LOG_KEY);
@@ -301,4 +295,4 @@ export function saveLog(): void {
   download(`switch-wasm-log-${stamp()}.txt`, logHeader() + '\n\n' + text);
 }
 
-saveBtn.addEventListener('click', saveLog);
+$('btn-save-console').addEventListener('click', saveLog);

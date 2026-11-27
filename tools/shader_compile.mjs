@@ -1,8 +1,8 @@
 // Time how long the driver takes over WGSL shaders, slowest first:
 //   node tools/shader_compile.mjs <file-or-dir>... [--replace=pattern::text]...
 // Shaders come from `browser_boot.mjs --dump-wgsl=dir`. Each `--replace` is a regular expression
-// applied to every shader, to time a change against the original before writing it in the emitter.
-// A window opens, because only a headed browser gets the machine's GPU, and the watchdog is off so
+// applied to every shader, to time a change against the original before writing it in the emitter;
+// `\n` in its text is a newline. A window opens, because only a headed browser gets the machine's GPU, and the watchdog is off so
 // that a shader slow enough to be killed still gets a number. Literals are changed per run
 // so the driver's on-disk cache does not answer instead.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -13,7 +13,7 @@ const USAGE = 'usage: node tools/shader_compile.mjs <file-or-dir>... [--replace=
 const { flags, positional: paths } = commandLine();
 const replacements = flags('replace').map((replacement) => {
   const [pattern, text] = replacement.split('::');
-  return [new RegExp(pattern, 'g'), text ?? ''];
+  return [new RegExp(pattern, 'g'), (text ?? '').replaceAll('\\n', '\n')];
 });
 if (!paths.length) fail(USAGE);
 const files = paths.flatMap((path) => statSync(path).isDirectory()
@@ -43,9 +43,27 @@ function vertexFor(code) {
 
 const NO_FRAGMENT = '@fragment fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(0.0); }';
 
+const VERTEX_FORMATS = {
+  'f32': 'float32', 'vec2<f32>': 'float32x2', 'vec3<f32>': 'float32x3', 'vec4<f32>': 'float32x4',
+  'u32': 'uint32', 'vec2<u32>': 'uint32x2', 'vec3<u32>': 'uint32x3', 'vec4<u32>': 'uint32x4',
+  'i32': 'sint32', 'vec2<i32>': 'sint32x2', 'vec3<i32>': 'sint32x3', 'vec4<i32>': 'sint32x4',
+};
+
+// The attributes a vertex shader reads, 16 bytes apart in one buffer: the limit on buffers
+// is lower than the one on attributes.
+function vertexBuffers(code) {
+  const struct = code.match(/struct VertexInput \{([\s\S]*?)\n\}/)?.[1] ?? '';
+  const attributes = [...struct.matchAll(/@location\((\d+)\)\s*\w+:\s*([\w<>]+),/g)]
+    .map(([, location, type], i) => ({ shaderLocation: Number(location), offset: 16 * i, format: VERTEX_FORMATS[type] }));
+  return attributes.length ? [{ arrayStride: 16 * attributes.length, attributes }] : [];
+}
+
+// The first entry point of a stage, since a module may hold several.
+const entryPoint = (code, stage) => code.match(new RegExp(`@${stage}\\s+fn\\s+(\\w+)`))?.[1];
+
 async function compile(page, code) {
   const isFragment = code.includes('@fragment');
-  return page.evaluate(async ({ code, isFragment, vertex, noFragment }) => {
+  return page.evaluate(async ({ code, isFragment, vertex, noFragment, buffers, vertexEntry, fragmentEntry }) => {
     const adapter = await navigator.gpu.requestAdapter();
     const device = await adapter.requestDevice({ requiredFeatures: [...adapter.features] });
     const given = device.createShaderModule({ code });
@@ -55,8 +73,10 @@ async function compile(page, code) {
     try {
       await device.createRenderPipelineAsync({
         layout: 'auto',
-        vertex: { module: isFragment ? stage : given },
-        fragment: { module: isFragment ? given : stage, targets },
+        vertex: isFragment ? { module: stage } : { module: given, entryPoint: vertexEntry, buffers },
+        fragment: isFragment
+          ? { module: given, entryPoint: fragmentEntry, targets }
+          : { module: stage, targets },
       });
       return { ms: Math.round(performance.now() - started) };
     } catch (error) {
@@ -64,7 +84,10 @@ async function compile(page, code) {
     } finally {
       device.destroy();
     }
-  }, { code, isFragment, vertex: vertexFor(code), noFragment: NO_FRAGMENT });
+  }, {
+    code, isFragment, vertex: vertexFor(code), noFragment: NO_FRAGMENT, buffers: vertexBuffers(code),
+    vertexEntry: entryPoint(code, 'vertex'), fragmentEntry: entryPoint(code, 'fragment'),
+  });
 }
 
 const browser = await launchChromium({ args: ['--disable-gpu-watchdog'] });
@@ -90,7 +113,9 @@ try {
   console.log('      ms  replaced     bytes  shader');
   for (const row of results) {
     const replaced = row.replaced ? String(row.replaced.ms ?? 'error') : '-';
-    const note = row.error ?? (row.cached ? 'no literal to change: the driver may have cached it' : '');
+    const note = row.error
+      ?? (row.replaced?.error && `replaced: ${row.replaced.error}`)
+      ?? (row.cached ? 'no literal to change: the driver may have cached it' : '');
     console.log(`${String(row.ms ?? '-').padStart(8)}  ${replaced.padStart(8)}  ${String(row.bytes).padStart(8)}  ${row.name} ${note}`);
   }
   const total = results.reduce((sum, row) => sum + (row.ms ?? 0), 0);

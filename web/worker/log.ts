@@ -1,14 +1,12 @@
 // Worker logging, forwarded to the page's log instead of `console`.
 
-import type { LogLevel, WorkerMessage } from '../shared/protocol';
+import type { LogLevel } from '../shared/protocol';
 import { switch_log_drain } from '@core/switch_wasm.js';
+import { postToPage } from './post';
 import { coreLoaded } from './wasm';
 
-const ctx = self as unknown as DedicatedWorkerGlobalScope;
-
 export function workerLog(text: string, level: LogLevel = 'log'): void {
-  const message: WorkerMessage = { type: 'log', text, level };
-  ctx.postMessage(message);
+  postToPage({ type: 'log', text, level });
 }
 
 // Indexed by the digit that opens each line `switch_log_drain` returns.

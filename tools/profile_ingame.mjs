@@ -1,30 +1,39 @@
 // Run a title through browser_boot.mjs, wait for a state worth measuring, then profile the page:
 //   node tools/profile_ingame.mjs <container> | --nand=name [--when-fps=low-high] [--after=seconds]
-//                                 [--settle=samples] [--record=seconds] [--dir=out] [browser_boot flags]
+//                                 [--settle=samples] [--record=seconds] [--dir=out] [--callers=regex]
+//                                 [browser_boot flags]
 // Recording starts once `--settle` samples in a row, past `--after`, sit in the fps range. The report
 // names the wasm functions of the busiest thread, and gives every thread's CPU in the page and the
-// GPU process, which perf cannot attach to. Needs perf, and --seconds caps the wait.
+// GPU process, which perf cannot attach to. Needs perf on Linux and sample on macOS (the report then
+// has process CPU and the busiest threads, not per-thread CPU), and --seconds caps the wait.
+// `--callers` records call chains through frame pointers, as V8 keeps them in wasm and JS frames,
+// and ranks the chains under the busiest thread's functions whose names match (Linux only).
 import { spawn, spawnSync } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { commandLine, fail, repoRoot } from './common.mjs';
 
-const OWN_FLAGS = ['when-fps', 'after', 'settle', 'record', 'dir'];
+const darwin = process.platform === 'darwin';
+const OWN_FLAGS = ['when-fps', 'after', 'settle', 'record', 'dir', 'callers'];
 const SAMPLE_HZ = 500;
 const TOP_INTERVAL_S = 5;
 const FUNCTIONS_SHOWN = 45;
+const CHAINS_SHOWN = 25;
+const CHAIN_DEPTH = 8;
 
 const { args, flag, positional } = commandLine();
 if (!positional.length && !flag('nand')) {
   fail('usage: node tools/profile_ingame.mjs <container> | --nand=name [--when-fps=low-high]'
-    + ' [--after=seconds] [--settle=samples] [--record=seconds] [--dir=out] [browser_boot flags]');
+    + ' [--after=seconds] [--settle=samples] [--record=seconds] [--dir=out] [--callers=regex] [browser_boot flags]');
 }
 const [low, high] = (flag('when-fps') ?? '0.3-4').split('-').map(Number);
 const after = Number(flag('after') ?? 0);
 const settle = Number(flag('settle') ?? 6);
 const record = Number(flag('record') ?? 40);
 const dir = resolve(flag('dir') ?? 'profile');
+const callers = flag('callers') === undefined ? null : new RegExp(flag('callers'));
+if (callers && darwin) fail('--callers needs perf, which macOS does not have');
 mkdirSync(dir, { recursive: true });
 
 const processes = () => spawnSync('ps', ['-eo', 'pid=,ppid=,pcpu=,args='], { encoding: 'utf8', maxBuffer: 1 << 26 })
@@ -64,19 +73,41 @@ function symbolAt(symbols, ip) {
   return hit && ip < hit.start + hit.size ? hit.name : null;
 }
 
-// perf does not apply a JIT map to anonymous V8 pages, so the samples are resolved here.
-function reportPerf(data, map) {
-  const script = spawnSync('perf', ['script', '-i', data, '-G', '-F', 'comm,tid,ip,dso'], { encoding: 'utf8', maxBuffer: 1 << 30 });
-  const symbols = resolveSymbols(map);
-  const threads = new Map();
+// perf does not apply a JIT map to anonymous V8 pages, so the samples are resolved here. A sample
+// is one line, or with call chains a header line and one indented line per frame, leaf first.
+function perfSamples(data, symbols) {
+  const script = spawnSync('perf', ['script', '-i', data, '-F', 'comm,tid,ip,dso'], { encoding: 'utf8', maxBuffer: 1 << 30 });
+  const name = (ip, dso) => symbolAt(symbols, BigInt(`0x${ip}`)) ?? `[${dso.split('/').pop()}]`;
+  const samples = [];
+  let open = null;
   for (const line of script.stdout.split('\n')) {
-    const match = /^\s*(.*?)\s+(\d+)\s+([0-9a-f]+)\s+\((.*)\)\s*$/.exec(line);
-    if (!match) continue;
-    const [, comm, tid, ip, dso] = match;
-    const name = symbolAt(symbols, BigInt(`0x${ip}`)) ?? `[${dso.split('/').pop()}]`;
+    const frame = /^\s+([0-9a-f]+)\s+\((.*)\)\s*$/.exec(line);
+    if (frame && open) {
+      open.frames.push(name(frame[1], frame[2]));
+      continue;
+    }
+    const single = /^\s*(.*?)\s+(\d+)\s+([0-9a-f]+)\s+\((.*)\)\s*$/.exec(line);
+    if (single) {
+      samples.push({ comm: single[1], tid: single[2], frames: [name(single[3], single[4])] });
+      open = null;
+      continue;
+    }
+    const header = /^(\S.*?)\s+(\d+)\s*$/.exec(line);
+    open = header ? { comm: header[1], tid: header[2], frames: [] } : null;
+    if (open) samples.push(open);
+  }
+  return samples.filter((sample) => sample.frames.length);
+}
+
+const shortName = (name) => name.replace(/^(LazyCompile|Function|JS):/, '').slice(0, 100);
+
+function reportPerf(data, map) {
+  const samples = perfSamples(data, resolveSymbols(map));
+  const threads = new Map();
+  for (const { comm, tid, frames } of samples) {
     const thread = threads.get(tid) ?? { comm, samples: 0, functions: new Map() };
     thread.samples += 1;
-    thread.functions.set(name, (thread.functions.get(name) ?? 0) + 1);
+    thread.functions.set(frames[0], (thread.functions.get(frames[0]) ?? 0) + 1);
     threads.set(tid, thread);
   }
   const ranked = [...threads].sort((a, b) => b[1].samples - a[1].samples);
@@ -85,11 +116,73 @@ function reportPerf(data, map) {
   for (const [tid, thread] of ranked.slice(0, 3)) {
     out.push('', `Functions on thread ${tid} (${thread.comm}), ${thread.samples} samples:`);
     const functions = [...thread.functions].sort((a, b) => b[1] - a[1]).slice(0, FUNCTIONS_SHOWN);
-    for (const [name, samples] of functions) {
-      out.push(`${(100 * samples / thread.samples).toFixed(2).padStart(7)}%  ${name.replace(/^(LazyCompile|Function|JS):/, '').slice(0, 100)}`);
+    for (const [name, count] of functions) {
+      out.push(`${(100 * count / thread.samples).toFixed(2).padStart(7)}%  ${shortName(name)}`);
     }
   }
+  if (callers && ranked.length) out.push('', ...reportCallers(samples, ranked[0]));
   return out;
+}
+
+// The chains of the busiest thread's samples whose leaf matches `--callers`, counted whole and
+// ranked; a share is of every sample on the thread.
+function reportCallers(samples, [tid, thread]) {
+  const chains = new Map();
+  let matched = 0;
+  for (const sample of samples) {
+    if (sample.tid !== tid || !callers.test(sample.frames[0])) continue;
+    matched += 1;
+    const chain = sample.frames.slice(0, CHAIN_DEPTH).map(shortName).join('\n      <- ');
+    chains.set(chain, (chains.get(chain) ?? 0) + 1);
+  }
+  const out = [`Chains under functions matching ${callers} on thread ${tid}, ${matched} of ${thread.samples} samples:`];
+  for (const [chain, count] of [...chains].sort((a, b) => b[1] - a[1]).slice(0, CHAINS_SHOWN)) {
+    out.push(`${(100 * count / thread.samples).toFixed(2).padStart(7)}%  ${chain}`);
+  }
+  return out;
+}
+
+// `sample` lists the frames at the top of stack across all threads; the kernel waits of idle threads are
+// set aside and the rest ranked.
+const IDLE_WAITS = /^(mach_msg2?_trap|kevent64|__psynch_cvwait|__workq_kernreturn|semaphore_wait_trap|__ulock_wait2?|__semwait_signal|select|poll|read)\b/;
+
+function reportSample(path, map) {
+  const symbols = resolveSymbols(map);
+  const lines = readFileSync(path, 'utf8').split('\n');
+  const start = lines.findIndex((line) => line.startsWith('Sort by top of stack'));
+  const frames = new Map();
+  for (const line of lines.slice(start + 1)) {
+    if (!line.trim()) break;
+    const match = /^\s+(.*?)\s+(\d+)$/.exec(line);
+    if (!match) continue;
+    const address = /(?:^|\[)0x([0-9a-f]+)\]?/.exec(match[1]);
+    const name = (address ? symbolAt(symbols, BigInt(`0x${address[1]}`)) ?? match[1] : match[1])
+      .replace(/^(LazyCompile|Function|JS):/, '').slice(0, 100);
+    frames.set(name, (frames.get(name) ?? 0) + Number(match[2]));
+  }
+  const busy = [...frames].filter(([name]) => !IDLE_WAITS.test(name)).sort((a, b) => b[1] - a[1]);
+  const total = busy.reduce((sum, [, n]) => sum + n, 0);
+  const all = [...frames.values()].reduce((sum, n) => sum + n, 0);
+  return [`Top of stack in the page, ${total} busy of ${all} thread samples:`,
+    ...busy.slice(0, FUNCTIONS_SHOWN).map(([name, n]) => `${(100 * n / total).toFixed(2).padStart(7)}%  ${name}`)];
+}
+
+// The page's and the GPU process's CPU, one `ps` reading each interval.
+function pollCpu(pids, seconds) {
+  const done = new Promise((resolveDone) => {
+    const rows = new Map();
+    let left = Math.round(seconds / TOP_INTERVAL_S);
+    const timer = setInterval(() => {
+      for (const p of processes()) {
+        if (pids.includes(p.pid)) rows.set(p.pid, [...(rows.get(p.pid) ?? []), p.cpu]);
+      }
+      if (--left <= 0) {
+        clearInterval(timer);
+        resolveDone(rows);
+      }
+    }, TOP_INTERVAL_S * 1000);
+  });
+  return done;
 }
 
 function reportTop(path, renderer, gpu) {
@@ -108,7 +201,6 @@ function reportTop(path, renderer, gpu) {
 
 const forwarded = args.filter((a) => !OWN_FLAGS.some((name) => a.startsWith(`--${name}=`)));
 if (!forwarded.some((a) => a.startsWith('--seconds='))) forwarded.push('--seconds=1500');
-if (!forwarded.includes('--headed')) forwarded.push('--headed');
 const boot = spawn(process.execPath, [join(repoRoot, 'tools/browser_boot.mjs'), ...forwarded,
   '--browser-arg=--no-sandbox',
   '--browser-arg=--js-flags=--perf-basic-prof --no-logfile-per-isolate --logfile=/dev/null',
@@ -142,19 +234,39 @@ if (!await triggered) {
 const renderer = browserProcess(boot.pid, 'renderer');
 const gpu = browserProcess(boot.pid, 'gpu-process');
 console.log(`recording ${record}s of page ${renderer}, GPU process ${gpu}`);
-const data = join(dir, 'perf.data');
+const data = join(dir, darwin ? 'sample.txt' : 'perf.data');
 const topPath = join(dir, 'top.txt');
-const topFile = createWriteStream(topPath);
-const shots = String(Math.round(record / TOP_INTERVAL_S) + 1);
-const top = spawn('top', ['-H', '-b', '-d', String(TOP_INTERVAL_S), '-n', shots, '-p', `${renderer},${gpu}`], { stdio: ['ignore', 'pipe', 'ignore'] });
-top.stdout.pipe(topFile);
-const perf = spawnSync('perf', ['record', '-q', '-e', 'cpu-clock:u', '-F', String(SAMPLE_HZ), '-p', String(renderer), '-o', data, '--', 'sleep', String(record)], { encoding: 'utf8' });
-if (perf.status !== 0) console.error(`perf failed: ${perf.stderr.trim()}`);
-await new Promise((done) => top.on('close', done));
+let profiled;
+let cpu;
+if (darwin) {
+  // The page is sampled every millisecond; the processes' CPU is read beside it.
+  const sampled = spawn('sample', [String(renderer), String(record), '1', '-file', data], { stdio: 'ignore' });
+  const closed = new Promise((done) => sampled.on('close', done));
+  cpu = await pollCpu([renderer, gpu], record);
+  profiled = await closed === 0;
+  if (!profiled) console.error('sample failed');
+} else {
+  const topFile = createWriteStream(topPath);
+  const shots = String(Math.round(record / TOP_INTERVAL_S) + 1);
+  const top = spawn('top', ['-H', '-b', '-d', String(TOP_INTERVAL_S), '-n', shots, '-p', `${renderer},${gpu}`], { stdio: ['ignore', 'pipe', 'ignore'] });
+  top.stdout.pipe(topFile);
+  const chains = callers ? ['--call-graph=fp'] : [];
+  const perf = spawnSync('perf', ['record', '-q', '-e', 'cpu-clock:u', ...chains, '-F', String(SAMPLE_HZ), '-p', String(renderer), '-o', data, '--', 'sleep', String(record)], { encoding: 'utf8' });
+  profiled = perf.status === 0;
+  if (!profiled) console.error(`perf failed: ${perf.stderr.trim()}`);
+  await new Promise((done) => top.on('close', done));
+}
 boot.kill('SIGTERM');
 await ended;
 bootLog.end();
 
-const report = [...(perf.status === 0 ? reportPerf(data, `/tmp/perf-${renderer}.map`) : []), ...reportTop(topPath, renderer, gpu)];
+const map = `/tmp/perf-${renderer}.map`;
+const processCpu = () => ['', 'CPU by process, mean of the readings:', ...[[renderer, 'page'], [gpu, 'GPU process']].map(([pid, name]) => {
+  const readings = cpu.get(pid) ?? [0];
+  return `${(readings.reduce((a, b) => a + b, 0) / readings.length).toFixed(1).padStart(7)}%  ${name} ${pid}`;
+})];
+const report = darwin
+  ? [...(profiled ? reportSample(data, map) : []), ...processCpu()]
+  : [...(profiled ? reportPerf(data, map) : []), ...reportTop(topPath, renderer, gpu)];
 writeFileSync(join(dir, 'report.txt'), `${report.join('\n')}\n`);
 console.log(report.join('\n'));

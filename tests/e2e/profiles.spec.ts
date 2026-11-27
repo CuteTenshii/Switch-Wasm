@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import { crc32, deflateSync } from 'node:zlib';
-import { expect, openPage, test } from './page';
+import { expect, openPage, reloadPage, rowNamed, test } from './page';
 
 // A PNG whose column `x` is `rgb(x)`.
 function png(width: number, height: number, rgb: (x: number) => [number, number, number]): Buffer {
@@ -26,11 +26,7 @@ function png(width: number, height: number, rgb: (x: number) => [number, number,
   ]);
 }
 
-// The row of the profile named exactly `name` (`hasText` is a substring match).
-const row = (page: Page, name: string) =>
-  page.locator('.profile-row').filter({
-    has: page.locator('.profile-name').getByText(name, { exact: true }),
-  });
+const row = (page: Page, name: string) => rowNamed(page, '.profile-row', '.profile-name', name);
 
 async function addProfile(page: Page, name: string): Promise<void> {
   // Typed key by key, so game keyboard controls must not swallow the letters.
@@ -39,16 +35,69 @@ async function addProfile(page: Page, name: string): Promise<void> {
   await expect(row(page, name)).toBeVisible();
 }
 
-test.beforeEach(async ({ page }) => {
-  await openPage(page);
+async function openProfiles(page: Page): Promise<void> {
   await page.locator('#btn-profile').click();
   await expect(page.locator('#profiles')).toBeVisible();
-});
+}
 
-test('a new console has one profile, playing', async ({ page }) => {
-  await expect(page.locator('.profile-row')).toHaveCount(1);
-  await expect(row(page, 'Player')).toContainText('Playing');
-  await expect(page.locator('#btn-profile')).toContainText('Player');
+async function uidOf(page: Page, name: string): Promise<string> {
+  return (await row(page, name).locator('.profile-uid').textContent()) ?? '';
+}
+
+// Opens the UID form of `name` unless it is open, and submits `uid`.
+async function submitUid(page: Page, name: string, uid: string): Promise<void> {
+  const input = page.locator('.profile-uid-form input');
+  if (!await input.isVisible()) await row(page, name).getByRole('button', { name: 'Edit UID' }).click();
+  await input.fill(uid);
+  await input.press('Enter');
+}
+
+// Stores `keys` (`<save id>/<path>`) the way older builds did, in IndexedDB, and reloads so the
+// startup move to OPFS brings them into the session.
+async function seedSaves(page: Page, keys: string[]): Promise<void> {
+  await page.evaluate(async (seed) => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open('switch-wasm-nand');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error ?? new Error('open failed'));
+    });
+    const tx = db.transaction('saves', 'readwrite');
+    for (const key of seed) tx.objectStore('saves').put({ kind: 'file', data: new Uint8Array([1, 2, 3]) }, key);
+    await new Promise((resolve) => {
+      tx.oncomplete = resolve;
+    });
+    db.close();
+  }, keys);
+  await reloadPage(page);
+  await openProfiles(page);
+}
+
+// Every stored save file as `<save id>/<path>`, read from OPFS.
+async function saveKeys(page: Page): Promise<string[]> {
+  return page.evaluate(async () => {
+    const out: string[] = [];
+    let saves: FileSystemDirectoryHandle;
+    try {
+      saves = await (await navigator.storage.getDirectory()).getDirectoryHandle('saves');
+    } catch {
+      return out;
+    }
+    const walk = async (dir: FileSystemDirectoryHandle, prefix: string): Promise<void> => {
+      for await (const [name, handle] of dir.entries()) {
+        if (handle.kind === 'file') out.push(prefix + '/' + name);
+        else await walk(handle, prefix + '/' + name);
+      }
+    };
+    for await (const [name, handle] of saves.entries()) {
+      if (handle.kind === 'directory') await walk(handle, name);
+    }
+    return out.sort();
+  });
+}
+
+test.beforeEach(async ({ page }) => {
+  await openPage(page);
+  await openProfiles(page);
 });
 
 test('profiles can be added, chosen and renamed, and survive a reload', async ({ page }) => {
@@ -62,10 +111,9 @@ test('profiles can be added, chosen and renamed, and survive a reload', async ({
   await page.locator('.profile-rename input').press('Enter');
   await expect(row(page, 'Sam')).toBeVisible();
 
-  await page.reload();
-  await expect(page.locator('#loading')).toHaveClass(/hidden/, { timeout: 30_000 });
+  await reloadPage(page);
   await expect(page.locator('#btn-profile')).toContainText('Jessie Axe');
-  await page.locator('#btn-profile').click();
+  await openProfiles(page);
   await expect(page.locator('.profile-name')).toHaveText(['Sam', 'Jessie Axe']);
 });
 
@@ -80,6 +128,50 @@ test('deleting asks first, and the last profile cannot be deleted', async ({ pag
   await row(page, 'Quinn').getByRole('button', { name: 'Delete' }).click();
   await page.locator('.profile-row.is-confirming').getByRole('button', { name: 'Delete' }).click();
   await expect(page.locator('.profile-row')).toHaveCount(1);
+});
+
+test('a bad UID is refused with the reason, and Escape leaves it unchanged', async ({ page }) => {
+  const old = await uidOf(page, 'Player');
+  expect(old).toMatch(/^[0-9a-f]{32}$/);
+  const error = page.locator('.profile-error');
+  await submitUid(page, 'Player', 'not hex');
+  await expect(error).toHaveText('A UID is 32 hex digits, 0-9 and a-f.');
+  await submitUid(page, 'Player', '0'.repeat(32));
+  await expect(error).toContainText('can\'t be all zeros');
+
+  await addProfile(page, 'Kim');
+  await submitUid(page, 'Player', await uidOf(page, 'Kim'));
+  await expect(error).toHaveText('Kim already has this UID.');
+
+  await page.locator('.profile-uid-form input').press('Escape');
+  await expect(page.locator('.profile-uid-form')).toHaveCount(0);
+  expect(await uidOf(page, 'Player')).toBe(old);
+});
+
+test('a new UID takes the profile\'s saves along and survives a reload', async ({ page }) => {
+  const old = await uidOf(page, 'Player');
+  const fresh = '0123456789abcdef0123456789abcdef';
+  await seedSaves(page, [`0100000000001000@${old}/save.bin`, '0100000000002000/shared.bin']);
+
+  await submitUid(page, 'Player', fresh.toUpperCase());
+  await expect(row(page, 'Player').locator('.profile-uid')).toHaveText(fresh);
+  expect(await saveKeys(page)).toEqual([`0100000000001000@${fresh}/save.bin`, '0100000000002000/shared.bin']);
+
+  await reloadPage(page);
+  await openProfiles(page);
+  await expect(row(page, 'Player').locator('.profile-uid')).toHaveText(fresh);
+  await expect(row(page, 'Player')).toContainText('Playing');
+});
+
+test('a UID change is refused when both UIDs hold a save of the same title', async ({ page }) => {
+  const old = await uidOf(page, 'Player');
+  const other = 'fedcba9876543210fedcba9876543210';
+  const seeded = [`0100000000001000@${old}/a.bin`, `0100000000001000@${other}/b.bin`].sort();
+  await seedSaves(page, seeded);
+  await submitUid(page, 'Player', other);
+  await expect(page.locator('.profile-error')).toContainText('already has saves for title 0100000000001000');
+  await expect(page.locator('.profile-uid-form')).toBeVisible();
+  expect(await saveKeys(page)).toEqual(seeded);
 });
 
 test('a console holds at most eight profiles', async ({ page }) => {

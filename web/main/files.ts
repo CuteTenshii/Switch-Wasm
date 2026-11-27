@@ -1,6 +1,7 @@
 // The file manager: the SD card, save data and NAND titles as stored in this browser.
 
-import type { StorageInfo, StorageVolume } from '../shared/protocol';
+import { NAND_KIND, type StorageInfo, type StorageVolume } from '../shared/protocol';
+import { parseSaveId } from '../shared/saves';
 import {
   Archive, Database, Download, File, FileArchive, FilePen, FileUp, Folder, FolderPlus, FolderUp,
   MemoryStick, Package, PackagePlus, Pencil, Play, Save, Trash2, type IconNode,
@@ -8,10 +9,10 @@ import {
 import { launchFromSd } from './boot';
 import { $, el } from './dom';
 import { showView } from './fileview';
-import { fmtSize } from './format';
+import { fmtSize } from '../shared/format';
 import { icon } from './icons';
-import { removeNandTitle, titleLabel } from './nand';
-import { call, hasSession } from './rpc';
+import { onInstallStatus, onNandChanged, removeNandTitle, titleLabel } from './nand';
+import { call } from './rpc';
 
 type Place =
   | { kind: 'sd'; dir: string }
@@ -20,10 +21,6 @@ type Place =
   | { kind: 'nand' };
 
 const sdVolume: StorageVolume = { kind: 'sd' };
-
-function saveVolume(id: string): StorageVolume {
-  return { kind: 'save', id };
-}
 
 const dialog = $<HTMLDialogElement>('files');
 const list = $('files-list');
@@ -126,7 +123,7 @@ async function droppedFiles(transfer: DataTransfer): Promise<[string, File][]> {
 
 function volumeOf(at: Place): StorageVolume | null {
   if (at.kind === 'sd') return sdVolume;
-  if (at.kind === 'save') return saveVolume(at.id);
+  if (at.kind === 'save') return { kind: 'save', id: at.id };
   return null;
 }
 
@@ -217,17 +214,14 @@ function renderTools(): void {
   $('files-upload-label').hidden = !files;
   $('files-upload-dir-label').hidden = !files;
   $('btn-files-export').hidden = !files;
-  $('files-install-label').hidden = place.kind !== 'nand';
+  $('files-install-dir-label').hidden = place.kind !== 'nand';
+  $('files-install-zip-label').hidden = place.kind !== 'nand';
   document.querySelectorAll<HTMLElement>('.files-tab').forEach((tab) => {
     const on = tab.dataset.volume === (place.kind === 'save' ? 'saves' : place.kind);
     tab.classList.toggle('is-active', on);
     tab.setAttribute('aria-selected', String(on));
   });
-  note.textContent = place.kind === 'nand'
-    ? 'Removing a data archive takes effect once the running title is replaced.'
-    : hasSession()
-      ? 'Changes reach the running title straight away.'
-      : 'Changes are kept in this browser and load with the next title.';
+  note.hidden = place.kind !== 'nand';
 }
 
 function message(text: string): void {
@@ -367,7 +361,7 @@ async function renderFiles(volume: StorageVolume, dir: string, mine: number): Pr
       action(actions, 'Open ' + name, () => void openFile(volume, path, name), false, FilePen);
       action(actions, 'Download ' + name, () => void guarded(async () => {
         const value = await call('storageRead', volume, path);
-        saveBlob(name, new Blob([value?.data ?? new Uint8Array(0)]));
+        saveBlob(name, new Blob([value?.kind === 'file' ? value.data : new Uint8Array(0)]));
       }), false, Download);
     } else {
       action(actions, 'Export ' + name + ' as .zip', () => void guarded(() => exportZip(volume, path, name)), false, Archive);
@@ -394,7 +388,7 @@ async function openFile(volume: StorageVolume, path: string, name: string): Prom
     return undefined;
   });
   if (!value || value.kind !== 'file') return;
-  const data = value.data ?? new Uint8Array(0);
+  const { data } = value;
   setStatus('');
   const dirty = showView(view, {
     name,
@@ -421,14 +415,15 @@ async function renderSaves(mine: number): Promise<void> {
     return;
   }
   for (const id of ids) {
-    const [save, uid] = id.split('@');
-    const owner = uid ? names.get(uid) ?? 'profile ' + uid.slice(0, 8) : 'shared';
-    const label = titleLabel(save);
-    const { actions } = row(Save, label, (label === save ? '' : save + ' · ') + owner,
+    const { uid, title, cache } = parseSaveId(id);
+    const user = uid ? names.get(uid) ?? 'profile ' + uid.slice(0, 8) : 'shared';
+    const owner = cache === null ? user : 'cache storage ' + cache;
+    const label = titleLabel(title);
+    const { actions } = row(Save, label, (label === title ? '' : title + ' · ') + owner,
       () => go({ kind: 'save', id, dir: '/' }));
-    action(actions, 'Export ' + label + ' as .zip', () => void guarded(() => exportZip(saveVolume(id), '/', id)), false, Archive);
+    action(actions, 'Export ' + label + ' as .zip', () => void guarded(() => exportZip({ kind: 'save', id }, '/', id)), false, Archive);
     action(actions, 'Delete ' + label, () => confirmIn(actions, 'Delete this save?', 'Delete', async () => {
-      await call('storageRemove', saveVolume(id), '/');
+      await call('storageRemove', { kind: 'save', id }, '/');
       setStatus('Deleted the save ' + id + '.');
     }), true, Trash2);
   }
@@ -439,13 +434,14 @@ async function renderNand(mine: number): Promise<void> {
   if (mine !== generation) return;
   list.textContent = '';
   if (!titles.length) {
-    message('Nothing installed. Install firmware to add the system applets and data archives.');
+    message('Nothing installed. Install a firmware dump from a folder or a .zip to add the system applets and data archives.');
     return;
   }
   titles.sort((a, b) => a.kind - b.kind || titleLabel(a.id).localeCompare(titleLabel(b.id)));
   for (const title of titles) {
-    const kind = title.kind === 0 ? 'program' : 'data archive';
-    const { actions } = row(title.kind === 0 ? Package : Database, titleLabel(title.id),
+    const program = title.kind === NAND_KIND.program;
+    const kind = program ? 'program' : 'data archive';
+    const { actions } = row(program ? Package : Database, titleLabel(title.id),
       title.id + ' · ' + kind + ' · ' + fmtSize(title.size), null);
     action(actions, 'Download ' + title.name, () => void guarded(async () => {
       const content = await call('nandContent', title.name);
@@ -497,7 +493,8 @@ dialog.addEventListener('cancel', (e) => {
 const tabIcons: Record<string, IconNode> = { sd: MemoryStick, saves: Save, nand: Package };
 const toolIcons: [string, IconNode][] = [
   ['btn-files-mkdir', FolderPlus], ['files-upload-label', FileUp], ['files-upload-dir-label', FolderUp],
-  ['btn-files-export', FileArchive], ['files-install-label', PackagePlus],
+  ['btn-files-export', FileArchive], ['files-install-dir-label', FolderUp],
+  ['files-install-zip-label', PackagePlus],
 ];
 for (const [id, glyph] of toolIcons) $(id).prepend(icon(glyph));
 
@@ -563,6 +560,10 @@ list.addEventListener('drop', (e) => {
   void guarded(async () => upload(volume, dirOf(place), await droppedFiles(transfer)));
 });
 
-document.addEventListener('nand-changed', () => {
+onInstallStatus((text, error) => {
+  if (dialog.open && place.kind === 'nand') setStatus(text, error);
+});
+
+onNandChanged(() => {
   if (dialog.open && place.kind === 'nand') void render();
 });

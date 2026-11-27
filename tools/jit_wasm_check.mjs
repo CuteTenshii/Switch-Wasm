@@ -3,7 +3,7 @@
 //   node tools/jit_wasm_check.mjs [--wasm=<switch_wasm_bg.wasm>]
 //
 // Needs `make wasm` to have been run.
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { commandLine, repoRoot } from './common.mjs';
@@ -11,23 +11,125 @@ import { commandLine, repoRoot } from './common.mjs';
 const out = join(repoRoot, 'target/wasm32-unknown-unknown/debug');
 const wasmPath = commandLine().flag('wasm') || join(out, 'switch_wasm_bg.wasm');
 
-// Node cannot resolve `@host/files`, so point it at a shim that refuses.
-const shim =
-  'data:text/javascript,'
-  + encodeURIComponent('export const hostRead = () => 0;');
-const glue = join(out, 'switch_wasm.jitcheck.mjs');
-writeFileSync(
-  glue,
-  readFileSync(join(out, 'switch_wasm.js'), 'utf8').replace(
-    '\'@host/files\'',
-    JSON.stringify(shim),
-  ),
-);
-const init = (await import(pathToFileURL(glue).href)).default;
-const api = await init({ module_or_path: readFileSync(wasmPath) });
+const api = await import(pathToFileURL(join(out, 'switch_wasm.js')).href);
+await api.default({ module_or_path: readFileSync(wasmPath) });
 
 const BASE = 0x04000000;
 const DATA = BASE + 0x1000;
+
+// Each A32 program is a loop through `bx lr` back to its own start, as the
+// A64 ones are through `ret x30`. Encodings are `llvm-mc -triple=armv7-none-eabi`.
+const A32_PROGRAMS = [
+  {
+    name: 'A32 data processing: flags, carries, shifts',
+    a32: true,
+    data: false,
+    code: [
+      0xe24fe008, // sub  lr, pc, #8      -> lr = BASE
+      0xe2800001, // add  r0, r0, #1
+      0xe0911000, // adds r1, r1, r0
+      0xe2b22000, // adcs r2, r2, #0
+      0xe0233181, // eor  r3, r3, r1, lsl #3
+      0xe1a042e0, // mov  r4, r0, ror #5
+      0xe0c55004, // sbc  r5, r5, r4
+      0xe12fff1e, // bx   lr
+    ],
+    // Eight instructions a trip, past HOT trips: 320001 steps is 40000 trips plus one.
+    steps: 320001n,
+    expect: { 0: 40000n },
+  },
+  {
+    name: 'A32 loads and stores: write-back, halfwords, multiples, a skipped add',
+    a32: true,
+    data: true,
+    code: [
+      0xe24fe008, // sub   lr, pc, #8     -> lr = BASE
+      0xe3011008, // movw  r1, #0x1008
+      0xe3401400, // movt  r1, #0x0400    -> r1 = DATA + 8
+      0xe2800001, // add   r0, r0, #1
+      0xe4810004, // str   r0, [r1], #4
+      0xe5a10004, // str   r0, [r1, #4]!
+      0xe5912000, // ldr   r2, [r1]
+      0xe15130b4, // ldrh  r3, [r1, #-4]
+      0xe1d140d0, // ldrsb r4, [r1]
+      0xe2505032, // subs  r5, r0, #50
+      0x02866001, // addeq r6, r6, #1
+      0xe9010005, // stmdb r1, {r0, r2}
+      0xe8b10180, // ldmia r1!, {r7, r8}
+      0xe12fff1e, // bx    lr
+    ],
+    // Fourteen instructions a trip: 560001 steps is 40000 trips plus one.
+    steps: 560001n,
+    expect: { 0: 40000n },
+  },
+  {
+    name: 'A32 calls and returns, through conditional branches and links',
+    a32: true,
+    data: false,
+    code: [
+      0xe2800001, // add    r0, r0, #1
+      0xeb000003, // bl     #0x18        -> f1
+      0xeb000004, // bl     #0x20        -> f2
+      0xe3500000, // cmp    r0, #0
+      0x1afffffa, // bne    #-0x18       -> back to the add
+      0xe320f000, // nop
+      0xe2822001, // f1: add r2, r2, #1
+      0xe12fff1e, //     bx  lr
+      0xe0833000, // f2: add r3, r3, r0
+      0xe0934002, //     adds r4, r3, r2
+      0x03a05001, //     moveq r5, #1
+      0x112fff1e, //     bxne lr
+      0xe12fff1e, //     bx   lr
+    ],
+    // Eleven instructions a trip.
+    steps: 440001n,
+    expect: {},
+  },
+  {
+    name: 'A32 exclusives, thread pointer reads, BLX register, LDR pc and POP {pc}',
+    a32: true,
+    data: true,
+    code: [
+      0xe24fe008, // sub   lr, pc, #8     -> lr = BASE
+      0xe1a0800e, // mov   r8, lr
+      0xe3011008, // movw  r1, #0x1008
+      0xe3401400, // movt  r1, #0x0400    -> r1 = DATA + 8
+      0xe281dc01, // add   sp, r1, #0x100
+      0xe2800001, // add   r0, r0, #1
+      0xe1912f9f, // ldrex r2, [r1]
+      0xe1813f90, // strex r3, r0, [r1]
+      0xee1d4f70, // mrc   p15, 0, r4, c13, c0, 3
+      0xe28f900c, // add   r9, pc, #12    -> the push
+      0xe5819004, // str   r9, [r1, #4]
+      0xe28fc00c, // add   r12, pc, #12   -> the add below the pop
+      0xe12fff3c, // blx   r12
+      0xe591f004, // ldr   pc, [r1, #4]
+      0xe92d0101, // push  {r0, r8}
+      0xe8bd8020, // pop   {r5, pc}       -> BASE
+      0xe2866001, // add   r6, r6, #1
+      0xe12fff1e, // bx    lr
+    ],
+    // Eighteen instructions a trip.
+    steps: 720001n,
+    expect: {},
+  },
+  {
+    name: 'A32 loop whose back edge is a conditional branch',
+    a32: true,
+    data: false,
+    code: [
+      0xe24fe008, // sub  lr, pc, #8      -> lr = BASE
+      0xe2800001, // add  r0, r0, #1
+      0xe3500064, // cmp  r0, #100
+      0x1afffffc, // bne  #-0x10          -> back to the add
+      0xe2822001, // add  r2, r2, #1
+      0xe12fff1e, // bx   lr
+    ],
+    // r0 passes 100 once; then the loop is three instructions a trip.
+    steps: 130001n,
+    expect: {},
+  },
+];
 
 // Each program is one block the emitter can write whole; `adr` puts the loop's
 // own address in x30.
@@ -58,6 +160,26 @@ const PROGRAMS = [
     expect: { 0: 0x1234n, 2: 0x1234n },
   },
   {
+    name: 'a store, a load and an exclusive pair above 4 GiB',
+    data: false,
+    code: [
+      0x1000001e, // adr  x30, #0        -> x30 = BASE
+      0xd28acf00, // movz x0,  #0x5678
+      0xd2820001, // movz x1,  #0x1000
+      0xf2c00401, // movk x1,  #0x20, lsl #32 -> x1 = 0x20_0000_1000
+      0xf9000020, // str  x0,  [x1]
+      0xf9400022, // ldr  x2,  [x1]
+      0xc85f7c23, // ldxr x3,  [x1]
+      0x91000463, // add  x3,  x3, #1
+      0xc8047c23, // stxr w4,  x3, [x1]
+      0xf9400025, // ldr  x5,  [x1]
+      0xd65f03c0, // ret  x30
+    ],
+    // Eleven instructions a trip: 440001 steps is 40000 trips plus one.
+    steps: 440001n,
+    expect: { 2: 0x5678n, 4: 0n, 5: 0x5679n },
+  },
+  {
     name: 'a barrier, and a store-release the load-acquire reads back',
     data: true,
     code: [
@@ -81,8 +203,9 @@ const PROGRAMS = [
       0x54ffffa1, // b.ne #-0xc          -> back to BASE
       0xd65f03c0, // ret  x30
     ],
-    // x0 passes 100 and never matches again: 4001 steps end with x0 = 1000.
-    expect: { 0: 1000n },
+    // x0 passes 100 and never matches again: 160001 steps end with x0 = 40000.
+    steps: 160001n,
+    expect: { 0: 40000n },
   },
   {
     name: 'a branch out of one block and into another',
@@ -96,8 +219,10 @@ const PROGRAMS = [
       0x91000463, // add  x3, x3, #1     -> the taken path, x0 even
       0xd65f03c0, // ret  x30
     ],
-    // Either path is five instructions: 4001 steps is 800 trips plus one.
-    expect: { 0: 800n, 2: 400n, 3: 400n },
+    // Either path is five instructions: 400001 steps is 80000 trips plus one, so each path
+    // runs HOT times.
+    steps: 400001n,
+    expect: { 0: 80000n, 2: 40000n, 3: 40000n },
   },
   {
     name: 'the clock, read in blocks that branch into each other',
@@ -114,9 +239,36 @@ const PROGRAMS = [
       0xd53be047, // mrs  x7, cntvct_el0
       0xd65f03c0, // ret  x30
     ],
-    // An odd and an even trip are fifteen instructions: 20001 steps is 1333 pairs and six more.
-    steps: 20001n,
-    expect: { 0: 2667n, 3: 1333n },
+    // An odd and an even trip are fifteen instructions: 600006 steps is 40000 pairs and six more.
+    steps: 600006n,
+    expect: { 0: 80001n, 3: 40000n },
+  },
+  {
+    name: 'a compare\'s deferred flags, read in a block a cbz branches to',
+    data: false,
+    code: [
+      0x1000001e, // adr  x30, #0        -> x30 = BASE
+      0xd2a00201, // mov  x1, #0x100000  -> above every x0 the run reaches
+      0x91000400, // add  x0, x0, #1
+      0x92400004, // and  x4, x0, #1
+      0xeb01001f, // cmp  x0, x1         -> lo; its flags deferred, since the cmp below overwrites them
+      0x54000160, // b.eq #0x2c          -> BASE+0x40, never taken
+      0xb40000a4, // cbz  x4, #0x14      -> BASE+0x2c when x0 is even
+      0x91000463, // add  x3, x3, #1
+      0xf100007f, // cmp  x3, #0
+      0x540000e0, // b.eq #0x1c          -> BASE+0x40, never taken
+      0xd65f03c0, // ret  x30
+      0x54000068, // b.hi #0xc           -> BASE+0x38; reads the first cmp's flags, so never taken
+      0x910004a5, // add  x5, x5, #1
+      0xd65f03c0, // ret  x30
+      0x910004c6, // add  x6, x6, #1     -> reached only on stale flags
+      0xd65f03c0, // ret  x30
+      0x910004e7, // add  x7, x7, #1
+      0xd65f03c0, // ret  x30
+    ],
+    // An odd and an even trip are 21 instructions: 1260000 steps is 60000 pairs.
+    steps: 1260000n,
+    expect: { 0: 120000n, 3: 60000n, 5: 60000n, 6: 0n },
   },
   {
     name: 'calls and returns',
@@ -133,12 +285,16 @@ const PROGRAMS = [
       0xd65f03c0, // ret
     ],
     // Nine instructions a trip; enough trips for each block to be compiled.
-    steps: 8001n,
-    expect: { 0: 889n, 2: 889n, 3: 889n },
+    steps: 360000n,
+    expect: { 0: 40000n, 2: 40000n, 3: 40000n },
   },
 ];
 
 function elf(program) {
+  return program.a32 ? elf32(program) : elf64(program);
+}
+
+function elf64(program) {
   const code = new Uint8Array(program.code.length * 4);
   const cv = new DataView(code.buffer);
   program.code.forEach((insn, i) => cv.setUint32(i * 4, insn, true));
@@ -185,56 +341,70 @@ function elf(program) {
   return file;
 }
 
-function withBytes(bytes, body) {
-  const ptr = api.switch_alloc(bytes.length) >>> 0;
-  if (!ptr) throw new Error('the core refused the staging buffer');
-  try {
-    new Uint8Array(api.memory.buffer, ptr, bytes.length).set(bytes);
-    return body(ptr, bytes.length);
-  } finally {
-    api.switch_free(ptr, bytes.length);
+// A 32-bit little-endian ARM `ET_EXEC` with the same layout as `elf64`'s.
+function elf32(program) {
+  const code = new Uint8Array(program.code.length * 4);
+  const cv = new DataView(code.buffer);
+  program.code.forEach((insn, i) => cv.setUint32(i * 4, insn, true));
+
+  const EHDR = 52;
+  const PHDR = 32;
+  const phnum = program.data ? 2 : 1;
+  const body = EHDR + PHDR * phnum;
+  const file = new Uint8Array(body + code.length);
+  const v = new DataView(file.buffer);
+  file.set([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1, 0], 0); // \x7fELF, 32-bit, LE
+  v.setUint16(16, 2, true); // ET_EXEC
+  v.setUint16(18, 40, true); // EM_ARM
+  v.setUint32(20, 1, true); // EV_CURRENT
+  v.setUint32(24, BASE, true); // e_entry
+  v.setUint32(28, EHDR, true); // e_phoff
+  v.setUint16(40, EHDR, true); // e_ehsize
+  v.setUint16(42, PHDR, true); // e_phentsize
+  v.setUint16(44, phnum, true); // e_phnum
+
+  const segment = (i, { offset, vaddr, filesz, memsz, flags }) => {
+    const ph = EHDR + i * PHDR;
+    v.setUint32(ph + 0, 1, true); // PT_LOAD
+    v.setUint32(ph + 4, offset, true);
+    v.setUint32(ph + 8, vaddr, true);
+    v.setUint32(ph + 12, vaddr, true);
+    v.setUint32(ph + 16, filesz, true);
+    v.setUint32(ph + 20, memsz, true);
+    v.setUint32(ph + 24, flags, true);
+    v.setUint32(ph + 28, 4096, true);
+  };
+  segment(0, { offset: body, vaddr: BASE, filesz: code.length, memsz: code.length, flags: 5 });
+  if (program.data) {
+    segment(1, { offset: body, vaddr: DATA, filesz: 0, memsz: 0x1000, flags: 6 });
   }
+  file.set(code, body);
+  return file;
 }
 
-function readJson(fill) {
-  const cap = 4096;
-  const ptr = api.switch_alloc(cap) >>> 0;
-  try {
-    const n = fill(ptr, cap);
-    return JSON.parse(
-      new TextDecoder().decode(new Uint8Array(api.memory.buffer, ptr, n)),
-    );
-  } finally {
-    api.switch_free(ptr, cap);
-  }
-}
+// Past HOT trips of the longest default program, seven instructions a trip.
+const STEPS = 280001n;
 
-const STEPS = 4001n;
-
-function run(program, jit) {
-  const handle = api.switch_new();
-  api.switch_set_jit(handle, jit ? 1 : 0);
-  const entry = withBytes(elf(program), (ptr, len) =>
-    api.switch_load_elf(handle, ptr, len),
-  );
-  if (entry !== BigInt(BASE)) {
+async function run(program, jit) {
+  api.switch_init();
+  api.switch_set_jit(jit);
+  const blob = new Blob([elf(program)]);
+  const entry = await api.switch_load_program(blob);
+  if (entry !== BASE) {
     throw new Error(`the core loaded the program at ${entry}, not ${BASE}`);
   }
-  const steps = api.switch_run(handle, program.steps ?? STEPS);
+  const steps = api.switch_run(Number(program.steps ?? STEPS));
   const regs = [];
-  for (let i = 0; i < 31; i++) regs.push(api.switch_get_reg(handle, i));
-  const state = {
+  for (let i = 0; i < (program.a32 ? 15 : 31); i++) regs.push(api.switch_get_reg(i));
+  return {
     steps,
     regs,
-    pc: BigInt(api.switch_get_pc(handle) >>> 0),
-    cycles: api.switch_get_cycles(handle),
-    jit: readJson((ptr, cap) => api.switch_jit_stats_json(handle, ptr, cap)),
+    // Every register, the flags and the pc, as the core prints them.
+    dump: api.switch_reg_dump(),
+    retired: api.switch_get_steps(),
+    jit: JSON.parse(api.switch_jit_stats_json()),
   };
-  api.switch_free_session(handle);
-  return state;
 }
-
-api.switch_init();
 
 let failed = false;
 const check = (what, a, b) => {
@@ -244,22 +414,22 @@ const check = (what, a, b) => {
 };
 
 let totalChained = 0;
-for (const program of PROGRAMS) {
+for (const program of [...PROGRAMS, ...A32_PROGRAMS]) {
   console.log(`${program.name}:`);
-  const interpreted = run(program, false);
-  const translated = run(program, true);
+  const interpreted = await run(program, false);
+  const translated = await run(program, true);
 
-  check('steps retired', interpreted.steps, translated.steps);
-  check('cycles', interpreted.cycles, translated.cycles);
-  check('pc', interpreted.pc, translated.pc);
-  for (let i = 0; i < 31; i++) {
-    check(`x${i}`, interpreted.regs[i], translated.regs[i]);
+  check('steps run', interpreted.steps, translated.steps);
+  check('steps retired', interpreted.retired, translated.retired);
+  check('registers, flags and pc', interpreted.dump, translated.dump);
+  for (let i = 0; i < interpreted.regs.length; i++) {
+    check(`r${i}`, interpreted.regs[i], translated.regs[i]);
   }
 
   for (const [reg, want] of Object.entries(program.expect)) {
     if (interpreted.regs[reg] !== want) {
       failed = true;
-      console.log(`  FAIL the interpreter left x${reg} = ${interpreted.regs[reg]}, not ${want}`);
+      console.log(`  FAIL the interpreter left register ${reg} = ${interpreted.regs[reg]}, not ${want}`);
     }
   }
 

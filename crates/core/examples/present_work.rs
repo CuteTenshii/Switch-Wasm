@@ -1,0 +1,167 @@
+//! Scan-out cost measured in work (bytes read, runs, pixels), not milliseconds:
+//! `present_work [--width <n>] [--height <n>]`.
+//!
+//! The counts mirror the loop in `Gpu::present`; keep them in sync.
+mod common;
+
+use clap::Parser;
+use switch_core::gpu::surface::Layout;
+use switch_core::gpu::{Crop, DisplayBuffer, Gpu, NV_LAYOUT_BLOCK_LINEAR, NV_LAYOUT_PITCH};
+use switch_core::mem::Memory;
+
+/// Surface address, clear of every region a process is given.
+const BASE: u64 = 0xF400_0000;
+/// `NvColorFormat` for A8B8G8R8.
+const COLOR_FORMAT: u64 = 0x01_0053_2120;
+const BPP: u32 = 4;
+const BLOCK_HEIGHT_LOG2: u32 = 4;
+
+struct Work {
+    surface_bytes: u32,
+    /// Bytes of the surface no output pixel reads.
+    unsampled_bytes: u32,
+    /// Calls to `Layout::run_at`.
+    lookups: u64,
+    pixels: u64,
+    /// Sum of the presented pixels.
+    checksum: u64,
+}
+
+fn measure(layout: Layout, buffer: &DisplayBuffer, mem: &Memory, gpu: &mut Gpu) -> Work {
+    let width_bytes = match layout {
+        Layout::Pitch { pitch } => pitch,
+        Layout::BlockLinear { .. } => buffer.width * BPP,
+    };
+    let surface_bytes = layout.layer_stride(width_bytes, buffer.height);
+    let (crop_x, crop_y, out_width, out_height) = buffer.crop.window(buffer.width, buffer.height);
+
+    let mut lookups = 0u64;
+    let mut sampled = vec![false; surface_bytes as usize];
+    for row in 0..out_height {
+        let y = crop_y + row;
+        let mut x = 0;
+        while x < out_width {
+            let (offset, run) = layout.run_at((crop_x + x) * BPP, y, width_bytes);
+            lookups += 1;
+            let count = (run / BPP).clamp(1, out_width - x);
+            for byte in offset..(offset + count * BPP).min(surface_bytes) {
+                sampled[byte as usize] = true;
+            }
+            x += count;
+        }
+    }
+
+    gpu.present(0, mem, buffer).expect("present");
+    Work {
+        surface_bytes,
+        unsampled_bytes: sampled.iter().filter(|seen| !**seen).count() as u32,
+        lookups,
+        pixels: u64::from(out_width) * u64::from(out_height),
+        checksum: gpu.framebuffer.pixels.iter().map(|&p| u64::from(p)).sum(),
+    }
+}
+
+fn case(name: &str, width: u32, height: u32, pitch_linear: bool, crop: Crop) {
+    let mem = Memory::new();
+    let mut gpu = Gpu::new();
+    let layout = if pitch_linear {
+        Layout::Pitch { pitch: width * BPP }
+    } else {
+        Layout::BlockLinear {
+            block_height_gobs: 1 << BLOCK_HEIGHT_LOG2,
+            block_depth_gobs: 1,
+        }
+    };
+    let width_bytes = width * BPP;
+    let size = layout.layer_stride(width_bytes, height);
+    mem.map_zero(BASE, u64::from(size))
+        .expect("map the surface");
+    for y in 0..height {
+        for x in 0..width {
+            let texel =
+                ((x * 4) & 0xFF) | (((y * 4) & 0xFF) << 8) | (((x ^ y) & 0xFF) << 16) | 0xFF00_0000;
+            let at = BASE.wrapping_add(u64::from(layout.offset(x * BPP, y, width_bytes)));
+            mem.write_u32(at, texel).expect("fill the surface");
+        }
+    }
+
+    let handle = gpu.nvmap.create(size);
+    gpu.nvmap
+        .alloc(handle, 0, 0, 0x1000, 0, BASE)
+        .expect("alloc the surface");
+    let id = gpu.nvmap.get(handle).expect("the handle we just made").id;
+    let buffer = DisplayBuffer {
+        nvmap_id: id,
+        offset: 0,
+        width,
+        height,
+        pitch: width_bytes,
+        layout: if pitch_linear {
+            NV_LAYOUT_PITCH
+        } else {
+            NV_LAYOUT_BLOCK_LINEAR
+        },
+        block_height_log2: BLOCK_HEIGHT_LOG2,
+        color_format: COLOR_FORMAT,
+        transform: 0,
+        crop,
+    };
+
+    let work = measure(layout, &buffer, &mem, &mut gpu);
+    let mib = |bytes: u32| f64::from(bytes) / (1024.0 * 1024.0);
+    println!("{name}");
+    println!(
+        "  {:>10} pixels   {:>10} lookups ({:.1} pixels each)",
+        work.pixels,
+        work.lookups,
+        work.pixels as f64 / work.lookups as f64,
+    );
+    println!(
+        "  {:>10.2} MiB read out of guest memory, {:.2} MiB of it never sampled ({:.0}%)",
+        mib(work.surface_bytes),
+        mib(work.unsampled_bytes),
+        f64::from(work.unsampled_bytes) * 100.0 / f64::from(work.surface_bytes),
+    );
+    println!("  checksum {:#x}", work.checksum);
+}
+
+#[derive(Parser)]
+struct Cli {
+    #[arg(long, default_value_t = 1280)]
+    width: u32,
+    #[arg(long, default_value_t = 720)]
+    height: u32,
+}
+
+fn main() {
+    let cli = Cli::parse();
+    let (width, height) = (cli.width, cli.height);
+
+    case(
+        "block-linear, whole surface",
+        width,
+        height,
+        false,
+        Crop::ALL,
+    );
+    case(
+        "pitch-linear, whole surface",
+        width,
+        height,
+        true,
+        Crop::ALL,
+    );
+    // A 1080p allocation presented as a 720p crop.
+    case(
+        "block-linear 1920x1080, cropped to 1280x720",
+        1920,
+        1080,
+        false,
+        Crop {
+            left: 0,
+            top: 0,
+            right: 1280,
+            bottom: 720,
+        },
+    );
+}

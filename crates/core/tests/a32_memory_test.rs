@@ -1,0 +1,208 @@
+//! A32 memory access: addressing modes, block transfers, exclusive pairs.
+
+mod a32;
+
+use a32::{r, run, HALT, SCRATCH};
+
+/// The lowest register goes to the lowest address in every mode.
+#[test]
+fn the_block_transfers_all_run_lowest_register_to_lowest_address() {
+    let cpu = run(&[
+        0xE3A0_0A08, // mov r0, #0x8000
+        0xE3A0_1001, // mov r1, #1
+        0xE3A0_2002, // mov r2, #2
+        0xE3A0_3003, // mov r3, #3
+        0xE880_000E, // stmia r0, {r1, r2, r3}
+        0xE890_0070, // ldmia r0, {r4, r5, r6}
+    ]);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(), 1);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH + 4)).unwrap(), 2);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH + 8)).unwrap(), 3);
+    assert_eq!((r(&cpu, 4), r(&cpu, 5), r(&cpu, 6)), (1, 2, 3));
+}
+
+#[test]
+fn a_decrementing_store_writes_below_its_base_and_leaves_it_there() {
+    let cpu = run(&[
+        0xE3A0_0A08, // mov r0, #0x8000
+        0xE3A0_5005, // mov r5, #5
+        0xE3A0_6006, // mov r6, #6
+        0xE920_0060, // stmdb r0!, {r5, r6}
+    ]);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH - 8)).unwrap(), 5);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH - 4)).unwrap(), 6);
+    assert_eq!(r(&cpu, 0), SCRATCH - 8);
+}
+
+/// A store transfers the base's original value.
+#[test]
+fn a_store_of_its_own_base_transfers_the_value_it_started_with() {
+    let cpu = run(&[
+        0xE3A0_0A08, // mov r0, #0x8000
+        0xE3A0_1001, // mov r1, #1
+        0xE8A0_0003, // stmia r0!, {r0, r1}
+    ]);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(), SCRATCH);
+    assert_eq!(
+        r(&cpu, 0),
+        SCRATCH + 8,
+        "and the base still walks past both"
+    );
+}
+
+/// Loading r15 from a block transfer branches.
+#[test]
+fn a_block_load_of_r15_branches() {
+    let cpu = run(&[
+        0xE3A0_0A08, // mov  r0, #0x8000
+        0xE59F_100C, // ldr  r1, [pc, #12]  -> the address of `mov r4, #4`
+        0xE580_1000, // str  r1, [r0]
+        0xE890_8000, // ldmia r0, {pc}
+        0xE3A0_2001, // mov  r2, #1         (skipped)
+        HALT,        // (skipped)
+        0x0000_101C, // literal: the address of the mov below
+        0xE3A0_4004, // mov  r4, #4         <- landed on
+    ]);
+    assert_eq!(r(&cpu, 4), 4);
+    assert_eq!(r(&cpu, 2), 0, "the branch skipped this");
+}
+
+/// `ldr r0, [r0], #4` keeps the loaded value, not the written-back base.
+#[test]
+fn a_post_indexed_load_into_its_own_base_keeps_the_value() {
+    let cpu = run(&[
+        0xE3A0_0A08, // mov r0, #0x8000
+        0xE3A0_1063, // mov r1, #0x63
+        0xE580_1000, // str r1, [r0]
+        0xE490_0004, // ldr r0, [r0], #4
+    ]);
+    assert_eq!(r(&cpu, 0), 0x63);
+}
+
+#[test]
+fn the_halfword_and_doubleword_forms() {
+    let cpu = run(&[
+        0xE3A0_1A08, // mov   r1, #0x8000
+        0xE3E0_0000, // mvn   r0, #0        -> 0xffffffff
+        0xE1C1_00B0, // strh  r0, [r1]
+        0xE1D1_00B0, // ldrh  r0, [r1]
+        0xE1D1_20D0, // ldrsb r2, [r1]
+        0xE1D1_30F0, // ldrsh r3, [r1]
+        0xE3A0_4004, // mov   r4, #4
+        0xE3A0_5005, // mov   r5, #5
+        0xE1C1_40F8, // strd  r4, r5, [r1, #8]
+        0xE1C1_60D8, // ldrd  r6, r7, [r1, #8]
+    ]);
+    assert_eq!(r(&cpu, 0), 0xFFFF, "a halfword load zero-extends");
+    assert_eq!(r(&cpu, 2), 0xFFFF_FFFF, "a signed byte load sign-extends");
+    assert_eq!(r(&cpu, 3), 0xFFFF_FFFF, "and so does a signed halfword");
+    assert_eq!(
+        (r(&cpu, 6), r(&cpu, 7)),
+        (4, 5),
+        "a doubleword moves a pair"
+    );
+}
+
+#[test]
+fn a_scaled_register_offset_subtracts_when_the_encoding_says_down() {
+    let cpu = run(&[
+        0xE3A0_0A08, // mov r0, #0x8000
+        0xE3A0_1002, // mov r1, #2
+        0xE3A0_2007, // mov r2, #7
+        0xE780_2101, // str r2, [r0, r1, lsl #2]
+        0xE280_0020, // add r0, r0, #32
+        0xE710_3101, // ldr r3, [r0, -r1, lsl #2]
+    ]);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH + 8)).unwrap(), 7);
+    assert_eq!(r(&cpu, 3), 0, "0x8020 - 8 is not where the 7 went");
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH + 0x18)).unwrap(), 0);
+}
+
+#[test]
+fn an_exclusive_store_fails_without_a_matching_load() {
+    // With the monitor armed by the load, the store succeeds and reports 0.
+    let cpu = run(&[
+        0xE3A0_1A08, // mov   r1, #0x8000
+        0xE3A0_3007, // mov   r3, #7
+        0xE191_0F9F, // ldrex r0, [r1]
+        0xE181_2F93, // strex r2, r3, [r1]
+    ]);
+    assert_eq!(r(&cpu, 2), 0);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(), 7);
+
+    // Without it, the store reports failure and writes nothing.
+    let cpu = run(&[
+        0xE3A0_1A08, // mov   r1, #0x8000
+        0xE3A0_3007, // mov   r3, #7
+        0xE181_2F93, // strex r2, r3, [r1]
+    ]);
+    assert_eq!(r(&cpu, 2), 1);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(), 0);
+}
+
+/// `STL`/`LDA` are plain accesses: no monitor, no status, and `Rd` (1111) untouched.
+#[test]
+fn a_store_release_is_not_an_exclusive_store() {
+    let cpu = run(&[
+        0xE3A0_1A08, // mov   r1, #0x8000
+        0xE308_3765, // movw  r3, #0x8765
+        0xE1E1_FC93, // stlh  r3, [r1]
+        0xE1F1_0C9F, // ldah  r0, [r1]
+        0xE191_4C9F, // lda   r4, [r1]
+        0xE1D1_5C9F, // ldab  r5, [r1]
+        0xE181_2F93, // strex r2, r3, [r1]
+    ]);
+    assert_eq!(cpu.mem.read_u16(u64::from(SCRATCH)).unwrap(), 0x8765);
+    assert_eq!(r(&cpu, 0), 0x8765);
+    assert_eq!(r(&cpu, 4), 0x8765);
+    assert_eq!(r(&cpu, 5), 0x65);
+    assert_eq!(r(&cpu, 2), 1, "a load-acquire opens no monitor");
+
+    let cpu = run(&[
+        0xE3A0_1A08, // mov  r1, #0x8000
+        0xE308_3765, // movw r3, #0x8765
+        0xE181_FC93, // stl  r3, [r1]
+        0xE3A0_3007, // mov  r3, #7
+        0xE1C1_FC93, // stlb r3, [r1]
+    ]);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(), 0x8707);
+}
+
+/// Decrement-after puts the highest register at the base address.
+#[test]
+fn a_decrement_after_transfer_ends_at_the_base() {
+    let cpu = run(&[
+        0xE3A0_4902, // mov   r4, #0x8000
+        0xE284_4008, // add   r4, r4, #8
+        0xE3A0_2022, // mov   r2, #0x22
+        0xE3A0_3033, // mov   r3, #0x33
+        0xE804_000C, // stmda r4, {r2, r3}
+        0xE834_0003, // ldmda r4!, {r0, r1}
+    ]);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH + 4)).unwrap(), 0x22);
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH + 8)).unwrap(), 0x33);
+    assert_eq!(
+        cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(),
+        0,
+        "nothing below the lowest"
+    );
+    assert_eq!((r(&cpu, 0), r(&cpu, 1)), (0x22, 0x33));
+    assert_eq!(
+        r(&cpu, 4),
+        SCRATCH,
+        "the writeback moves down by both words"
+    );
+}
+
+#[test]
+fn a_byte_swap_exchanges_memory_and_a_register() {
+    let cpu = run(&[
+        0xE3A0_1A08, // mov r1, #0x8000
+        0xE3A0_2063, // mov r2, #0x63
+        0xE581_2000, // str r2, [r1]
+        0xE3A0_3007, // mov r3, #7
+        0xE101_0093, // swp r0, r3, [r1]
+    ]);
+    assert_eq!(r(&cpu, 0), 0x63, "the old value comes back");
+    assert_eq!(cpu.mem.read_u32(u64::from(SCRATCH)).unwrap(), 7);
+}

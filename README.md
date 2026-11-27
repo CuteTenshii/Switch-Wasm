@@ -1,16 +1,30 @@
-# Switch WASM
-
-A Nintendo Switch emulator running directly in the browser, using WebAssembly and WebGPU.
+<p align="center"><img src="web/favicon.svg" alt="" width="96" height="96"></p>
+<h1 align="center">Switch WASM</h1>
+<p align="center">A Nintendo Switch emulator running directly in the browser, using WebAssembly and WebGPU.</p>
+<p align="center"><a href="https://git.tenshii.moe/Tenshii/Switch-Wasm/actions?workflow=ci.yml"><img src="https://git.tenshii.moe/Tenshii/Switch-Wasm/badges/workflows/ci.yml/badge.svg?branch=master&label=ci" alt="CI status"></a>
+<a href="https://discord.gg/uhy2P4vyhE"><img src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" alt="Join the Discord server"></a></p>
 
 ## Build
 
 ```sh
 bun install
-make all
+make
 ```
 
-Requires `rustup target add wasm32-unknown-unknown`, and [bun](https://bun.com)
-for the frontend.
+Requires [Bun](https://bun.com) for the frontend, and a nightly Rust toolchain, which the browser build needs to rebuild std with atomics:
+
+```sh
+rustup toolchain install nightly --profile minimal --component rust-src --target wasm32-unknown-unknown
+```
+
+It also needs a `wasm-bindgen` CLI matching the version in `Cargo.lock`.
+
+There are two builds:
+
+- `make wasm` builds only the emulator core, in the faster-compiling dev profile. Use it while working on the code with `bun run dev`.
+- `make assets` (what plain `make` runs) builds the core in the release profile, with full optimisation and LTO, then bundles the site into `dist/`. This is what ships, and the only build to measure performance on.
+
+The dev server always uses the dev core and `dist/` the release one, so rebuild the one you're running.
 
 ## Serve
 
@@ -19,13 +33,13 @@ bun run dev       # Vite dev server, http://localhost:8000
 bun run preview   # the built site from dist/
 ```
 
-`dev` needs the core built once with `make wasm`, since the frontend imports
-it; `preview` serves what `make assets` built.
+`dev` needs the core built once with `make wasm`, since the frontend imports it. `preview` serves what `make assets` built.
 
 ## Acknowledgments
 
 - [Eden Emulator](https://git.eden-emu.dev/eden-emu/eden)
 - [libopus](https://opus-codec.org)
+- [libvpx](https://chromium.googlesource.com/webm/libvpx)
 - [EnvyTools](https://github.com/envytools/envytools)
 - [libnx](https://github.com/switchbrew/libnx)
 - [SwitchBrew](https://switchbrew.org)
@@ -33,3 +47,7 @@ it; `preview` serves what `make assets` built.
 - [Mesa / nouveau](https://gitlab.freedesktop.org/mesa/mesa)
 - [hactool](https://github.com/SciresM/hactool)
 - [libtransistor](https://github.com/reswitched/libtransistor)
+
+## License
+
+[GNU AGPL v3.0 or later](LICENSE). If you host a modified version, you must offer its source to the people who use it. Code adapted from other projects keeps its own license; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -1,0 +1,18 @@
+[package]
+name = "switch-gpu"
+version = "0.1.0"
+edition = "2021"
+description = "A GPU backend for switch-core's 3D engine, on wgpu"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+pollster = "1.0.1"
+switch-core = { path = "../core" }
+web-time = "1.1"
+wgpu = "30.0.1"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+clap = { version = "4.6.7", features = ["derive"] }

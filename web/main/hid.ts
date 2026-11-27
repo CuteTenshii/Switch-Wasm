@@ -3,7 +3,7 @@
 
 import { $ } from './dom';
 import { log } from './log';
-import { call, onMotionChanged, whenReady } from './rpc';
+import { call, onWorker, whenReady } from './rpc';
 
 interface HidApi {
   requestDevice(options: { filters: { vendorId: number; productId: number }[] }): Promise<unknown[]>;
@@ -37,7 +37,7 @@ if (hid) {
   button.addEventListener('click', () => {
     toggle(hid).catch((err: Error) => log(`[input] motion: ${err.message}`, 'warn'));
   });
-  onMotionChanged((name) => {
+  onWorker('motion', ({ device: name }) => {
     device = name;
     render();
     if (name) log(`[input] motion from ${name}`);

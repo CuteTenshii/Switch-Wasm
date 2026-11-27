@@ -1,0 +1,74 @@
+name: Compatibility report
+about: Report how far a game or homebrew gets, for docs/compat.md.
+title: "[Compat] "
+body:
+  - type: input
+    id: title
+    attributes:
+      label: Title
+      placeholder: Mario Kart 8 Deluxe
+    validations:
+      required: true
+  - type: input
+    id: title-id
+    attributes:
+      label: Title ID
+      description: Leave empty for homebrew.
+      placeholder: "0100152000022000"
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The game's version, and the update if one is installed.
+      placeholder: 1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: status
+    attributes:
+      label: Status
+      options:
+        - Fails (no frame; it faults, exits or stalls first)
+        - Boots (presents frames but never reaches its menus)
+        - Menus (reaches its menus or main screen)
+        - In-game (reaches gameplay)
+        - Playable (in-game at a usable speed, with working input)
+    validations:
+      required: true
+  - type: textarea
+    id: how-far
+    attributes:
+      label: How far it gets
+      description: Where it stops, what's wrong on screen, the frame rate if it runs.
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+      placeholder: Chrome 142
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: OS and machine
+      placeholder: Windows 11, Ryzen 5 5600X, RTX 3060
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Save it with the Save button in the Console tab, or Save log in the crash dialog, and attach the file.
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+  - type: checkboxes
+    id: no-copyrighted-files
+    attributes:
+      label: Files
+      options:
+        - label: I haven't attached keys, firmware, game files or saves.
+          required: true

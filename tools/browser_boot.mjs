@@ -2,47 +2,83 @@
 // page and its worker said.
 // Serves `dist` (run `make assets` first) with WebGPU enabled and a fresh profile.
 // `--firmware` installs a directory's NCAs to the NAND first, so library applets run.
+// `--update` opens an update NSP before the container, so the title launches patched.
 // `--nand` launches the title of that name from the NAND tab, in place of a container.
+// `--port=N` serves on that port, so a relay can be told the page's origin; any free one by default.
+// `--relay=ws://…` turns the Network tab on through that relay before the title starts, and
+// reports the tab's socket and connections at the end.
 // `--docked` starts the console docked; `--dock-at=N` toggles it that long after the title starts.
-// `--dump-wgsl` writes every shader the worker hands the browser into a directory.
+// `--dump-wgsl` writes every shader the worker hands the browser into a directory, each named by
+// its creation order and its label, which holds the WGSL hash the Rendering section names it by.
+// `--gpu-time=passes|draws[@seconds]` turns on the Rendering section's time on the GPU from that
+// long after the title starts, with Chromium's timestamps unrounded; the report ends with its table.
 // `--stream` prints console lines matching a regular expression as they appear; `--stream=.` is all.
+// `--dist=dir` serves another site build instead of `dist`, to compare two builds.
 // `--trace=file@seconds:length` records a Chromium trace of the GPU process from that long after the
 // title starts; `tools/trace_summary.mjs` reads it.
+// `--dump-texture=dir@WxH[xLAYERS]` reads back the device textures of that size when the run ends:
+// raw bytes, and a PPM per layer for 8-bit colour. Not with `--dump-wgsl` or `--no-webgpu`, which
+// rewrite the same scripts.
+// `--software-at=N` draws on the CPU rasterizer from N seconds in, `--software-after=B` once B billion
+// instructions have run and the screen is lit (past the black loading screens), to compare with the device's frames.
+// `--trace-cpu` adds V8's sampling profiler to `--trace`; `tools/trace_cpu.mjs` reads it.
 // `--browser-arg` passes a switch to Chromium, and can be repeated.
+// `--firefox` runs Playwright's Firefox instead, with WebGPU turned on; not with `--trace` or `--browser-arg`.
+// `--gpu-objects` prints the worker's undestroyed device textures and buffers by label every 10 s;
+// not with `--dump-wgsl`, `--dump-texture` or `--no-webgpu`, which rewrite the same scripts.
 // `--no-webgpu` hides WebGPU, so the software rasterizer draws every frame: the reference
 // a device frame is compared against.
 // `--trace-from` switches the console to trace once a line contains the text: trace from
 // the start floods the log long before the moment worth reading.
-// `--headed` opens a window, whose browser gets the machine's GPU instead of a software adapter.
+// A window opens, so the browser gets the machine's GPU instead of a software adapter.
 // `--jit-stats` records the cumulative block stats with every sample.
 // `--press` taps keyboard keys, as `web/main/input.ts` maps them (z is A, x is B, the arrows
 // are the d-pad), that long after the title starts and again every `every` seconds. A tap
 // first closes any dialog, since keys belong to the page while one is open.
+// `--script=<file>` (or the steps inline, `;` apart) drives the title one step after another, each
+// waiting for the one before: `wait <s>`, `press <key> [times [gap-s]]`, `pressuntil <key> <gap-s> <timeout-s>` (taps until the keyboard dialog
+// opens), `text <string>` (types into the
+// keyboard dialog and confirms it), `log <timeout-s> <regex>` (waits for a console line) and
+// `shot <file>`. A failed step stops the script and sets the exit code. `#` starts a comment line.
 // `--screenshot-every` also saves the screen every N seconds, beside `--screenshot`'s file.
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { preview } from 'vite';
-import { commandLine, fail, launchChromium, repoRoot } from './common.mjs';
+import { commandLine, fail, launchChromium, launchFirefox, repoRoot } from './common.mjs';
+import { GPU_OBJECTS_MARK, hookSource as gpuObjectsHook } from './gpu_objects.mjs';
+import { hookSource, parseSpec, readTextures, writeTextures } from './texture_dump.mjs';
 
 const USAGE = `usage: node tools/browser_boot.mjs <container> | --nand=name [--keys=prod.keys] [--title-keys=title.keys]
-  [--firmware=dir] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--headed] [--docked] [--dock-at=N]
-  [--dump-wgsl=dir] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length]
+  [--firmware=dir] [--update=update.nsp] [--log-level=trace] [--trace-from=text] [--no-webgpu] [--docked] [--dock-at=N] [--software-at=N] [--software-after=B]
+  [--relay=ws://127.0.0.1:18787] [--port=N] [--dist=dir]
+  [--firefox] [--gpu-objects] [--dump-wgsl=dir] [--gpu-time=passes|draws[@seconds]] [--dump-texture=dir@WxH[xLAYERS]] [--browser-arg=switch] [--stream=regex] [--trace=file@seconds:length] [--trace-cpu]
   [--seconds=N] [--out=log.txt] [--screenshot=frame.png] [--screenshot-every=N]
-  [--jit-stats] [--press=key@seconds[:every],...]`;
+  [--jit-stats] [--press=key@seconds[:every],...] [--script=file|steps]`;
 
 const SAMPLE_MS = 5000;
+
+// As `fmtCount` in web/shared/format.ts writes it; `--software-after` and log_summary.mjs read it.
+const fmtCount = (n) => {
+  if (n >= 1e12) return (n / 1e12).toFixed(2) + 'T';
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  return Math.round(n).toLocaleString('en');
+};
 const START_MS = 120_000;
 const PRESS_HOLD_MS = 200;
+const STEP_TIMEOUT_MS = 120_000;
 
 const { flag, flags, has: hasFlag, path: pathFlag, positional } = commandLine();
 const container = positional[0];
 const nand = flag('nand');
 if (!container && !nand) fail(USAGE);
-if (!existsSync(join(repoRoot, 'dist/index.html'))) fail('dist/ has not been built: run `make assets` first');
+const dist = pathFlag('dist') ?? join(repoRoot, 'dist');
+if (!existsSync(join(dist, 'index.html'))) fail(`${dist} has no site build: run \`make assets\` first`);
 
 const keys = pathFlag('keys');
 const titleKeys = pathFlag('title-keys');
 const firmware = pathFlag('firmware');
+const update = pathFlag('update');
 const screenshot = pathFlag('screenshot');
 const out = flag('out');
 const logLevel = flag('log-level');
@@ -51,24 +87,53 @@ const seconds = Number(flag('seconds') ?? 60);
 const screenshotEvery = Number(flag('screenshot-every') ?? 0);
 const jitStats = hasFlag('jit-stats');
 const noWebGpu = hasFlag('no-webgpu');
-const headed = hasFlag('headed');
 const docked = hasFlag('docked');
 const dockAt = flag('dock-at');
+const softwareAt = flag('software-at');
+const softwareAfter = Number(flag('software-after') ?? Infinity);
+const relay = flag('relay');
+const port = Number(flag('port') ?? 0);
 const dumpWgsl = pathFlag('dump-wgsl');
+const dumpTexture = /^(.+)@(.+)$/.exec(flag('dump-texture') ?? '');
+if (flag('dump-texture') && !dumpTexture) fail('--dump-texture: expected dir@WxH[xLAYERS]');
 const stream = flag('stream');
 const traceSpec = /^(.+)@(\d+):(\d+)$/.exec(flag('trace') ?? '');
 if (flag('trace') && !traceSpec) fail('--trace: expected file@seconds:length');
+const traceCpu = hasFlag('trace-cpu');
 const browserArgs = flags('browser-arg');
+const useFirefox = hasFlag('firefox');
+if (useFirefox && (traceSpec || browserArgs.length)) fail('--firefox: --trace and --browser-arg are Chromium\'s');
+const gpuObjects = hasFlag('gpu-objects');
+if (gpuObjects && (dumpWgsl || dumpTexture || noWebGpu)) {
+  fail('--gpu-objects: not with --dump-wgsl, --dump-texture or --no-webgpu');
+}
+const GPU_OBJECTS_EVERY_MS = 10_000;
+const gpuTime = /^(passes|draws)(?:@(\d+(?:\.\d+)?))?$/.exec(flag('gpu-time') ?? '');
+if (flag('gpu-time') && !gpuTime) fail('--gpu-time: expected passes|draws[@seconds]');
+if (gpuTime && noWebGpu) fail('--gpu-time: not with --no-webgpu');
 const presses = (flag('press') ?? '').split(',').filter(Boolean).map((spec) => {
   const match = /^(.+)@(\d+(?:\.\d+)?)(?::(\d+(?:\.\d+)?))?$/.exec(spec);
   if (!match) fail(`--press=${spec}: expected key@seconds[:every]`);
   return { key: match[1], next: Number(match[2]), every: Number(match[3] ?? 0) };
 });
 
+const SCRIPT_VERBS = ['wait', 'press', 'pressuntil', 'text', 'log', 'shot'];
+const scriptFile = flag('script') && resolve(flag('script'));
+const steps = (flag('script')
+  ? (existsSync(scriptFile) ? readFileSync(scriptFile, 'utf8') : flag('script'))
+  : '')
+  .split(/[\n;]/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#'))
+  .map((line) => {
+    const [verb] = line.split(/\s+/);
+    if (!SCRIPT_VERBS.includes(verb)) fail(`--script: unknown step "${line}"`);
+    return { line, verb, rest: line.slice(verb.length).trim() };
+  });
+
 const server = await preview({
   configFile: join(repoRoot, 'vite.config.ts'),
+  build: { outDir: dist },
   logLevel: 'error',
-  preview: { host: '127.0.0.1', port: 0, strictPort: false, open: false },
+  preview: { host: '127.0.0.1', port, strictPort: port !== 0, open: false },
 });
 const address = server.httpServer.address();
 const url = `http://127.0.0.1:${address.port}/`;
@@ -82,7 +147,13 @@ const say = (text) => {
   console.log(text);
 };
 
-const browser = await launchChromium({ headed, webGpu: !noWebGpu, args: browserArgs });
+const browser = useFirefox
+  ? await launchFirefox()
+  // Unrounded timestamps, which Chromium otherwise rounds to 100 µs.
+  : await launchChromium({
+      webGpu: !noWebGpu,
+      args: gpuTime ? [...browserArgs, '--enable-webgpu-developer-features'] : browserArgs,
+    });
 try {
   const page = await browser.newPage();
   // Chromium has no switch that takes WebGPU away, so the property goes before any
@@ -104,11 +175,24 @@ try {
         self.dumpsWgsl = true;
         const create = GPUDevice.prototype.createShaderModule;
         GPUDevice.prototype.createShaderModule = function (descriptor) {
-          console.log('${WGSL_MARK}' + descriptor.code);
+          console.log('${WGSL_MARK}' + (descriptor.label ?? '') + '\\n' + descriptor.code);
           return create.call(this, descriptor);
         };
           }\n` + await response.text();
       await route.fulfill({ response, body });
+    });
+  }
+  if (dumpTexture) {
+    const spec = parseSpec(dumpTexture[2]);
+    await page.route(/\.js$/, async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, body: hookSource(spec) + await response.text() });
+    });
+  }
+  if (gpuObjects) {
+    await page.route(/\.js$/, async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, body: gpuObjectsHook(GPU_OBJECTS_EVERY_MS) + await response.text() });
     });
   }
   page.on('console', (m) => note(`page ${m.type()}: ${m.text()}`));
@@ -122,8 +206,12 @@ try {
     note(`worker started: ${worker.url()}`);
     worker.on('console', (m) => {
       const text = m.text();
-      if (dumpWgsl && text.startsWith(WGSL_MARK)) {
-        writeFileSync(join(dumpWgsl, `${shadersDumped++}.wgsl`), text.slice(WGSL_MARK.length));
+      if (text.startsWith(GPU_OBJECTS_MARK)) {
+        say(`gpu objects: ${text.slice(GPU_OBJECTS_MARK.length)}`);
+      } else if (dumpWgsl && text.startsWith(WGSL_MARK)) {
+        const [label, ...code] = text.slice(WGSL_MARK.length).split('\n');
+        const name = [shadersDumped++, ...label.split(/\W+/).filter(Boolean)].join('-');
+        writeFileSync(join(dumpWgsl, `${name}.wgsl`), code.join('\n'));
       } else {
         note(`worker ${m.type()}: ${text}`);
       }
@@ -173,16 +261,33 @@ try {
   if (titleKeys) await page.setInputFiles('#title-keys', titleKeys);
   if (firmware) {
     const ncas = readdirSync(firmware).filter((name) => /\.nca$/i.test(name));
-    await page.setInputFiles('#firmware-ncas', ncas.map((name) => join(firmware, name)));
-    // The page logs `Installed N title(s)` once every archive is registered.
+    await page.setInputFiles('#firmware-dir', firmware);
+    // The firmware status reads `Installed N title(s)` once every archive is registered.
     let progress = '';
-    while (!(await page.locator('#console', { hasText: /Installed \d+ title/ }).count())) {
+    while (!/Installed \d+ title/.test(await page.locator('#firmware-status').innerText())) {
       await page.waitForTimeout(2000);
       const now = await page.locator('#firmware-state').innerText();
       if (now !== progress) say(`firmware: ${now}`);
       progress = now;
     }
     say(`installed the firmware in ${firmware} (${ncas.length} NCAs)`);
+  }
+  if (relay) {
+    await page.locator('#btn-panel').click();
+    await page.locator('.tab[data-tab=network]').click();
+    await page.locator('#net-url').fill(relay);
+    await page.locator('#btn-net').click();
+    const badge = page.locator('#net-badge');
+    await badge.filter({ hasText: /^(on|no relay)$/ }).waitFor({ timeout: 15_000 });
+    say(`network: ${await badge.innerText()} through ${relay}`);
+    await page.locator('#btn-panel').click();
+  }
+  if (update) {
+    await page.setInputFiles('#nro-file', update);
+    await page.locator('#console').getByText('launch it patched', { exact: false }).first()
+      .waitFor({ state: 'attached', timeout: 60_000 });
+    await page.keyboard.press('Escape');
+    say(`holding the update in ${update}`);
   }
   const before = await page.evaluate(() => document.getElementById('console').childElementCount);
   if (docked) await page.locator('#btn-dock').evaluate((button) => button.click());
@@ -219,9 +324,12 @@ try {
     }
     await page.waitForTimeout(1000);
   }
+  // DOM clicks: Playwright's wait for a stable element needs animation frames, which a busy
+  // or covered window stops drawing.
+  const press = (selector) => page.evaluate((s) => document.querySelector(s).click(), selector);
   const openDebugTab = async () => {
-    if (!(await page.locator('body.panel-open').count())) await page.locator('#btn-panel').click();
-    await page.getByRole('tab', { name: 'Debug' }).click();
+    if (!(await page.locator('body.panel-open').count())) await press('#btn-panel');
+    await press('.tab[data-tab="debug"]');
   };
   // The Translation section counts only while it is on screen.
   if (jitStats) await openDebugTab();
@@ -250,18 +358,113 @@ try {
         say(`${elapsed()}s: toggled the dock`);
         return page.locator('#btn-dock').evaluate((button) => button.click());
       });
+  let software = false;
+  let litFailed = false;
+  const screenIsLit = () => page.evaluate(() => {
+    const screen = document.getElementById('screen');
+    const probe = document.createElement('canvas');
+    probe.width = 64;
+    probe.height = 36;
+    const context = probe.getContext('2d');
+    context.drawImage(screen, 0, 0, probe.width, probe.height);
+    const { data } = context.getImageData(0, 0, probe.width, probe.height);
+    let sum = 0;
+    for (let i = 0; i < data.length; i += 4) sum += data[i] + data[i + 1] + data[i + 2];
+    return sum / (data.length / 4) / 3 > 20;
+  }).catch((error) => {
+    if (!litFailed) say(`could not read the screen: ${String(error.message).split('\n')[0]}`);
+    litFailed = true;
+    return false;
+  });
+  const useSoftware = () => {
+    software = true;
+    say(`${elapsed()}s: switched to the software rasterizer`);
+    return page.evaluate(() => {
+      const box = document.getElementById('render-force-software');
+      box.checked = true;
+      box.dispatchEvent(new Event('change'));
+    });
+  };
+  const forcing = softwareAt === undefined ? null : repeat(Number(softwareAt), 0, useSoftware);
+  const timingGpu = gpuTime && repeat(Number(gpuTime[2] ?? 0), 0, () => {
+    say(`${elapsed()}s: timing the GPU per ${gpuTime[1] === 'draws' ? 'draw' : 'pass'}`);
+    return page.evaluate((mode) => {
+      const select = document.getElementById('render-device-time');
+      select.value = mode;
+      select.dispatchEvent(new Event('change'));
+    }, gpuTime[1]);
+  });
   const tapping = presses.map(({ key, next, every }) => repeat(next, every, () => tap(key)));
   const shooting = screenshot && screenshotEvery
     ? repeat(screenshotEvery, screenshotEvery, (at) =>
-        page.locator('#screen').screenshot({ path: screenshot.replace(/(\.\w+)?$/, `-${at}s$1`) }))
+        page.locator('#screen').screenshot({ path: screenshot.replace(/(\.\w+)?$/, `-${at}s$1`) })
+          // A page at 1 fps can outlast the screenshot timeout; a missed shot must not end the run.
+          .catch((error) => say(`${elapsed()}s: no screenshot: ${String(error.message).split('\n')[0]}`)))
     : null;
+  const runStep = async ({ verb, rest }) => {
+    const [first, ...others] = rest.split(/\s+/);
+    if (verb === 'wait') {
+      await page.waitForTimeout(Number(first) * 1000);
+    } else if (verb === 'press') {
+      for (let i = 0; i < Number(others[0] ?? 1); i += 1) {
+        await page.keyboard.down(first);
+        await page.waitForTimeout(PRESS_HOLD_MS);
+        await page.keyboard.up(first);
+        await page.waitForTimeout(Number(others[1] ?? 1) * 1000);
+      }
+    } else if (verb === 'pressuntil') {
+      const deadline = Date.now() + Number(others[1]) * 1000;
+      while (!(await page.locator('#keyboard[open]').count())) {
+        if (Date.now() > deadline) throw new Error('the keyboard dialog never opened');
+        await page.keyboard.down(first);
+        await page.waitForTimeout(PRESS_HOLD_MS);
+        await page.keyboard.up(first);
+        await page.waitForTimeout(Number(others[0]) * 1000);
+      }
+    } else if (verb === 'text') {
+      await page.locator('#keyboard[open]').waitFor({ timeout: STEP_TIMEOUT_MS });
+      await page.locator('#keyboard-text').fill(rest);
+      await page.locator('#btn-keyboard-ok').click();
+    } else if (verb === 'log') {
+      const pattern = new RegExp(others.join(' '));
+      const deadline = Date.now() + Number(first) * 1000;
+      for (;;) {
+        const rows = await page.evaluate(() =>
+          [...document.getElementById('console').children].map((row) => row.textContent));
+        if (rows.some((row) => pattern.test(row))) return;
+        if (Date.now() > deadline) throw new Error(`no console line matched ${pattern}`);
+        await page.waitForTimeout(1000);
+      }
+    } else {
+      await page.locator('#screen').screenshot({ path: resolve(rest) });
+    }
+  };
+  const scripting = (async () => {
+    for (const [i, step] of steps.entries()) {
+      if (!running || crashed || stopped || Date.now() - started >= seconds * 1000) return;
+      say(`${elapsed()}s: script ${i + 1}/${steps.length}: ${step.line}`);
+      try {
+        await runStep(step);
+      } catch (error) {
+        say(`${elapsed()}s: script step ${i + 1} failed: ${String(error.message).split('\n')[0]}`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    if (steps.length) say(`${elapsed()}s: script finished`);
+  })();
   const tracing = (async () => {
     if (!traceSpec) return;
     await page.waitForTimeout(started + Number(traceSpec[2]) * 1000 - Date.now());
     if (crashed || stopped) return;
     await browser.startTracing(page, {
       path: resolve(traceSpec[1]),
-      categories: ['toplevel', 'gpu', 'gpu.dawn', 'disabled-by-default-gpu.dawn', 'webgpu', 'ipc'],
+      categories: [
+        'toplevel', 'gpu', 'gpu.dawn', 'disabled-by-default-gpu.dawn', 'webgpu', 'ipc',
+        ...traceCpu
+          ? ['disabled-by-default-v8.cpu_profiler', 'v8', 'v8.wasm', 'disabled-by-default-v8.gc']
+          : [],
+      ],
     });
     await page.waitForTimeout(Number(traceSpec[3]) * 1000);
     await browser.stopTracing();
@@ -269,6 +472,8 @@ try {
   })();
   let lastRows = -1;
   let lastLine = '';
+  let lastCount = null;
+  let lastCountAt = 0;
   while (running && !crashed && Date.now() - started < seconds * 1000) {
     await page.waitForTimeout(SAMPLE_MS);
     if (crashed) break;
@@ -276,7 +481,7 @@ try {
     try {
       sample = await page.evaluate(() => ({
         state: document.body.dataset.state,
-        instructions: document.getElementById('instructions')?.textContent ?? '',
+        count: document.body.dataset.instructions ?? null,
         fps: document.getElementById('fps')?.textContent ?? '',
         rows: document.getElementById('console')?.childElementCount ?? 0,
         last: document.getElementById('console')?.lastElementChild?.textContent ?? '',
@@ -288,6 +493,15 @@ try {
       break;
     }
     const at = elapsed();
+    // A rate only while running, and not across a count that went backwards: a new session.
+    const count = sample.count === null ? null : Number(sample.count);
+    const ran = count !== null && lastCount !== null ? count - lastCount : -1;
+    const rate = sample.state === 'running' && ran >= 0 && at > lastCountAt
+      ? ` (${fmtCount(ran / (at - lastCountAt))}/s)`
+      : '';
+    sample.instructions = count === null ? '' : fmtCount(count) + rate;
+    lastCount = count;
+    lastCountAt = at;
     // The console is capped, so quiet means the last line is unchanged.
     const unchanged = sample.rows === lastRows && sample.last === lastLine;
     const quiet = unchanged ? ', console quiet since the last sample' : '';
@@ -295,6 +509,10 @@ try {
       + `; last: ${sample.last.slice(0, 160)}`);
     lastRows = sample.rows;
     lastLine = sample.last;
+    const billions = /^([\d.]+)B/.exec(sample.instructions);
+    if (!software && billions && Number(billions[1]) >= softwareAfter && await screenIsLit()) {
+      await useSoftware();
+    }
     // Nothing more will happen, and the log is what the run is for.
     if (sample.state === 'fault' || sample.state === 'halted') {
       stopped = true;
@@ -307,33 +525,78 @@ try {
     }
   }
 
-  await Promise.allSettled([...tapping, docking, shooting, tracing]);
+  await Promise.allSettled([...tapping, docking, forcing, timingGpu, shooting, scripting, tracing]);
   if (screenshot && !crashed) {
     await page.locator('#screen').screenshot({ path: screenshot });
     say(`saved the screen to ${screenshot}`);
   }
 
+  if (dumpTexture && !crashed) {
+    const worker = page.workers()[0];
+    const textures = worker ? await readTextures(worker) : [];
+    say(`read back ${textures.length} texture(s) of ${dumpTexture[2]}`);
+    writeTextures(resolve(dumpTexture[1]), textures, say);
+  }
+
+  let network = '(not asked for)';
+  if (relay && !crashed) {
+    if (!(await page.locator('body.panel-open').count())) await page.locator('#btn-panel').click();
+    await page.locator('.tab[data-tab=network]').click();
+    // The tab refreshes once a second while it shows, so what it says now is up to a second old.
+    await page.waitForTimeout(1500);
+    const socket = await page.locator('#net-link').innerText();
+    const rows = (await page.locator('#net-rows tr').allInnerTexts()).map((row) => row.replace(/\t/g, '  '));
+    network = [socket, ...rows].join('\n');
+    say(`network:\n${network}`);
+  }
+
   let pageConsole = '(the page crashed, and its console went with it)';
   let rendering = '(not read)';
+  let threads = '(not read)';
+  let audio = '(not read)';
   if (!crashed) {
     // Save's download holds every line; the view keeps only the newest.
     const saved = page.waitForEvent('download', { timeout: 60_000 });
     await page.evaluate(() => document.getElementById('btn-save-console').click());
     pageConsole = readFileSync(await (await saved).path(), 'utf8');
+    try {
+      await openDebugTab();
+      await press('[data-debug-group="cpu"]');
+      await page.locator('#threads-table').waitFor({ state: 'visible', timeout: 30_000 })
+        .catch(() => say('the Threads section had no reading after 30 s'));
+      threads = await page.locator('#threads-debug-section').innerText();
+    } catch (error) {
+      threads = `(not read: ${String(error.message).split('\n')[0]})`;
+    }
     // The Rendering section refreshes only while it is on screen; a page busy logging
     // can be too slow to open it, which costs the section and not the report.
     try {
-      await openDebugTab();
-      await page.getByRole('button', { name: 'Graphics' }).click();
+      await press('[data-debug-group="graphics"]');
+      // The worker answers between run slices, which a slow title stretches to seconds.
+      await page.locator('#render-debug-data').waitFor({ state: 'visible', timeout: 60_000 })
+        .catch(() => say('the Rendering section had no device report after 60 s'));
       await page.waitForTimeout(3000);
       rendering = await page.locator('#render-debug-section').innerText();
+      rendering += `\n${await page.locator('#display-debug-section').innerText()}`;
     } catch (error) {
       rendering = `(not read: ${String(error.message).split('\n')[0]})`;
+    }
+    // Rates need two readings a second apart, so the group is read after a few.
+    try {
+      await press('[data-debug-group="audio"]');
+      // The first reading comes when the worker answers; rates need a second after it.
+      await page.locator('#audio-clock-data').waitFor({ state: 'visible', timeout: 30_000 })
+        .catch(() => say('the Audio section had no reading after 30 s'));
+      await page.waitForTimeout(2500);
+      const sections = ['#audio-mixer-section', '#audio-clock-section', '#audio-output-section'];
+      audio = (await Promise.all(sections.map((section) => page.locator(section).innerText()))).join('\n');
+    } catch (error) {
+      audio = `(not read: ${String(error.message).split('\n')[0]})`;
     }
   }
   const consoleSection = `=== the page's console ===\n${pageConsole}`;
   if (out) {
-    writeFileSync(out, `${lines.join('\n')}\n=== rendering ===\n${rendering}\n${consoleSection}\n`);
+    writeFileSync(out, `${lines.join('\n')}\n=== threads ===\n${threads}\n=== rendering ===\n${rendering}\n=== audio ===\n${audio}\n=== network ===\n${network}\n${consoleSection}\n`);
     console.log(`wrote ${out}`);
   } else {
     console.log(consoleSection);

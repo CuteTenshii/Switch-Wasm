@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "crates/**"
+      - "web/**"
+      - "tests/**"
+      - "tools/**"
+      - ".cargo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "Makefile"
+      - "package.json"
+      - "bun.lock"
+      - "tsconfig*.json"
+      - "*.config.ts"
+      - "*.config.mjs"
+      - ".oxlintrc.json"
+      - ".forgejo/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "web/**"
+      - "tests/**"
+      - "tools/**"
+      - ".cargo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "Makefile"
+      - "package.json"
+      - "bun.lock"
+      - "tsconfig*.json"
+      - "*.config.ts"
+      - "*.config.mjs"
+      - ".oxlintrc.json"
+      - ".forgejo/workflows/ci.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ forgejo.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Set up Bun
+        uses: https://github.com/oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install Rust
+        uses: https://github.com/dtolnay/rust-toolchain@1.100.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build
+        uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: lint
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint TypeScript and tools
+        run: bun run lint
+
+      - name: Lint CSS
+        run: bun run stylelint
+
+      - name: Unit tests
+        run: bun run test:unit
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: https://github.com/dtolnay/rust-toolchain@1.100.0
+
+      - name: Cache Rust build
+        uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: test
+
+      - name: Run tests
+        run: cargo test --workspace
+
+  build:
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v7
+
+      # The wasm build rebuilds std with atomics, so it needs nightly with rust-src
+      - name: Install nightly Rust
+        uses: https://github.com/dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build
+        uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: wasm32-unknown-unknown-nightly
+          cache-bin: "false"
+
+      # `ring` compiles C for wasm32
+      - name: Install clang
+        run: apt-get update && apt-get install -y --no-install-recommends clang
+
+      - name: Install matching wasm-bindgen CLI
+        shell: bash
+        run: |
+          version=$(sed -n '/^name = "wasm-bindgen"$/,/^\[\[package\]\]/ s/^version = "\(.*\)"/\1/p' Cargo.lock)
+          test -n "$version"
+          curl -sSfL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$version/wasm-bindgen-$version-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C ~/.cargo/bin --strip-components=1 --wildcards '*/wasm-bindgen'
+          wasm-bindgen --version | grep -F "wasm-bindgen $version"
+
+      - name: Set up Bun
+        uses: https://github.com/oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build WebAssembly and frontend assets
+        run: make assets
+
+      - name: Install Chromium for the page tests
+        run: bunx playwright install --with-deps chromium
+
+      # Against `vite preview` of the `dist` just built: see playwright.config.ts.
+      - name: Page tests
+        run: bun run test:e2e
+        env:
+          CI: "true"
+
+      - name: Deploy to Pages
+        if: forgejo.ref == 'refs/heads/master' && forgejo.event_name != 'pull_request'
+        uses: actions/git-pages@v2
+        with:
+          site: https://tenshii.moe/Switch-Wasm/
+          token: ${{ forge.token }}
+          source: dist/

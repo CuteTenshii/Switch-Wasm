@@ -1,0 +1,1687 @@
+//! A `wgpu` backend for switch-core's 3D engine, behind
+//! [`switch_core::gpu::renderer::Renderer`]. The software rasterizer is the reference;
+//! any draw this cannot express runs there instead.
+//!
+//! Surfaces stay on the device across draws and return to guest memory only at
+//! [`Renderer::flush`], so no draw ever waits on the device.
+
+/// Whether a device with `features` can blend into a `format` target.
+fn can_blend(format: wgpu::TextureFormat, features: wgpu::Features) -> bool {
+    let float32 = matches!(
+        format,
+        wgpu::TextureFormat::R32Float
+            | wgpu::TextureFormat::Rg32Float
+            | wgpu::TextureFormat::Rgba32Float
+    );
+    !float32 || features.contains(wgpu::Features::FLOAT32_BLENDABLE)
+}
+
+pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
+    let wanted = wgpu::Features::TEXTURE_COMPRESSION_BC
+        // BC volumes; Breath of the Wild samples a `BC4` one.
+        | wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D
+        | wgpu::Features::TEXTURE_COMPRESSION_ASTC
+        | wgpu::Features::TEXTURE_COMPRESSION_ETC2
+        // `R16Unorm` and friends, widened to a 32-bit float where missing; see `convert::sampled_texture_format`.
+        | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
+        // Needed to filter a widened `r32float`.
+        | wgpu::Features::FLOAT32_FILTERABLE
+        // WGSL quad operations, for warp shuffles.
+        | wgpu::Features::SUBGROUP
+        // Lets the device use the adapter's real sample counts instead of only one and four.
+        | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+        // Makes `rg11b10ufloat` renderable.
+        | wgpu::Features::RG11B10UFLOAT_RENDERABLE
+        // Blending into 32-bit float targets.
+        | wgpu::Features::FLOAT32_BLENDABLE
+        // The debug panel's device time.
+        | wgpu::Features::TIMESTAMP_QUERY;
+    // Raise the storage buffer limit to the adapter's: a shader may read more than the guaranteed
+    // eight banks. Sampled textures too, past 16, and storage textures past 4; samplers stay at
+    // 16, which is all a browser gives, so textures share them past that (`Gpu::share_samplers`)
+    // natively as well. Colour attachment bytes too, past 32: Breath of the Wild's G-buffer takes
+    // 48 a sample.
+    let (default, offered) = (wgpu::Limits::default(), adapter.limits());
+    let required_limits = wgpu::Limits {
+        max_storage_buffers_per_shader_stage: default
+            .max_storage_buffers_per_shader_stage
+            .max(offered.max_storage_buffers_per_shader_stage),
+        max_sampled_textures_per_shader_stage: default
+            .max_sampled_textures_per_shader_stage
+            .max(offered.max_sampled_textures_per_shader_stage),
+        max_storage_textures_per_shader_stage: default
+            .max_storage_textures_per_shader_stage
+            .max(offered.max_storage_textures_per_shader_stage),
+        max_color_attachment_bytes_per_sample: default
+            .max_color_attachment_bytes_per_sample
+            .max(offered.max_color_attachment_bytes_per_sample),
+        ..default
+    };
+    wgpu::DeviceDescriptor {
+        required_features: adapter.features() & wanted,
+        required_limits,
+        ..Default::default()
+    }
+}
+
+mod builtin;
+mod convert;
+mod readback;
+mod stats;
+mod timing;
+
+pub use wgpu;
+
+use switch_core::gpu::engine::threed::{Engine3D, ShaderStage};
+use switch_core::gpu::exec::ExecCtx;
+use switch_core::gpu::pipeline::{self as state, Pipeline};
+use switch_core::gpu::renderer::{Blit, BlitRoute, Flush, Renderer, ScanOut, Software, Submit};
+#[cfg(test)]
+use switch_core::gpu::shader::compiled::Compiled;
+#[cfg(test)]
+use switch_core::gpu::shader::wgsl::{self, Stage};
+use switch_core::gpu::shader::wgsl::{Layout, Translation};
+use switch_core::gpu::surface::{Layout as SurfaceLayout, GOB_WIDTH};
+use switch_core::gpu::upload::{Target, TextureKey, Uploads};
+use switch_core::gpu::Framebuffer;
+use switch_core::json;
+use switch_core::Result;
+
+#[cfg(test)]
+use builtin::grid_bytes;
+use builtin::ResampleKey;
+use readback::{Held, HeldGlobal, Pending, Scratch};
+use stats::{DeviceErrors, Times, UploadBytes};
+
+/// The memory a `ldg` or atomic reaches, resolved from its descriptor.
+struct GlobalUpload {
+    /// The draw stage reading it; `None` for a compute launch.
+    stage: Option<ShaderStage>,
+    slot: u32,
+    /// Where it starts in guest memory, and how far; zero for a null descriptor.
+    addr: u64,
+    len: u64,
+    bytes: Vec<u8>,
+    /// The buffer on the device when the shader writes it or a compute launch only reads it,
+    /// which `bytes` then lacks.
+    held: Option<wgpu::Buffer>,
+    /// Whether this shader writes it.
+    writes: bool,
+    /// Words into `held` where `addr` is, when it is a written buffer the read lies inside.
+    base: u32,
+    /// The vertex stage reads a copy of `held` made before the draw: the fragment stage writes
+    /// it, and the vertex stage cannot bind storage writable.
+    snapshot: bool,
+}
+
+/// Upper bound on one `ldg` buffer, since the program does not say how far it reads.
+const MAX_GLOBAL: u64 = 8 << 20;
+
+/// Draws recorded before they are submitted anyway, which bounds the buffers they keep alive.
+const MAX_BATCHED_DRAWS: u32 = 256;
+
+/// Per-draw resources kept alive by unsubmitted draws before those draws are submitted anyway.
+const MAX_SCRATCH_BYTES: u64 = 256 << 20;
+
+/// Past this many, too: a browser allots a small buffer more than its size, and a batch kept open
+/// across presents held thousands of instance and scan-out buffers.
+const MAX_SCRATCH_ITEMS: usize = 4096;
+
+/// A depth surface is cropped to the colour target beside it along each axis it is larger,
+/// as every draw does, since a pass's attachments must match in size.
+fn crop_depth(depth: Target, color: Option<Target>) -> Target {
+    let Some(c) = color else { return depth };
+    Target {
+        width: depth.width.min(c.width),
+        height: depth.height.min(c.height),
+        rows: if depth.height > c.height {
+            c.height
+        } else {
+            depth.rows
+        },
+        ..depth
+    }
+}
+
+/// How wide the red channel of a shadow map's texel is, and how it is read.
+#[derive(Clone, Copy)]
+enum Red {
+    Unorm8,
+    Unorm16,
+    Float16,
+    Float32,
+    /// An `S8D24` word's stencil byte as float bits, which is the red the rasterizer compares.
+    StencilBits,
+}
+
+/// `copyTextureToBuffer` wants each row of the destination aligned.
+const COPY_ALIGNMENT: u32 = 256;
+
+/// Presented frames whose readbacks may be on their way at once.
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
+
+/// Where a module's textures start binding; see `switch_core::gpu::shader::wgsl`.
+const TEXTURE_BINDING: u32 = 32;
+
+/// What an unsupplied vertex attribute reads: the fixed `vec4` default, or zero for an unconfigured slot.
+const ATTRIBUTE_DEFAULTS: [u8; 32] = {
+    let mut bytes = [0u8; 32];
+    let one = 1.0f32.to_le_bytes();
+    bytes[28] = one[0];
+    bytes[29] = one[1];
+    bytes[30] = one[2];
+    bytes[31] = one[3];
+    bytes
+};
+const ABSENT_ATTRIBUTE: u64 = 0;
+const DEFAULT_ATTRIBUTE: u64 = 16;
+
+/// The shape of a surface's companion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Shape {
+    /// A device multisample texture of `n` samples.
+    Multisampled(u32),
+    /// One sample per pixel at the centre (`AntiAliasEnable` off); every texel of the tile takes the result.
+    PerPixel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ClearKey {
+    color: Option<wgpu::TextureFormat>,
+    depth: Option<wgpu::TextureFormat>,
+    write_mask: [bool; 4],
+}
+
+/// A binding and what fills it, held until the bind group is built.
+// `PartialEq` only changes how the bytes compare, so equal values still hash alike.
+#[allow(clippy::derived_hash_with_manual_eq)]
+#[derive(Debug, Clone, Eq, Hash)]
+enum Resource {
+    /// A buffer something else holds on the device.
+    Buffer(u32, wgpu::Buffer),
+    /// Bytes for a buffer of the bind group's own.
+    Bytes(u32, Vec<u8>),
+    /// The first bytes of a buffer, bound at a dynamic offset into it.
+    Window(u32, wgpu::Buffer, u64),
+    Texture(u32, wgpu::Texture, wgpu::TextureViewDimension),
+    Sampler(u32, wgpu::Sampler),
+}
+
+impl PartialEq for Resource {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Buffer(a, x), Self::Buffer(b, y)) => a == b && x == y,
+            (Self::Window(a, x, m), Self::Window(b, y, n)) => a == b && x == y && m == n,
+            (Self::Bytes(a, x), Self::Bytes(b, y)) => a == b && bind::same_bytes(x, y),
+            (Self::Texture(a, x, p), Self::Texture(b, y, q)) => a == b && x == y && p == q,
+            (Self::Sampler(a, x), Self::Sampler(b, y)) => a == b && x == y,
+            _ => false,
+        }
+    }
+}
+
+/// Hand a draw's two WGSL modules to the dump sink, named by hash.
+fn dump_wgsl(vs: &str, fs: &str) {
+    for (what, src) in [("vs", vs), ("fs", fs)] {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(src, &mut h);
+        let key = std::hash::Hasher::finish(&h);
+        switch_core::dump::keep(
+            switch_core::dump::Artefact::DeviceWgsl,
+            &format!("{key:016x}.{what}.wgsl"),
+            src.as_bytes(),
+        );
+    }
+}
+
+/// `--only`'s value: one draw index, or the half-open range `a..b`.
+pub fn draw_range(spec: &str) -> Option<std::ops::Range<u32>> {
+    match spec.trim().split_once("..") {
+        Some((from, to)) => Some(from.trim().parse().ok()?..to.trim().parse().ok()?),
+        None => {
+            let one: u32 = spec.trim().parse().ok()?;
+            Some(one..one + 1)
+        }
+    }
+}
+
+/// Everything a render pipeline bakes in; viewport, scissor and blend constant are set per pass.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PipelineKey {
+    /// The two module cache keys (hashes of the WGSL).
+    vs: u64,
+    fs: u64,
+    /// `None` for a depth-only pass.
+    target: Option<wgpu::TextureFormat>,
+    /// Colour outputs 1 onward, `None` where unattached.
+    extra_targets: Vec<Option<ExtraTargetKey>>,
+    /// Device depth format, whether depth is written, and the compare function.
+    depth: Option<(wgpu::TextureFormat, bool, state::Compare)>,
+    samples: u32,
+    sample_mask: u64,
+    alpha_to_coverage: bool,
+    /// The sample a repeated draw keeps; see `Coverage::per_sample_pass`.
+    sample_pass: Option<u32>,
+    blend: Option<state::Blend>,
+    write_mask: [bool; 4],
+    topology: state::Topology,
+    /// The index format a strip's primitive restart uses.
+    strip_index_format: Option<wgpu::IndexFormat>,
+    front_face: state::FrontFace,
+    cull: state::Cull,
+    /// Each bound vertex buffer, in the order they are bound.
+    buffers: Vec<VertexBufferKey>,
+}
+
+/// A colour output past 0: device format, blend and write mask.
+type ExtraTargetKey = (wgpu::TextureFormat, Option<state::Blend>, [bool; 4]);
+
+/// Format, offset into the element, and shader location.
+type AttributeKey = (wgpu::VertexFormat, u64, u32);
+
+/// Stride, whether it steps per instance, and its attributes.
+type VertexBufferKey = (u32, bool, Vec<AttributeKey>);
+
+struct Bound {
+    buffer: wgpu::Buffer,
+    /// Device copies over `buffer` of what compute launches wrote, in order, before the draw.
+    patches: Vec<Patch>,
+    attributes: Vec<wgpu::VertexAttribute>,
+    /// Zero for an instanced array and for the constant attribute: one element read by every vertex.
+    stride: u64,
+    step: wgpu::VertexStepMode,
+    /// An instanced array's one element, unless compute launches patch it.
+    element: Option<Vec<u8>>,
+}
+
+/// A vertex buffer's bytes, the attributes that read them, how many bytes into the array they
+/// start (`None` once rearranged, so they are not the guest's bytes in place), and their stride.
+type VertexPart<'a> = (
+    std::borrow::Cow<'a, [u8]>,
+    Vec<wgpu::VertexAttribute>,
+    Option<u64>,
+    u64,
+);
+
+/// Split a vertex array so each attribute lies inside its stride at an offset its format
+/// aligns, as WebGPU requires and Maxwell does not: one past the stride reads the same bytes
+/// from a buffer starting whole strides later, and one running into the next element (Tears of
+/// the Kingdom's 8-byte `Float16x4` on a 6-byte stride) or off its alignment (its offset 10)
+/// reads them from a copy laid out as WebGPU takes it. The buffer keeps its element count, zeros
+/// where the array ended, so a draw still fits.
+fn within_stride<'a>(
+    bytes: std::borrow::Cow<'a, [u8]>,
+    attributes: Vec<wgpu::VertexAttribute>,
+    stride: u64,
+) -> Vec<VertexPart<'a>> {
+    if stride == 0 {
+        return vec![(bytes, attributes, Some(0), 0)];
+    }
+    let mut by_skip: std::collections::BTreeMap<u64, Vec<wgpu::VertexAttribute>> =
+        std::collections::BTreeMap::new();
+    for attribute in attributes {
+        by_skip
+            .entry(attribute.offset / stride)
+            .or_default()
+            .push(wgpu::VertexAttribute {
+                offset: attribute.offset % stride,
+                ..attribute
+            });
+    }
+    by_skip
+        .into_iter()
+        .map(|(skip, attributes)| {
+            let (bytes, shift) = if skip == 0 {
+                (bytes.clone(), 0)
+            } else {
+                let from =
+                    usize::try_from(skip * stride).map_or(bytes.len(), |at| at.min(bytes.len()));
+                let mut moved = bytes[from..].to_vec();
+                moved.resize(bytes.len(), 0);
+                (std::borrow::Cow::Owned(moved), from as u64)
+            };
+            let fits = attributes.iter().all(|a| {
+                a.offset + a.format.size() <= stride
+                    && a.offset.is_multiple_of(vertex_alignment(a.format))
+            });
+            if fits {
+                return (bytes, attributes, Some(shift), stride);
+            }
+            let (repacked, attributes, wide) = repack(&bytes, stride, &attributes);
+            (std::borrow::Cow::Owned(repacked), attributes, None, wide)
+        })
+        .collect()
+}
+
+/// The offset alignment WebGPU asks of an attribute.
+fn vertex_alignment(format: wgpu::VertexFormat) -> u64 {
+    format.size().min(4)
+}
+
+/// Each element's attributes laid out one after another, each at an offset its format aligns,
+/// read `stride` apart as Maxwell reads them; zeros past the array's end.
+fn repack(
+    bytes: &[u8],
+    stride: u64,
+    attributes: &[wgpu::VertexAttribute],
+) -> (Vec<u8>, Vec<wgpu::VertexAttribute>, u64) {
+    let mut end = 0u64;
+    let moved: Vec<wgpu::VertexAttribute> = attributes
+        .iter()
+        .map(|attribute| {
+            let offset = end.next_multiple_of(vertex_alignment(attribute.format));
+            end = offset + attribute.format.size();
+            wgpu::VertexAttribute {
+                offset,
+                ..*attribute
+            }
+        })
+        .collect();
+    let wide = end.next_multiple_of(4);
+    let (stride, wide_len) = (stride as usize, wide as usize);
+    let mut out = vec![0u8; bytes.len() / stride * wide_len];
+    for (i, element) in out.chunks_exact_mut(wide_len).enumerate() {
+        for (from, to) in attributes.iter().zip(&moved) {
+            let at = i * stride + from.offset as usize;
+            let len = (from.format.size() as usize).min(bytes.len().saturating_sub(at));
+            let into = to.offset as usize;
+            element[into..into + len].copy_from_slice(&bytes[at..at + len]);
+        }
+    }
+    (out, moved, wide)
+}
+
+/// Widen each element to a multiple of four bytes, which WebGPU requires of a stride and
+/// Maxwell does not. Attribute offsets stay valid: the padding follows the element.
+fn aligned_stride(
+    bytes: std::borrow::Cow<'_, [u8]>,
+    stride: u64,
+) -> (std::borrow::Cow<'_, [u8]>, u64) {
+    let wide = stride.next_multiple_of(4);
+    if wide == stride {
+        return (bytes, stride);
+    }
+    let (narrow, wide_len) = (stride as usize, wide as usize);
+    let mut padded = Vec::with_capacity(bytes.len() / narrow * wide_len);
+    for element in bytes.chunks_exact(narrow) {
+        padded.extend_from_slice(element);
+        padded.resize(padded.len() + wide_len - narrow, 0);
+    }
+    (std::borrow::Cow::Owned(padded), wide)
+}
+
+/// Bytes a compute launch wrote on the device, copied over a buffer made from stale guest memory.
+#[derive(Debug, Clone)]
+struct Patch {
+    source: wgpu::Buffer,
+    from: u64,
+    to: u64,
+    len: u64,
+}
+
+/// A vertex buffer's bytes and layout, before it is created as a [`Bound`].
+struct Feed<'a> {
+    bytes: std::borrow::Cow<'a, [u8]>,
+    /// Where `bytes` came from in guest memory and how many of them did, when they are the
+    /// array's own bytes in place; `None` when they were rearranged or made up.
+    origin: Option<(u64, u64)>,
+    /// The guest memory the bytes were read from, however they were arranged.
+    read: std::ops::Range<u64>,
+    attributes: Vec<wgpu::VertexAttribute>,
+    /// Zero when every vertex reads element 0.
+    stride: u64,
+    step: wgpu::VertexStepMode,
+}
+
+/// Fold `feeds` into two when there are more than `limit` (Maxwell has 32 arrays, WebGPU
+/// guarantees 8): the per-vertex arrays interleaved, since each starts at the draw's first
+/// vertex, and one element holding everything every vertex reads alike (instanced arrays
+/// upload only this instance's element; the defaults are constant).
+fn fit_vertex_buffers(feeds: Vec<Feed<'_>>, limit: u32) -> Vec<Feed<'_>> {
+    if feeds.len() <= limit as usize {
+        return feeds;
+    }
+    let (per_vertex, shared): (Vec<_>, Vec<_>) = feeds.into_iter().partition(|f| f.stride != 0);
+    let mut folded = Vec::with_capacity(2);
+    if !per_vertex.is_empty() {
+        let vertices = per_vertex
+            .iter()
+            .map(|f| f.bytes.len() / f.stride as usize)
+            .max()
+            .unwrap_or(0);
+        folded.push(interleave(&per_vertex, vertices));
+    }
+    if !shared.is_empty() {
+        folded.push(Feed {
+            stride: 0,
+            ..interleave(&shared, 1)
+        });
+    }
+    folded
+}
+
+/// Copy each feed's attributes, element by element, into one buffer of `elements` elements.
+fn interleave(feeds: &[Feed<'_>], elements: usize) -> Feed<'static> {
+    let mut placed = Vec::new();
+    let mut stride = 0;
+    for feed in feeds {
+        for attribute in &feed.attributes {
+            let size = attribute.format.size();
+            // WebGPU aligns an attribute to its size, or to four bytes when it is larger.
+            stride = u64::next_multiple_of(stride, size.min(4));
+            placed.push((feed, attribute, stride));
+            stride += size;
+        }
+    }
+    let stride = stride.next_multiple_of(4);
+    let mut bytes = vec![0u8; stride as usize * elements];
+    for element in 0..elements {
+        for &(feed, attribute, at) in &placed {
+            let size = attribute.format.size() as usize;
+            let from = element * feed.stride as usize + attribute.offset as usize;
+            let to = element * stride as usize + at as usize;
+            // Bytes past an upload's end read as zero, as they do on hardware.
+            if let Some(source) = feed.bytes.get(from..from + size) {
+                bytes[to..to + size].copy_from_slice(source);
+            }
+        }
+    }
+    Feed {
+        bytes: std::borrow::Cow::Owned(bytes),
+        origin: None,
+        read: 0..0,
+        attributes: placed
+            .iter()
+            .map(|&(_, attribute, at)| wgpu::VertexAttribute {
+                offset: at,
+                ..*attribute
+            })
+            .collect(),
+        stride,
+        step: wgpu::VertexStepMode::Vertex,
+    }
+}
+
+/// A ceiling for pathological titles; real ones use a few dozen.
+const SHADER_CACHE_ENTRIES: usize = 1024;
+
+/// Bounds [`Gpu::sequential_indices`]; a title draws few distinct fan or quad counts.
+const SEQUENTIAL_INDEX_LISTS: usize = 256;
+
+/// A translated shader and what it was translated from. See [`Gpu::shader_cache`].
+#[derive(Debug)]
+struct CachedShader {
+    translation: std::sync::Arc<Translation>,
+    reads: switch_core::gpu::shader::DecodeReads,
+    /// Unique to this translation; see [`Gpu::built_modules`].
+    serial: u64,
+}
+
+/// A render pass left open for the next draw, with the surfaces it renders into.
+#[derive(Debug)]
+struct OpenPass {
+    pass: wgpu::RenderPass<'static>,
+    colour: Option<wgpu::Texture>,
+    /// The surfaces of colour outputs 1 onward, `None` where unattached.
+    extra_colours: Vec<Option<wgpu::Texture>>,
+    depth: Option<wgpu::Texture>,
+    /// Buffers held on the device that its draws bind, and whether writable.
+    globals: Vec<(wgpu::Buffer, bool)>,
+    /// What its draws last set, so a draw joining it sets only what changed: each call
+    /// crosses into JavaScript in a browser.
+    set: PassState,
+    /// The last draw, held back so the next instance of it can widen it into one call. Only
+    /// [`Gpu::end_pass`] closes a pass, and it records this first.
+    pending: Option<DrawCall>,
+    /// Where its timestamps go, when it is timed.
+    timed: Option<u32>,
+    /// The held surface its colour scratch stands in for, the scratch, and the part they share,
+    /// copied back when it ends. See [`Prepared::color_scratch`].
+    scratch: Option<(wgpu::Texture, wgpu::Texture, wgpu::Extent3d)>,
+}
+
+/// One draw call: vertices or indices, the base vertex of an indexed one, and its instances.
+#[derive(Debug)]
+struct DrawCall {
+    count: u32,
+    base_vertex: Option<i32>,
+    instances: std::ops::Range<u32>,
+    /// Each instanced array's slot, element length, and its instances' elements in order.
+    instanced: Vec<(usize, usize, Vec<u8>)>,
+    /// What its pipeline was built from, kept while it reads instanced arrays.
+    recipe: Option<Box<render::Recipe>>,
+}
+
+/// Past this many bytes of unread elements before a held-back draw's first instance, the next
+/// instance draws on its own.
+const MAX_INSTANCE_PADDING: u64 = 1 << 20;
+
+/// The stride instances' `len`-byte elements are laid out at: whole words, as WebGPU asks.
+fn instance_stride(len: usize) -> u64 {
+    (len as u64).next_multiple_of(4).max(4)
+}
+
+impl DrawCall {
+    fn record(&self, pass: &mut wgpu::RenderPass<'static>) {
+        match self.base_vertex {
+            // The vertex buffer starts at the draw's lowest index.
+            Some(base) => pass.draw_indexed(0..self.count, base, self.instances.clone()),
+            None => pass.draw(0..self.count, self.instances.clone()),
+        }
+    }
+
+    /// Whether `next`, reading these elements of its instanced arrays, draws the same vertices
+    /// as the instance after this call's last.
+    fn continued_by(&self, next: &DrawCall, instanced: &[(usize, &[u8])]) -> bool {
+        let same_arrays = self.instanced.len() == instanced.len()
+            && self.instanced.iter().zip(instanced).all(
+                |((slot, len, _), (next_slot, element))| {
+                    slot == next_slot
+                        && *len == element.len()
+                        && u64::from(self.instances.start) * instance_stride(*len)
+                            <= MAX_INSTANCE_PADDING
+                },
+            );
+        same_arrays
+            && self.count == next.count
+            && self.base_vertex == next.base_vertex
+            && next.instances.start == self.instances.end
+            && next.instances.len() == 1
+    }
+}
+
+/// The state a render pass was last given. Viewport and blend constant compare as floats, so a
+/// NaN only costs a call that was not needed.
+#[derive(Debug, Default)]
+struct PassState {
+    groups: [Option<(wgpu::BindGroup, Vec<u32>)>; 2],
+    vertex: Vec<Option<wgpu::Buffer>>,
+    index: Option<(wgpu::Buffer, wgpu::IndexFormat)>,
+    pipeline: Option<wgpu::RenderPipeline>,
+    scissor: Option<[u32; 4]>,
+    viewport: Option<[f32; 6]>,
+    blend_constant: Option<[f32; 4]>,
+}
+
+impl PassState {
+    /// Whether a draw wanting this state would set nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn holds<'a>(
+        &self,
+        groups: [&wgpu::BindGroup; 2],
+        offsets: &[Vec<u32>; 2],
+        vertex: impl Iterator<Item = Option<&'a wgpu::Buffer>>,
+        scissor: [u32; 4],
+        blend_constant: Option<[f32; 4]>,
+        index: Option<(&wgpu::Buffer, wgpu::IndexFormat)>,
+        (pipeline, viewport): (&wgpu::RenderPipeline, [f32; 6]),
+    ) -> bool {
+        let groups_held = groups
+            .iter()
+            .zip(offsets)
+            .zip(&self.groups)
+            .all(|((g, o), held)| {
+                held.as_ref()
+                    .is_some_and(|(held_group, held_offsets)| held_group == *g && held_offsets == o)
+            });
+        let mut vertex_held = true;
+        // `None` is a slot whatever it holds will do.
+        for (slot, buffer) in vertex.enumerate() {
+            vertex_held &= buffer.is_none_or(|buffer| {
+                self.vertex
+                    .get(slot)
+                    .is_some_and(|held| held.as_ref() == Some(buffer))
+            });
+        }
+        groups_held
+            && vertex_held
+            && self.scissor == Some(scissor)
+            && blend_constant.is_none_or(|c| self.blend_constant == Some(c))
+            && index.is_none_or(|(buffer, format)| {
+                self.index
+                    .as_ref()
+                    .is_some_and(|(held, held_format)| held == buffer && *held_format == format)
+            })
+            && self.pipeline.as_ref() == Some(pipeline)
+            && self.viewport == Some(viewport)
+    }
+}
+
+/// A buffer's bytes and the device buffer holding them; see [`Gpu::shared_buffer`].
+type SharedBuffer = (Vec<u8>, wgpu::Buffer);
+
+/// A module built for one layout of a translation: the layout, the source's hash, the module.
+type BuiltModule = (Layout, u64, wgpu::ShaderModule);
+
+/// A device, and the rasterizer to fall back to.
+/// What the device holds for one GPU address space: a process's surfaces and caches,
+/// which another process's addresses must not reach. See [`Gpu::enter_space`].
+#[derive(Debug, Default)]
+struct Space {
+    /// Surfaces this is holding, by guest address.
+    held: std::collections::HashMap<u64, Held>,
+    /// Readbacks asked for and not yet collected, oldest first.
+    pending: Vec<Pending>,
+    /// Memory atomics wrote on the device, by guest address, owed to guest memory at the next flush.
+    globals: std::collections::HashMap<u64, HeldGlobal>,
+    /// Guest memory has to catch up with every surface at the next present: something
+    /// other than a device surface is about to depend on it. See [`Gpu::submit_frame_inner`].
+    sync_all: bool,
+    /// Surfaces that overlap another held at a different address: they go back at the next
+    /// present, and a blit touching held memory waits for that.
+    aliased: Vec<u64>,
+    /// Surfaces no longer held, kept on the device rather than read back, oldest first. See
+    /// [`Gpu::retire`].
+    retired: Vec<Retired>,
+    /// Memory retired surfaces cover, whose cached textures go at the next chance to look up
+    /// their pages. See [`Gpu::evict_written`].
+    retired_spans: Vec<std::ops::Range<u64>>,
+    /// Asks made for a whole frame's surfaces; each readback carries its ask's number.
+    asked: u64,
+    /// Deswizzled texture bytes, evicted when the guest writes their pages.
+    texture_cache: std::collections::HashMap<TextureKey, std::sync::Arc<[u8]>>,
+    /// Translated shaders by address and stage.
+    shader_cache: std::collections::HashMap<ShaderKey, CachedShader>,
+    /// Which cached translations a guest page holds program words for.
+    shader_pages: std::collections::HashMap<u32, Vec<ShaderKey>>,
+    /// Which cached textures a guest page holds bytes for.
+    page_owners: std::collections::HashMap<u32, Vec<TextureKey>>,
+    /// Device copies of cached textures; only keys `texture_cache` also holds.
+    gpu_textures:
+        std::collections::HashMap<TextureKey, Vec<(wgpu::TextureViewDimension, wgpu::Texture)>>,
+    /// Textures made from held surfaces alone, kept until one of those surfaces is written.
+    held_copies: std::collections::HashMap<HeldCopyKey, HeldCopy>,
+    /// What compute launches only read, by address and length, kept until the guest writes it.
+    inputs: std::collections::HashMap<(u64, u64), Input>,
+    /// Which kept inputs a guest page holds bytes for.
+    input_pages: std::collections::HashMap<u32, Vec<(u64, u64)>>,
+    input_bytes: u64,
+}
+
+/// A surface the guest stopped rendering into, and the present it was retired before.
+#[derive(Debug)]
+struct Retired {
+    held: Held,
+    presented: u64,
+}
+
+/// A device copy of guest memory a compute launch reads and never writes.
+#[derive(Debug)]
+struct Input {
+    buffer: wgpu::Buffer,
+    /// The CPU pages it was read from, which a remapped address no longer matches.
+    pages: Vec<u32>,
+}
+
+/// The constants draws place, kept across submits; a draw's are at most 18 banks of 64 KiB.
+/// It holds a frame's: Breath of the Wild's draws place about 10 MiB of them a frame, and at
+/// 8 MiB the arena started over before any came round again.
+const CONSTANT_ARENA_BYTES: u64 = 64 << 20;
+
+/// Past this, every shared vertex and index buffer is dropped.
+const SHARED_BUFFER_BYTES: u64 = 64 << 20;
+
+/// Past this, every kept input of the address space is dropped.
+const INPUT_CACHE_BYTES: u64 = 256 << 20;
+
+/// A program's address and the draw stage it runs in; `None` is a compute launch.
+type ShaderKey = (u64, Option<ShaderStage>);
+
+/// A sampled texture, the view it is sampled through, and whether it is compared.
+type HeldCopyKey = (TextureKey, wgpu::TextureViewDimension, bool);
+
+/// What [`Gpu::held_copy_shapes`] counts by: what became of the copy, and the size, format and
+/// view sampled.
+pub type HeldCopyShape = (
+    &'static str,
+    u32,
+    u32,
+    u32,
+    switch_core::gpu::pipeline::Format,
+    wgpu::TextureViewDimension,
+);
+
+/// A texture every layer of which was copied from a held surface; see [`Gpu::texture_over_held`].
+#[derive(Debug)]
+struct HeldCopy {
+    texture: wgpu::Texture,
+    /// Each layer's source and its [`Held::writes`] when copied.
+    sources: Vec<(u32, wgpu::Texture, u64)>,
+    /// The guest bytes the held layers were copied over, unless they cover the texture. The
+    /// texture cache hands out the same bytes until a guest write evicts them.
+    guest: Option<std::sync::Arc<[u8]>>,
+    /// [`Gpu::texture_epoch`] when its layers were last copied.
+    epoch: (u64, u64),
+}
+
+/// Past this many, every kept copy is dropped: a title's set of sampled held surfaces is small.
+const MAX_HELD_COPIES: usize = 64;
+
+/// Past this many shapes of [`Gpu::colour_scratch`], all are dropped; a title draws few.
+const MAX_COLOUR_SCRATCHES: usize = 8;
+
+/// Past this many bytes of them, too: one copy of a layered shadow array runs to tens of MiB,
+/// so a count alone does not bound the memory they keep.
+const MAX_HELD_COPY_BYTES: u64 = 512 << 20;
+
+#[derive(Debug)]
+pub struct Gpu {
+    /// Never read, but must be held: a browser loses the device once the instance is dropped.
+    _instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    /// The device's features and limits, read once: in a browser each query rebuilds them
+    /// from JavaScript, and draws ask several times each.
+    device_features: wgpu::Features,
+    device_limits: wgpu::Limits,
+    queue: wgpu::Queue,
+    /// The device's vertex buffer count; a draw with more is folded by [`fit_vertex_buffers`].
+    vertex_buffer_limit: u32,
+    /// Whether the adapter's subgroups are always 32 lanes, so compute warp instructions run
+    /// on them; see `wgsl::Caps::warp`.
+    warp_subgroups: bool,
+    /// The address space draws now run in, and its surfaces and caches.
+    space_id: u32,
+    space: Space,
+    /// Every other address space's, by id.
+    parked: std::collections::HashMap<u32, Space>,
+    /// Per-draw resources, destroyed after submission: a browser only frees dropped resources on GC.
+    scratch: Vec<Scratch>,
+    /// Bind groups of draws whose textures stay cached, by what they bind: most draws repeat one.
+    bind_groups: std::collections::HashMap<u64, CachedBinding>,
+    /// Compiled shader modules, keyed by a hash of the WGSL source.
+    modules: std::collections::HashMap<u64, wgpu::ShaderModule>,
+    /// Modules by the translation they were written from, its stage and its layout, so a
+    /// repeated draw neither writes nor hashes the WGSL again.
+    built_modules: std::collections::HashMap<(u64, u8), Vec<BuiltModule>>,
+    /// Translations made so far, which numbers the next.
+    translations: u64,
+    /// The stand-in fragment stage of a draw without one, translated once.
+    no_fragment: Option<std::sync::Arc<Translation>>,
+    /// Vertex and index buffers by usage and fingerprint, with the bytes they hold: most draws
+    /// repeat a mesh an earlier one uploaded. See [`Gpu::shared_buffer`].
+    shared_buffers: std::collections::HashMap<(u32, u64), Vec<SharedBuffer>>,
+    shared_bytes: u64,
+    /// Render pipelines, by everything they were built from.
+    pipelines: std::collections::HashMap<PipelineKey, wgpu::RenderPipeline>,
+    /// Assembled triangle lists of non-indexed draws, by primitive and vertex count.
+    sequential_indices:
+        std::collections::HashMap<(switch_core::gpu::raster::Primitive, u32), std::sync::Arc<[u8]>>,
+    /// Texture views by texture and dimension. See [`Gpu::view`].
+    views: std::collections::HashMap<
+        (wgpu::Texture, Option<wgpu::TextureViewDimension>),
+        wgpu::TextureView,
+    >,
+    /// Samplers by their settings; `createSampler` is slow in browsers.
+    samplers: std::collections::HashMap<SamplerKey, wgpu::Sampler>,
+    /// Bind group layouts, by the entries they describe.
+    group_layouts:
+        std::collections::HashMap<Vec<wgpu::BindGroupLayoutEntry>, wgpu::BindGroupLayout>,
+    /// Depth upload pipelines by depth format. See [`LOAD_DEPTH_WGSL`].
+    depth_loaders: std::collections::HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    /// Depth to colour pipelines by colour format. See [`builtin::DEPTH_TO_COLOUR_WGSL`].
+    depth_readers: std::collections::HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    /// See [`builtin::PACKED_DEPTH_WGSL`], by whether a held surface supplies the depth.
+    packed_depth: std::collections::HashMap<bool, wgpu::RenderPipeline>,
+    /// Rectangle clear pipelines. See [`CLEAR_RECT_WGSL`].
+    clear_pipelines: std::collections::HashMap<ClearKey, wgpu::RenderPipeline>,
+    /// 2D blit pipelines, by target format and entry point.
+    blit_pipelines:
+        std::collections::HashMap<(wgpu::TextureFormat, &'static str), wgpu::RenderPipeline>,
+    /// The canvas, once the page has handed one over. See [`Gpu::set_screen`].
+    screen: Option<screen::Screen>,
+    scan_pipelines: std::collections::HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    /// Every present brings every surface back, to compare against keeping them.
+    sync_every_present: bool,
+    /// Multisample resampling pipelines. See [`resample_wgsl`].
+    resample_pipelines: std::collections::HashMap<ResampleKey, wgpu::RenderPipeline>,
+    /// `--web-limits` on `screenshot`: hide native-only features so a native run takes the browser's routes.
+    web_limits: bool,
+    /// `--device-msaa` on `screenshot`: let the device multisample where it can. Off: see [`Gpu::route`].
+    device_msaa: bool,
+    /// Device rejections, written by the uncaptured-error callback.
+    failed: std::sync::Arc<std::sync::Mutex<DeviceErrors>>,
+    /// Set with the browser's reason when the device is lost, which is otherwise silent.
+    lost: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Whether a readback has ever completed after the flush that asked for it (always in a browser).
+    /// Then a mid-frame fallback would read stale memory, so frames are not interleaved.
+    deferred_readbacks: bool,
+    /// Tests share a device, which one test ending must not destroy.
+    device_is_shared: bool,
+    /// The render pass consecutive draws to the same surfaces share, recording into `batch`.
+    /// Declared first so it ends before the encoder is dropped.
+    pass: Option<OpenPass>,
+    /// Every draw's constants, at the dynamic offsets their bind groups are set with, so a
+    /// changed constant changes no bind group. See [`Gpu::stage_constants`].
+    constant_arena: Option<wgpu::Buffer>,
+    /// What the arena holds from its start, and how much of that is written to it already.
+    constant_staging: Vec<u8>,
+    constants_flushed: usize,
+    /// Where each stage's last constants placed are, and the size they are bound at.
+    last_constants: [Option<(u32, u64)>; 2],
+    /// Where the arena holds each run of constants placed since it last started over, by
+    /// `bytes_fingerprint`; a hit is checked against `constant_staging`.
+    placed_constants: std::collections::HashMap<u64, u32>,
+    /// Whether a draw placed constants and is not recorded yet, so a submit in between must
+    /// not start the arena over.
+    constants_unrecorded: bool,
+    /// Draws recorded and not yet submitted. See [`Gpu::submit_batch`].
+    batch: Option<wgpu::CommandEncoder>,
+    batched_draws: u32,
+    /// Depth surfaces switched between sizes on the device. See [`Gpu::switch_crop`].
+    crop_switches: u64,
+    /// Surfaces retired rather than read back, and those held again from there. See
+    /// [`Gpu::retire`].
+    surfaces_retired: u64,
+    surfaces_resurrected: u64,
+    /// `--defer-readbacks` on `screenshot`: never wait for readbacks, to reproduce a browser natively.
+    defer_readbacks: bool,
+    /// `--interleave` on `screenshot`: interleave fallback draws into device frames even with late readbacks.
+    /// Slightly wrong frames for speed; off by default.
+    interleave: bool,
+    /// Whether the rasterizer has the whole frame. Latches; released after
+    /// [`Gpu::clean_frames_needed`] frames whose draws all pass [`Gpu::check`], doubling on each relatch.
+    software_frame: bool,
+    /// Keeps [`Gpu::software_frame`] on whatever the draws say.
+    forced_software: bool,
+    /// Full syncs by cause: no scan-out, over the held-bytes cap, a later ask for all, then what
+    /// asked for it: an aliasing surface, a read of a dirty one, a guest write to its pages.
+    syncs: [u64; 6],
+    /// Whether anything fell back during the frame in progress.
+    fell_back_this_frame: bool,
+    /// Whether a draw of the rasterizer's frame was checked, and whether one would have fallen back.
+    checked_this_frame: bool,
+    would_fall_back_this_frame: bool,
+    /// Rasterizer's frames in a row in which every draw passed the check.
+    clean_frames: u32,
+    /// Clean frames needed to release the latch; doubles on each relatch.
+    clean_frames_needed: u32,
+    /// How many times the latch has let go.
+    unlatched: u32,
+    /// Whether [`Gpu::give_up`] has already handed the frame back.
+    gave_up: bool,
+    /// The loss reason, reported by the next flush.
+    report: Option<String>,
+    /// What this cannot express runs here instead.
+    software: Software,
+    /// Draws rendered here, and draws that fell back.
+    pub drawn: u64,
+    pub fallbacks: u64,
+    pub last_fallback: Option<String>,
+    /// Every distinct reason a draw fell back, in the order first seen.
+    pub reasons: Vec<String>,
+    /// Draws by the route they took. See [`Render`].
+    pub direct: u64,
+    pub expanded: u64,
+    pub multisampled: u64,
+    pub per_pixel: u64,
+    /// Which draw of the current frame this is; only `--only` reads it.
+    in_frame: u32,
+    /// Phase timings; always on under wasm, `--times` on `screenshot`.
+    times: Option<Times>,
+    /// What every draw's `Uploads::of` read, by category.
+    uploaded: UploadBytes,
+    /// Pages to watch once a mutable `ExecCtx` is available.
+    shader_to_watch: Vec<(u32, ShaderKey)>,
+    cached_bytes: u64,
+    pub texture_hits: u64,
+    pub texture_misses: u64,
+    /// Draws served from [`Gpu::shader_cache`], and draws that missed.
+    pub shader_hits: u64,
+    pub shader_misses: u64,
+    /// Stage bind groups served from [`Gpu::bind_groups`], built and kept, and built for one draw.
+    pub bind_hits: u64,
+    pub bind_misses: u64,
+    pub bind_uncached: u64,
+    /// Of those, how many bound a storage image, a shadow map, a texture the cache does not
+    /// keep, or a global; one that did several counts in each.
+    pub bind_uncached_why: [u64; 4],
+    /// Textures made from held surfaces, and draws that reused one still current.
+    pub held_copies_made: u64,
+    pub held_copies_reused: u64,
+    /// See [`Gpu::colour_scratch`], by format, width and height.
+    colour_scratches: std::collections::HashMap<(wgpu::TextureFormat, u32, u32), wgpu::Texture>,
+    /// Kept copies brought up to date by copying in only the layers that changed.
+    pub held_copies_updated: u64,
+    /// Kept copies a draw that renders to their surfaces sampled as they were, since the guest
+    /// has written no texture barrier since they were copied.
+    pub held_copies_kept: u64,
+    /// [`Engine3D::texture_barriers`] at the draw being recorded.
+    texture_barriers: u64,
+    /// Frames submitted or scanned out.
+    frames_presented: u64,
+    /// Bindings that sampled a padded held surface in place. See [`wgsl::Crop`].
+    pub cropped_binds: u64,
+    /// Compute launches run on the device, and why others went to the software dispatch.
+    pub compute_dispatched: u64,
+    /// Draws recorded into the pass the draw before them opened.
+    pub passes_joined: u64,
+    /// Draws that opened a pass of their own, by why they could not join the open one; a
+    /// closed pass names the line that ended it.
+    pub pass_splits: std::collections::HashMap<String, u64>,
+    pass_closed_at: Option<&'static std::panic::Location<'static>>,
+    /// Copies of held surfaces made or brought up to date, by the shape sampled.
+    pub held_copy_shapes: std::collections::HashMap<HeldCopyShape, u64>,
+    /// Draws of a second or later instance, and how many of those widened the draw call
+    /// before them instead of making their own.
+    pub later_instances: u64,
+    pub instances_merged: u64,
+    /// Bind group, buffer, pipeline, viewport, scissor and blend constant calls left out
+    /// because the pass already had that state.
+    pub pass_calls_skipped: u64,
+    /// Vertex and index buffers uploaded, and draws that bound one already on the device.
+    pub buffers_uploaded: u64,
+    pub buffers_reused: u64,
+    /// Read-only compute inputs uploaded, and launches that bound one already on the device.
+    pub inputs_uploaded: u64,
+    pub inputs_reused: u64,
+    /// `--software-compute` on `screenshot`: every launch goes to the software dispatch.
+    software_compute: bool,
+    pub compute_refusals: std::collections::BTreeMap<String, u64>,
+    compute_pipelines: std::collections::HashMap<compute::ComputeKey, wgpu::ComputePipeline>,
+    gpu_texture_bytes: u64,
+    /// Pages of textures `prepare` kept and has not watched yet.
+    texture_pages_to_watch: Vec<u32>,
+    /// `--only <i>` or `<a>..<b>`: render only those draws of each frame here, for bisecting.
+    only: Option<std::ops::Range<u32>>,
+    /// The debug panel's device time, and what it last asked for.
+    device_times: Option<timing::DeviceTimes>,
+    timing_asked: switch_core::gpu::renderer::DeviceTiming,
+}
+
+/// Reasons a draw opened a pass of its own that the report lists, most frequent first.
+const PASS_SPLITS_SHOWN: usize = 8;
+
+/// Bounds a run over endless fresh textures; a normal working set is far smaller.
+const TEXTURE_CACHE_BYTES: u64 = 256 << 20;
+/// Guest pages are 4 KiB, the granularity `Memory` watches writes at.
+const PAGE_BITS: u32 = 12;
+
+impl Drop for Gpu {
+    fn drop(&mut self) {
+        eprintln!(
+            "[gpu] {} draws rendered, {} fell back, from {} pipelines and {} modules; {} joined \
+             the pass before them, {} pass calls left out as already set; {} later instances, \
+             {} merged into the draw before",
+            self.drawn,
+            self.fallbacks,
+            self.pipelines.len(),
+            self.modules.len(),
+            self.passes_joined,
+            self.pass_calls_skipped,
+            self.later_instances,
+            self.instances_merged,
+        );
+        if self.expanded + self.multisampled + self.per_pixel > 0 {
+            eprintln!(
+                "[gpu] {} single-sample, {} multisampled by the device, {} expanded, \
+                 {} per-pixel coverage",
+                self.direct, self.multisampled, self.expanded, self.per_pixel
+            );
+        }
+        let mib = |v: u64| v as f64 / (1024.0 * 1024.0);
+        let u = self.uploaded;
+        eprintln!(
+            "[gpu] read {:.1} MiB of textures, {:.1} MiB of vertices, {:.1} MiB of constants, \
+             {:.1} MiB of indices; {} texture reads served from cache, {} not; {} vertex and \
+             index buffers uploaded, {} reused",
+            mib(u.textures),
+            mib(u.vertex),
+            mib(u.constants),
+            mib(u.index),
+            self.texture_hits,
+            self.texture_misses,
+            self.buffers_uploaded,
+            self.buffers_reused,
+        );
+        let mut splits: Vec<(&String, &u64)> = self.pass_splits.iter().collect();
+        splits.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+        for (why, n) in splits.into_iter().take(PASS_SPLITS_SHOWN) {
+            eprintln!("[gpu]   {n} draws opened a pass: {why}");
+        }
+        eprintln!(
+            "[gpu] {} shader translations served from cache, {} not",
+            self.shader_hits, self.shader_misses,
+        );
+        eprintln!(
+            "[gpu] {} stage bind groups reused, {} built and kept, {} built for one draw \
+             (storage image {}, shadow map {}, texture not kept {}, global {}); \
+             {} copies of held surfaces made, {} reused, {} updated by layer, {} corners \
+             sampled in place",
+            self.bind_hits,
+            self.bind_misses,
+            self.bind_uncached,
+            self.bind_uncached_why[0],
+            self.bind_uncached_why[1],
+            self.bind_uncached_why[2],
+            self.bind_uncached_why[3],
+            self.held_copies_made,
+            self.held_copies_reused,
+            self.held_copies_updated,
+            self.cropped_binds,
+        );
+        eprintln!(
+            "[gpu] {} compute launches on the device, {} in software; {} inputs uploaded, \
+             {} reused{}",
+            self.compute_dispatched,
+            self.compute_refusals.values().sum::<u64>(),
+            self.inputs_uploaded,
+            self.inputs_reused,
+            self.compute_refusals
+                .iter()
+                .map(|(why, n)| format!("\n[gpu]   {n}: {why}"))
+                .collect::<String>()
+        );
+        if let Some(t) = self.times {
+            let ms = |v: u128| v as f64 / 1000.0;
+            eprintln!(
+                "[gpu] translate {:.0}ms  upload {:.0}ms  modules {:.0}ms  \
+                 bind {:.0}ms  pipeline {:.0}ms  encode {:.0}ms  flush {:.0}ms \
+                 (ask {:.0}ms, wait {:.0}ms, land {:.0}ms)",
+                ms(t.translate),
+                ms(t.upload),
+                ms(t.modules),
+                ms(t.bind),
+                ms(t.pipeline),
+                ms(t.encode),
+                ms(t.flush),
+                ms(t.flush_ask),
+                ms(t.flush_wait),
+                ms(t.flush_land),
+            );
+        }
+        // The web backend frees nothing on drop, so a freed session or a replaced device
+        // destroys what it made.
+        let current = std::mem::take(&mut self.space);
+        let parked: Vec<Space> = self.parked.drain().map(|(_, space)| space).collect();
+        for space in std::iter::once(current).chain(parked) {
+            self.drop_space(space);
+        }
+        self.submit_batch();
+        self.wait_for_times();
+        self.print_times();
+        self.release_scratch();
+        if let Some(arena) = self.constant_arena.take() {
+            arena.destroy();
+        }
+        if !self.device_is_shared {
+            self.device.destroy();
+        }
+    }
+}
+
+/// Add `at.elapsed()` to `slot`, if timing is on.
+macro_rules! timed {
+    ($self:ident, $field:ident, $body:expr) => {{
+        if $self.times.is_none() {
+            $body
+        } else {
+            let at = web_time::Instant::now();
+            let out = $body;
+            if let Some(t) = $self.times.as_mut() {
+                t.$field += at.elapsed().as_micros();
+            }
+            out
+        }
+    }};
+}
+
+mod bind;
+mod blit;
+mod clear;
+mod compute;
+mod device;
+mod held;
+mod multisample;
+mod prepare;
+mod render;
+mod resources;
+mod screen;
+
+#[cfg(test)]
+mod parity_tests;
+#[cfg(test)]
+mod tests;
+
+/// How a draw reaches its surfaces; only multisampled surfaces have a choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Render {
+    /// Straight into the held surface, whose texels are its pixels.
+    Direct,
+    /// Into the held surface at texel resolution, with the shader handling mask and alpha-to-coverage.
+    Expanded,
+    /// Into a companion of this shape, gathered on the way in and scattered on the way out.
+    Companion(Shape),
+}
+
+/// A stage's bind group and the buffers it owns, which go with it, found by a fingerprint of
+/// what it was built from and checked against that.
+#[derive(Debug)]
+struct CachedBinding {
+    entries: Vec<wgpu::BindGroupLayoutEntry>,
+    resources: Vec<Resource>,
+    layout: wgpu::BindGroupLayout,
+    group: wgpu::BindGroup,
+    buffers: Vec<wgpu::Buffer>,
+}
+
+/// Bind groups kept before the cache starts over.
+const MAX_BIND_GROUPS: usize = 2048;
+
+/// What a sampler is made of, and so what one is cached by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SamplerKey {
+    compare: Option<wgpu::CompareFunction>,
+    wrap_u: wgpu::AddressMode,
+    wrap_v: wgpu::AddressMode,
+    mag: wgpu::FilterMode,
+    min: wgpu::FilterMode,
+}
+
+/// Whether a texture and a surface at one address share row layout, making the texture its corner.
+fn same_rows(surface: &Target, texture: &TextureKey) -> bool {
+    let stride = |layout: SurfaceLayout, row_bytes: u32| match layout {
+        SurfaceLayout::BlockLinear { .. } => row_bytes.div_ceil(GOB_WIDTH),
+        SurfaceLayout::Pitch { pitch } => pitch,
+    };
+    surface.layout == texture.layout
+        && stride(surface.layout, surface.row_bytes) == stride(texture.layout, texture.row_bytes)
+}
+
+/// A held surface standing in for one layer of a sampled texture: see [`Gpu::held_layers`].
+#[derive(Clone)]
+enum HeldLayer {
+    /// Copied texture to texture.
+    Colour(wgpu::Texture),
+    /// A `depth32float` copied into an `r32float` through a buffer.
+    Depth(wgpu::Texture),
+    /// A `depth32float` drawn into the green of an `S8D24` image's `rg32float`.
+    PackedDepth(wgpu::Texture),
+    /// A `depth16unorm` drawn into the sampled colour format, then copied.
+    UnormDepth(wgpu::Texture),
+    /// A `depth32float` copied whole into its layer of a shadow map.
+    Shadow(wgpu::Texture),
+    /// A larger depth surface, or an `r32float` colour one, whose corner is drawn into a
+    /// `depth32float` shadow map layer.
+    ShadowCorner(wgpu::Texture),
+    /// A colour surface whose bytes are another format's of the same size, copied through a
+    /// buffer; an `S8D24` image's words are converted after.
+    Bytes(wgpu::Texture),
+}
+
+impl HeldLayer {
+    fn surface(&self) -> &wgpu::Texture {
+        match self {
+            HeldLayer::Colour(surface)
+            | HeldLayer::Depth(surface)
+            | HeldLayer::PackedDepth(surface)
+            | HeldLayer::UnormDepth(surface)
+            | HeldLayer::Shadow(surface)
+            | HeldLayer::ShadowCorner(surface)
+            | HeldLayer::Bytes(surface) => surface,
+        }
+    }
+}
+
+/// What [`Gpu::check`] settled; fields mean what [`Prepared`]'s do.
+struct Checked {
+    state: Pipeline,
+    render: Render,
+    color: Option<Target>,
+    extra_colors: Vec<Option<Target>>,
+    color_scratch: Option<(u32, u32)>,
+    depth: Option<Target>,
+    vs: std::sync::Arc<Translation>,
+    fs: std::sync::Arc<Translation>,
+    /// Each translation's serial; see [`Gpu::built_modules`].
+    serials: [u64; 2],
+}
+
+/// An image a draw stores to: its layers held, none for a null image, and what they bind as.
+type DrawImage = (Vec<Target>, Vec<compute::ImageLayer>);
+
+/// One draw, resolved into everything a device needs.
+struct Prepared {
+    state: Pipeline,
+    render: Render,
+    /// `None` for a depth-only pass.
+    color: Option<Target>,
+    /// The surfaces colour outputs 1 onward are attached to, `None` where the output is not:
+    /// unbound, masked off, or left unwritten by the fragment program.
+    extra_colors: Vec<Option<Target>>,
+    /// The scratch texture extent when the colour target is larger than the depth surface.
+    color_scratch: Option<(u32, u32)>,
+    /// The depth surface, or `None` for a draw that neither tests nor writes depth.
+    depth: Option<Target>,
+    vs: std::sync::Arc<Translation>,
+    fs: std::sync::Arc<Translation>,
+    serials: [u64; 2],
+    vs_layout: Layout,
+    fs_layout: Layout,
+    uploads: Uploads,
+    /// Device copies over each of [`Uploads::constants`] of what compute launches wrote there.
+    constant_patches: Vec<Vec<Patch>>,
+    /// The memory each stage's `ldg`s read, by descriptor.
+    globals: Vec<GlobalUpload>,
+    /// Vertices, indices, or the length of [`Prepared::assembled`].
+    count: u32,
+    /// Triangle list indices, as little-endian `u32` bytes, and base vertex for topologies
+    /// WebGPU lacks, from `raster::assemble`.
+    assembled: Option<(std::sync::Arc<[u8]>, i32)>,
+    /// `gl_InstanceID`, reproduced as the first instance of a one-instance draw.
+    instance: u32,
+    /// The images the fragment stage stores to, each layer held (none for a null image), with
+    /// the storage textures their layers bind as.
+    images: Vec<DrawImage>,
+}
+
+/// Whether the rasterizer would only run the draw's vertex shader for what it stores.
+fn only_shades_vertices(engine: &Engine3D, ctx: &ExecCtx) -> bool {
+    switch_core::gpu::raster::only_shades_vertices(engine, ctx).unwrap_or(false)
+}
+
+impl Renderer for Gpu {
+    fn force_software(&mut self, on: bool) {
+        self.forced_software = on;
+        self.software_frame = on;
+    }
+
+    fn set_device_timing(&mut self, timing: switch_core::gpu::renderer::DeviceTiming) {
+        self.set_timing(timing);
+    }
+
+    fn dispatch(
+        &mut self,
+        engine: &switch_core::gpu::engine::compute::EngineCompute,
+        ctx: &mut ExecCtx,
+    ) -> Result<bool> {
+        self.dispatch_compute(engine, ctx)
+    }
+
+    fn draw(&mut self, engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
+        self.enter_space(ctx.as_id);
+        if self.give_up() {
+            return self.software.draw(engine, ctx);
+        }
+        // Any failure runs the draw on the rasterizer.
+        let index = self.in_frame;
+        self.in_frame += 1;
+        if self
+            .only
+            .as_ref()
+            .is_some_and(|only| !only.contains(&index))
+        {
+            self.flush(ctx)?;
+            return self.software.draw(engine, ctx);
+        }
+        // It draws nothing, which no pipeline can say.
+        if switch_core::gpu::pipeline::culls_every_triangle(engine)
+            || switch_core::gpu::pipeline::writes_no_surface(engine)
+        {
+            return Ok(());
+        }
+        // See [`Gpu::software_frame`].
+        if self.software_frame {
+            if only_shades_vertices(engine, ctx) {
+                return self.software.draw(engine, ctx);
+            }
+            self.check_for_release(engine, ctx);
+            self.flush(ctx)?;
+            return self.software.draw(engine, ctx);
+        }
+        self.evict_written(ctx);
+        self.texture_barriers = engine.texture_barriers();
+        let mut route = None;
+        let attempt = match self.prepare(engine, &*ctx) {
+            Ok(prepared) => {
+                route = Some(prepared.render);
+                self.render(&prepared, ctx)
+            }
+            Err(why) => Err(why),
+        };
+        // Recorded, or never to be, so the constants it placed bind nothing further.
+        self.constants_unrecorded = false;
+        // Watch `prepare`'s reads now that `ctx` is mutable.
+        self.remember_textures(ctx);
+        // See [`Gpu::scratch`].
+        self.release_scratch();
+        match attempt {
+            Ok(()) => {
+                if self.drawn == 0 {
+                    let name = self.adapter.get_info().name;
+                    let adapter = if name.is_empty() {
+                        "an adapter the browser does not name".to_owned()
+                    } else {
+                        format!("the adapter \"{name}\"")
+                    };
+                    switch_core::trace::emit_at(
+                        switch_core::trace::Level::Info,
+                        &format!("[gpu] the device is rendering, on {adapter}"),
+                    );
+                }
+                self.drawn += 1;
+                match route {
+                    Some(Render::Direct) => self.direct += 1,
+                    Some(Render::Expanded) => self.expanded += 1,
+                    Some(Render::Companion(Shape::Multisampled(_))) => self.multisampled += 1,
+                    Some(Render::Companion(Shape::PerPixel)) => self.per_pixel += 1,
+                    None => {}
+                }
+                return Ok(());
+            }
+            // It reads no render target, so it neither waits for one nor latches the frame.
+            Err(_) if only_shades_vertices(engine, ctx) => {
+                return self.software.draw(engine, ctx);
+            }
+            Err(why) => self.fall_back(why),
+        }
+        // The rasterizer needs guest memory to be current.
+        self.flush(ctx)?;
+        self.software.draw(engine, ctx)
+    }
+
+    fn clear_color(
+        &mut self,
+        engine: &Engine3D,
+        ctx: &mut ExecCtx,
+        target: u32,
+        layer: u32,
+        channels: [bool; 4],
+    ) -> Result<()> {
+        self.enter_space(ctx.as_id);
+        // A frame starts at its clear.
+        self.in_frame = 0;
+        if self.deferred_readbacks
+            && self.fell_back_this_frame
+            && !self.software_frame
+            && !self.interleave
+        {
+            self.software_frame = true;
+            if self.unlatched > 0 {
+                self.clean_frames_needed = self.clean_frames_needed.saturating_mul(2);
+            }
+            eprintln!(
+                "[gpu] a draw fell back where a readback lands later than the call that \
+                 asked for it; the rasterizer has the frames from here until {} in a row \
+                 could have been the device's. What it fell back on: {:?}",
+                self.clean_frames_needed, self.reasons
+            );
+        }
+        self.fell_back_this_frame = false;
+        self.release_if_clean();
+        if self.give_up() || self.software_frame {
+            self.flush(ctx)?;
+            return self
+                .software
+                .clear_color(engine, ctx, target, layer, channels);
+        }
+        let attempt = self.clear_color_here(engine, ctx, target, layer, channels);
+        self.release_scratch();
+        match attempt {
+            Ok(()) => Ok(()),
+            Err(_) if self.clear_touches_nothing_held(engine, target, layer) => self
+                .software
+                .clear_color(engine, ctx, target, layer, channels),
+            Err(why) => {
+                self.fall_back(why);
+                // Write held surfaces back before the rasterizer clears.
+                self.flush(ctx)?;
+                self.software
+                    .clear_color(engine, ctx, target, layer, channels)
+            }
+        }
+    }
+
+    fn clear_depth_stencil(
+        &mut self,
+        engine: &Engine3D,
+        ctx: &mut ExecCtx,
+        depth: bool,
+        stencil: bool,
+    ) -> Result<()> {
+        self.enter_space(ctx.as_id);
+        if self.give_up() || self.software_frame {
+            self.flush(ctx)?;
+            return self
+                .software
+                .clear_depth_stencil(engine, ctx, depth, stencil);
+        }
+        // The device holds no stencil, so a stencil clear goes straight to guest memory.
+        if stencil {
+            self.writing_guest_memory(ctx, |software, ctx| {
+                software.clear_depth_stencil(engine, ctx, false, true)
+            })?;
+        }
+        if !depth {
+            return Ok(());
+        }
+        let attempt = self.clear_depth_here(engine, ctx);
+        self.release_scratch();
+        match attempt {
+            Ok(()) => Ok(()),
+            Err(why) => {
+                self.fall_back(why);
+                self.flush(ctx)?;
+                self.software.clear_depth_stencil(engine, ctx, true, false)
+            }
+        }
+    }
+
+    fn blit(&mut self, blit: &Blit, ctx: &mut ExecCtx) -> Result<BlitRoute> {
+        self.enter_space(ctx.as_id);
+        if self.give_up() || self.software_frame {
+            return Ok(BlitRoute::Flush);
+        }
+        // A write since the last draw has to count before a held source is read.
+        self.evict_written(ctx);
+        let in_guest_memory = self.blit_touches_nothing_held(blit);
+        if in_guest_memory && !blit::worth_uploading(blit) {
+            return Ok(BlitRoute::GuestMemory);
+        }
+        let route = if (self.space.sync_all || !self.space.aliased.is_empty())
+            && !in_guest_memory
+            && self.blit_aliases_held(blit)
+        {
+            BlitRoute::Flush
+        } else {
+            self.blit_on_device(blit, ctx)
+        };
+        self.release_scratch();
+        Ok(match route {
+            BlitRoute::Flush if in_guest_memory => BlitRoute::GuestMemory,
+            route => route,
+        })
+    }
+
+    fn guest_memory_is_current(
+        &mut self,
+        ranges: &[std::ops::Range<u64>],
+        ctx: &mut ExecCtx,
+    ) -> bool {
+        self.enter_space(ctx.as_id);
+        !self.give_up() && !self.software_frame && self.touches_nothing_held(ranges)
+    }
+
+    fn flush(&mut self, ctx: &mut ExecCtx) -> Result<Flush> {
+        self.enter_space(ctx.as_id);
+        let at = self.times.map(|_| web_time::Instant::now());
+        let result = self.flush_inner(ctx);
+        if let (Some(at), Some(t)) = (at, self.times.as_mut()) {
+            t.flush += at.elapsed().as_micros();
+        }
+        result
+    }
+
+    fn sync_ranges(
+        &mut self,
+        read: &[std::ops::Range<u64>],
+        written: &[std::ops::Range<u64>],
+        ctx: &mut ExecCtx,
+    ) -> Result<Flush> {
+        self.enter_space(ctx.as_id);
+        let at = self.times.map(|_| web_time::Instant::now());
+        let result = self.sync_ranges_inner(read, written, ctx);
+        if let (Some(at), Some(t)) = (at, self.times.as_mut()) {
+            t.flush += at.elapsed().as_micros();
+        }
+        result
+    }
+
+    fn submit_frame(&mut self, ctx: &mut ExecCtx, scanout: Option<u64>) -> Result<Submit> {
+        self.enter_space(ctx.as_id);
+        self.frames_presented += 1;
+        self.submit_frame_inner(ctx, scanout)
+    }
+
+    fn frames_landed(&mut self, ctx: &mut ExecCtx) -> Result<u64> {
+        self.enter_space(ctx.as_id);
+        self.frames_landed_inner(ctx)
+    }
+
+    fn has_screen(&self) -> bool {
+        self.screen.is_some()
+    }
+
+    fn scan_out(&mut self, ctx: &mut ExecCtx, shot: &ScanOut) -> Result<bool> {
+        self.enter_space(ctx.as_id);
+        self.frames_presented += 1;
+        if self.screen.is_none() || self.give_up() || self.software_frame {
+            return Ok(false);
+        }
+        // A frame shown here skips `submit_frame`, which otherwise collects finished readbacks:
+        // without this, every surface sent back while frames were shown so stayed on the device.
+        self.land_ready(ctx)?;
+        self.age_retired();
+        // A write since the last draw has to count before the held surface is shown.
+        self.evict_written(ctx);
+        Ok(self.scan_out_held(ctx, shot))
+    }
+
+    fn show_pixels(&mut self, frame: &Framebuffer) -> bool {
+        self.show_frame(frame)
+    }
+
+    fn address_space_closed(&mut self, as_id: u32) {
+        let closed = if as_id == self.space_id {
+            std::mem::take(&mut self.space)
+        } else {
+            match self.parked.remove(&as_id) {
+                Some(space) => space,
+                None => return,
+            }
+        };
+        self.drop_space(closed);
+    }
+
+    fn lost(&self) -> Option<&str> {
+        // Only a lost device is fixed by replacing it.
+        self.report.as_deref().filter(|_| self.gave_up)
+    }
+
+    fn report(&self, out: &mut json::Object) {
+        // The `Drop` summary, for the browser.
+        let ms = |v: u128| json::Decimals(v as f64 / 1000.0, 1);
+        // Device rejections, which fallback counts do not show.
+        let (error_count, errors) = self.device_errors();
+        out.field("backend", "device")
+            .field("drawn", self.drawn)
+            .field("fallbacks", self.fallbacks)
+            .field("pipelines", self.pipelines.len())
+            .field("modules", self.modules.len())
+            // `held` grows with flush cost.
+            .field("held", self.space.held.len())
+            .field("cropSwitches", self.crop_switches)
+            .field("retired", self.surfaces_retired)
+            .field("resurrected", self.surfaces_resurrected)
+            .field("pending", self.space.pending.len());
+        out.object("read", |read| {
+            read.field("textures", self.uploaded.textures)
+                .field("vertex", self.uploaded.vertex)
+                .field("constants", self.uploaded.constants)
+                .field("index", self.uploaded.index);
+        });
+        // Deswizzled bytes kept in the WebAssembly heap, and textures held on the device.
+        out.field("textureCacheBytes", self.cached_bytes)
+            .field("deviceTextureBytes", self.gpu_texture_bytes);
+        out.field("textureHits", self.texture_hits)
+            .field("textureMisses", self.texture_misses)
+            .field("shaderHits", self.shader_hits)
+            .field("shaderMisses", self.shader_misses)
+            .field("bindHits", self.bind_hits)
+            .field("bindMisses", self.bind_misses)
+            .field("bindUncached", self.bind_uncached)
+            .field("bindUncachedImage", self.bind_uncached_why[0])
+            .field("bindUncachedShadow", self.bind_uncached_why[1])
+            .field("bindUncachedTexture", self.bind_uncached_why[2])
+            .field("bindUncachedGlobal", self.bind_uncached_why[3])
+            .field("heldCopiesMade", self.held_copies_made)
+            .field("heldCopiesReused", self.held_copies_reused)
+            .field("heldCopiesUpdated", self.held_copies_updated)
+            .field("heldCopiesKept", self.held_copies_kept)
+            .field("croppedBinds", self.cropped_binds)
+            .field("passesJoined", self.passes_joined)
+            .object("heldCopyShapes", |o| {
+                let mut shapes: Vec<_> = self.held_copy_shapes.iter().collect();
+                shapes.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+                for ((what, width, height, layers, format, view), n) in
+                    shapes.into_iter().take(PASS_SPLITS_SHOWN)
+                {
+                    let shape = format!("{what}: {width}x{height}x{layers} {format:?} as {view:?}");
+                    o.field(&shape, *n);
+                }
+            })
+            .object("passSplits", |o| {
+                let mut splits: Vec<(&String, &u64)> = self.pass_splits.iter().collect();
+                splits.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+                for (why, n) in splits.into_iter().take(PASS_SPLITS_SHOWN) {
+                    o.field(why, *n);
+                }
+            })
+            .field("passCallsSkipped", self.pass_calls_skipped)
+            .field("laterInstances", self.later_instances)
+            .field("instancesMerged", self.instances_merged)
+            .field("buffersUploaded", self.buffers_uploaded)
+            .field("buffersReused", self.buffers_reused)
+            .field("computeDispatched", self.compute_dispatched)
+            .field("inputsUploaded", self.inputs_uploaded)
+            .field("inputsReused", self.inputs_reused)
+            .field(
+                "computeRefused",
+                self.compute_refusals.values().sum::<u64>(),
+            )
+            .field("syncNoScanout", self.syncs[0])
+            .field("syncOverBytes", self.syncs[1])
+            .field("syncAll", self.syncs[2])
+            .field("syncAliases", self.syncs[3])
+            .field("syncReads", self.syncs[4])
+            .field("syncWrites", self.syncs[5])
+            .field("softwareFrame", self.software_frame)
+            .field("unlatched", self.unlatched)
+            .field("gaveUp", self.gave_up)
+            .field("lostBecause", self.report.as_deref());
+        out.array("reasons", |a| {
+            a.extend(&self.reasons);
+        });
+        out.field("deviceErrorCount", error_count);
+        out.array("deviceErrors", |a| {
+            a.extend(&errors);
+        });
+        // Nested so the two "modules" keys do not collide.
+        if let Some(t) = self.times {
+            out.object("times", |times| {
+                times
+                    .field("translate", ms(t.translate))
+                    .field("upload", ms(t.upload))
+                    .field("modules", ms(t.modules))
+                    .field("bind", ms(t.bind))
+                    .field("pipeline", ms(t.pipeline))
+                    .field("encode", ms(t.encode))
+                    .field("flush", ms(t.flush))
+                    .field("flushAsk", ms(t.flush_ask))
+                    .field("flushWait", ms(t.flush_wait))
+                    .field("flushLand", ms(t.flush_land));
+            });
+        }
+        self.report_times(out);
+    }
+}

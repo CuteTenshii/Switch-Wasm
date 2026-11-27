@@ -1,0 +1,66 @@
+/* switch-wasm application shell. */
+
+:root {
+  --bg: #07080c;
+  --chrome: #0e1017;
+  --chrome-hi: #161a24;
+  --border: #212635;
+  --text: #e6eaf5;
+  --muted: #8790a6;
+  --accent: #6ea8ff;
+  --accent-dim: #24406e;
+  --green: #57d98b;
+  --amber: #ffc861;
+  --red: #ff6f6f;
+  --sans: "Inter", "Inter Display", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", consolas, monospace;
+  --topbar-h: 48px;
+  --statusbar-h: 26px;
+  --panel-w: 380px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-sm: 6px;
+  --radius-xs: 4px;
+  --text-xs: .75rem;
+  --text-sm: .8125rem;
+  --text-base: .875rem;
+  --text-md: .9375rem;
+  --text-lg: 1.0625rem;
+  --text-xl: 1.25rem;
+  --accent-2: #a06bff;
+  --border-hi: #33405c;
+  --hover-bg: #1e2433;
+  --dim: #5d6579;
+  --scroll-thumb: #2a3145;
+  --danger: #7a3030;
+  --danger-dim: #5e2626;
+  --bg-glow: #131a2a;
+  --scrim: rgb(3 4 8 / 60%);
+}
+
+* { box-sizing: border-box; }
+p { margin: 0; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  display: flex;
+  font: var(--text-base)/1.45 var(--sans);
+}
+
+/* Read by assistive tech, not shown. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

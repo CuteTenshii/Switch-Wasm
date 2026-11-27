@@ -2,77 +2,42 @@
 // RPCs from the main thread.
 
 import type { CallRequest, CommandHandlers, WorkerMessage } from '../shared/protocol';
-import { reportActivity } from './activity';
 import { CMD } from './commands';
-import { paint } from './loop';
-import { tryGpu } from './gpu';
 import { flushLog, workerLog } from './log';
-import init, { switch_attach_screen, switch_init } from '@core/switch_wasm.js';
+import init, { switch_attach_screen, switch_init, switch_set_reader } from '@core/switch_wasm.js';
 import wasmUrl from '@core/switch_wasm_bg.wasm?url';
 import { core, explainFailure, setCore, type WasmExports } from './wasm';
 import { startCores } from './coreworkers';
+import { onPageMessage, postToPage } from './post';
+import { spawnWorker } from '../shared/spawn';
+import readerUrl from './reader.ts?worker&url';
 
-// `self` is typed as the shared WorkerGlobalScope, which lacks postMessage.
-const ctx = self as unknown as DedicatedWorkerGlobalScope;
-
-function reply(message: WorkerMessage, transfer?: Transferable[]): void {
-  if (transfer) ctx.postMessage(message, transfer);
-  else ctx.postMessage(message);
-}
-
-// The page's canvas, handed over once at startup.
-interface ScreenHandoff {
-  type: 'screen';
-  canvas: OffscreenCanvas;
-}
-
-ctx.onmessage = (e: MessageEvent<CallRequest | ScreenHandoff>) => {
-  if ('type' in e.data) {
+onPageMessage((message) => {
+  if ('type' in message) {
     try {
-      switch_attach_screen(e.data.canvas);
+      switch_attach_screen(message.canvas);
     } catch (err) {
       workerLog('[display] the screen could not be attached: ' + String(err), 'error');
     }
     return;
   }
-  const { id, cmd, args } = e.data;
+  void answer(message);
+});
+
+// Sync and async handlers alike: IndexedDB work answers when it is done.
+async function answer({ id, cmd, args }: CallRequest): Promise<void> {
+  let reply: WorkerMessage;
   try {
     const handler = (CMD as CommandHandlers)[cmd] as ((...a: unknown[]) => unknown) | undefined;
     if (!handler) throw new Error('unknown command ' + cmd);
-    const result = handler(...args);
-    // IndexedDB work answers when it is done.
-    if (result instanceof Promise) {
-      result.then(
-        (value: unknown) => {
-          flushLog();
-          reply({ id, ok: true, result: value });
-        },
-        (err: unknown) => {
-          flushLog();
-          reply({ id, ok: false, error: explainFailure(err) });
-        },
-      );
-      return;
-    }
-    // Before the reply, so what the command logged is on the page when the caller resumes.
-    flushLog();
-    const stopped = cmd === 'run' && typeof result === 'number' && result < Number(args[0]);
-    if (result instanceof Uint8Array) {
-      reply({ id, ok: true, result }, [result.buffer as ArrayBuffer]);
-    } else if (result && typeof result === 'object' && 'error' in result) {
-      reply({ id, ok: false, error: String((result).error) });
-    } else {
-      reply({ id, ok: true, result });
-    }
-    if (cmd === 'run') {
-      paint();
-      tryGpu();
-      reportActivity(stopped);
-    }
+    reply = { type: 'reply', id, ok: true, result: await handler(...args) };
   } catch (err) {
-    reply({ id, ok: false, error: explainFailure(err) });
+    reply = { type: 'reply', id, ok: false, error: explainFailure(err) };
   }
-};
+  // Before the reply, so what the command logged is on the page when the caller resumes.
+  flushLog();
+  postToPage(reply);
+}
 
 void (async () => {
   try {
@@ -81,9 +46,17 @@ void (async () => {
     setCore(await init({ module_or_path: module }) as unknown as WasmExports);
     // Install the panic hook before anything else can panic.
     switch_init();
+    let reader!: Worker;
+    // This thread starts the reader, so a read that blocks it before the reader runs times out.
+    const readerRunning = new Promise<void>((resolve, reject) => {
+      reader = spawnWorker(readerUrl, 'File reader', (why) => reject(new Error(why)));
+      reader.addEventListener('message', () => resolve(), { once: true });
+    });
+    switch_set_reader(reader);
     startCores(module, core.memory);
-    reply({ type: 'ready' });
+    await readerRunning;
+    postToPage({ type: 'ready' });
   } catch (err) {
-    reply({ type: 'ready', error: String(err) });
+    postToPage({ type: 'ready', error: String(err) });
   }
 })();

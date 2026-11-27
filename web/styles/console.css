@@ -1,0 +1,80 @@
+/* console */
+/* The log's near-black ground needs chrome greys darker than --muted. */
+
+.console {
+  flex: 1 1 auto;
+  min-height: 120px;
+  margin: 0;
+  padding: 8px 6px;
+  background: #05060a;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: auto;
+  overscroll-behavior: contain;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+.console::-webkit-scrollbar { width: 10px; }
+.console::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  background-clip: content-box;
+  border: 3px solid transparent;
+  border-radius: var(--radius-sm);
+}
+.console::-webkit-scrollbar-thumb:hover { background-color: #39415a; }
+.console::selection, .console ::selection { background: var(--accent-dim); }
+
+/* Empty-log note. */
+.console:empty::before {
+  content: "Nothing logged yet.";
+  /* Aligned with an entry's text. */
+  padding-left: 8px;
+  color: #4f586e;
+}
+
+.console div {
+  padding: 1px 6px;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius-xs);
+  animation: log-in .14s ease-out;
+}
+/* Repeat count via `attr()`, so copied text carries it as a trailing `(xN)`. */
+.console div[data-repeat]::after {
+  content: "\d7" attr(data-repeat);
+  margin-left: 8px;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: #232a3a;
+  color: #8b93a7;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  vertical-align: 1px;
+}
+
+.console div:hover { background: rgb(255 255 255 / 3.5%); }
+
+.console .error {
+  color: var(--red);
+  border-left-color: var(--red);
+  background: rgb(255 111 111 / 7%);
+}
+
+.console .warn {
+  color: var(--amber);
+  border-left-color: #5c4718;
+}
+
+.console .info { color: var(--accent); }
+
+.console .debug { color: var(--muted); }
+
+@keyframes log-in {
+  from { opacity: 0;
+  } to { opacity: 1;
+  };
+}

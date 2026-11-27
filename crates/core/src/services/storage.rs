@@ -1,0 +1,276 @@
+//! RomFS, data archives and save data.
+
+use crate::cpu::*;
+
+/// A save's id plus owning user; the zero uid marks shared (system and device) saves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SaveKey {
+    pub id: u64,
+    pub user: [u8; 16],
+    /// The index of a title's cache storage; `None` for every other save.
+    pub cache: Option<u16>,
+}
+
+/// What an `IFileSystem` object serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mount {
+    #[default]
+    Sd,
+    Save(SaveKey),
+    /// A BIS partition id (28 PRODINFOF, 29 SAFE, 30 USER, 31 SYSTEM).
+    Bis(u32),
+    /// The application's Manual (`html-document`), served from the SD card as Atmosphere does.
+    Manual,
+}
+
+/// Bytes the host has stored per storage, and what the origin has left to share between them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StorageUsage {
+    pub sd: u64,
+    pub system: u64,
+    pub user: u64,
+    pub free: u64,
+}
+
+impl SaveKey {
+    pub const fn shared(id: u64) -> SaveKey {
+        SaveKey {
+            id,
+            user: [0; 16],
+            cache: None,
+        }
+    }
+
+    pub const fn cache_storage(id: u64, index: u16) -> SaveKey {
+        SaveKey {
+            id,
+            user: [0; 16],
+            cache: Some(index),
+        }
+    }
+
+    /// From the uid's two little-endian halves as the host passes them.
+    pub fn from_halves(id: u64, user_lo: u64, user_hi: u64) -> SaveKey {
+        let mut user = [0u8; 16];
+        user[..8].copy_from_slice(&user_lo.to_le_bytes());
+        user[8..].copy_from_slice(&user_hi.to_le_bytes());
+        SaveKey {
+            id,
+            user,
+            cache: None,
+        }
+    }
+}
+
+impl std::fmt::Display for SaveKey {
+    /// `0100000000001000` for a shared save, `id@uid` (32 hex digits, memory order) for a user's,
+    /// `id.cache<index>` for cache storage.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}", self.id)?;
+        if let Some(index) = self.cache {
+            write!(f, ".cache{index}")?;
+        }
+        if self.user != [0; 16] {
+            f.write_str("@")?;
+            for byte in self.user {
+                write!(f, "{byte:02x}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Cpu {
+    /// Set the decrypted RomFS that `OpenDataStorageByCurrentProcess` serves, for small images.
+    /// See [`Cpu::set_romfs_source`].
+    pub fn set_romfs(&mut self, data: Vec<u8>) {
+        self.process_mut().romfs = Some(Box::new(crate::source::MemSource(data)));
+        self.process_mut().romfs_indexes.remove(&None);
+    }
+
+    /// Register a system data archive for `OpenDataStorageByDataId`.
+    pub fn add_data_archive(&mut self, data_id: u64, src: Box<dyn crate::source::ByteSource>) {
+        self.data_archives.insert(data_id, src);
+        self.process_mut().romfs_indexes.remove(&Some(data_id));
+    }
+
+    /// Base id for this title's DLC: the NACP's, or the base program id (low 13 bits
+    /// masked) plus 0x1000.
+    pub fn add_on_content_base_id(&self) -> u64 {
+        match self.process().add_on_content_base_id {
+            0 => (self.process().program_id & !0x1FFF) + 0x1000,
+            declared => declared,
+        }
+    }
+
+    /// Set the DLC base id from the title's NACP.
+    pub fn set_add_on_content_base_id(&mut self, base: u64) {
+        self.process_mut().add_on_content_base_id = base;
+    }
+
+    /// Register add-on content under its own id and return its index, or `None` when
+    /// it belongs to another title.
+    pub fn add_add_on_content(
+        &mut self,
+        content_id: u64,
+        src: Box<dyn crate::source::ByteSource>,
+    ) -> Option<u32> {
+        let index = content_id.checked_sub(self.add_on_content_base_id())?;
+        if index > 0x7FF {
+            return None;
+        }
+        self.data_archives.insert(content_id, src);
+        self.process_mut().romfs_indexes.remove(&Some(content_id));
+        self.process_mut().add_on_content.insert(index as u32);
+        // Tell a running title to re-read the list.
+        if let Some(event) = self.process().aoc_list_changed_event {
+            self.signal_event(event);
+        }
+        Some(index as u32)
+    }
+
+    pub fn has_data_archive(&self, data_id: u64) -> bool {
+        self.data_archives.contains_key(&data_id)
+    }
+
+    pub fn add_on_content(&self) -> Vec<u32> {
+        self.process().add_on_content.iter().copied().collect()
+    }
+
+    /// The save `key` names, created on first open as on a console.
+    pub fn save_data_mut(&mut self, key: SaveKey) -> &mut crate::vfs::Vfs {
+        self.saves.entry(key).or_insert_with(crate::vfs::Vfs::empty)
+    }
+
+    pub fn save_data(&self, key: SaveKey) -> Option<&crate::vfs::Vfs> {
+        self.saves.get(&key)
+    }
+
+    /// Whether a cache storage exists: created this session, or restored with files in it.
+    pub(crate) fn cache_storage_exists(&self, key: SaveKey) -> bool {
+        self.cache_storage_sizes.contains_key(&key)
+            || self
+                .saves
+                .get(&key)
+                .is_some_and(|vfs| !vfs.entries().is_empty())
+    }
+
+    /// Create a cache storage, or grow an existing one to at least these sizes.
+    pub(crate) fn create_cache_storage(&mut self, key: SaveKey, size: i64, journal_size: i64) {
+        let (old_size, old_journal) = self.cache_storage_size(key).unwrap_or((0, 0));
+        self.cache_storage_sizes
+            .insert(key, (old_size.max(size), old_journal.max(journal_size)));
+        self.save_data_mut(key);
+    }
+
+    /// `(size, journal size)` of a cache storage. One restored from the host without
+    /// being created this session reports the bytes it holds and no journal.
+    pub(crate) fn cache_storage_size(&self, key: SaveKey) -> Option<(i64, i64)> {
+        if !self.cache_storage_exists(key) {
+            return None;
+        }
+        match self.cache_storage_sizes.get(&key) {
+            Some(&sizes) => Some(sizes),
+            None => Some((self.saves.get(&key).map_or(0, |vfs| vfs.bytes()) as i64, 0)),
+        }
+    }
+
+    /// Delete a cache storage's files, each recorded as a change for the host. False when
+    /// there was none.
+    pub(crate) fn delete_cache_storage(&mut self, key: SaveKey) -> bool {
+        if !self.cache_storage_exists(key) {
+            return false;
+        }
+        self.cache_storage_sizes.remove(&key);
+        if let Some(vfs) = self.saves.get_mut(&key) {
+            for (path, _, _) in vfs.entries() {
+                vfs.remove(&path);
+            }
+        }
+        true
+    }
+
+    /// Every opened save, for a host that persists them.
+    pub fn save_keys(&self) -> Vec<SaveKey> {
+        self.saves.keys().copied().collect()
+    }
+
+    pub(crate) fn vfs_for(&mut self, mount: Mount) -> &mut crate::vfs::Vfs {
+        match mount {
+            Mount::Save(key) => self.saves.entry(key).or_insert_with(crate::vfs::Vfs::empty),
+            Mount::Bis(partition) => self
+                .bis
+                .entry(partition)
+                .or_insert_with(crate::vfs::Vfs::empty),
+            Mount::Manual => &mut self.manual,
+            Mount::Sd => &mut self.fs,
+        }
+    }
+
+    /// List NAND content `name` on the SYSTEM partition, read from `source`.
+    pub fn add_nand_content(
+        &mut self,
+        name: &str,
+        source: std::rc::Rc<dyn crate::source::ByteSource>,
+    ) {
+        self.bis
+            .entry(super::fs::BIS_SYSTEM)
+            .or_insert_with(crate::vfs::Vfs::empty)
+            .mount_source(&format!("/Contents/registered/{name}"), source);
+    }
+
+    /// Report what the host has stored; until it does, every storage shows the stock card.
+    pub fn set_storage_usage(&mut self, usage: StorageUsage) {
+        self.storage_usage = Some(usage);
+    }
+
+    /// Whether a space query has run since the host last reported, so it should report again.
+    pub fn take_storage_usage_wanted(&mut self) -> bool {
+        std::mem::take(&mut self.storage_usage_wanted)
+    }
+
+    /// `(free, total)` of the storage `mount` serves.
+    pub(crate) fn space_of(&mut self, mount: Mount) -> (u64, u64) {
+        self.storage_usage_wanted = true;
+        let Some(usage) = self.storage_usage else {
+            return (super::fs::SD_FREE_SPACE, super::fs::SD_TOTAL_SPACE);
+        };
+        let used = match mount {
+            Mount::Sd => usage.sd,
+            Mount::Bis(super::fs::BIS_SYSTEM) => usage.system,
+            Mount::Bis(30) | Mount::Save(_) => usage.user,
+            Mount::Bis(_) | Mount::Manual => 0,
+        };
+        (usage.free, used.saturating_add(usage.free))
+    }
+
+    pub(crate) fn mount_of(&self, key: u64) -> Mount {
+        self.process()
+            .fs_mount
+            .get(&key)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn set_mount(&mut self, key: u64, mount: Mount) {
+        match mount {
+            Mount::Sd => {
+                self.process_mut().fs_mount.remove(&key);
+            }
+            _ => {
+                self.process_mut().fs_mount.insert(key, mount);
+            }
+        }
+    }
+
+    /// The title's `HtmlDocument` RomFS, which its web applets open as its Manual.
+    pub fn set_manual_source(&mut self, src: Box<dyn crate::source::ByteSource>) {
+        self.process_mut().manual_romfs = Some(src);
+    }
+
+    /// Same, backed by a decrypt-on-demand [`ByteSource`](crate::source::ByteSource).
+    pub fn set_romfs_source(&mut self, src: Box<dyn crate::source::ByteSource>) {
+        self.process_mut().romfs = Some(src);
+        self.process_mut().romfs_indexes.remove(&None);
+    }
+}

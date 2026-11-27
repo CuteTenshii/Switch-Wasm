@@ -1,0 +1,268 @@
+//! Count the work one steady-state frame asks for (instructions, blocks,
+//! interpreter fallbacks, methods, draws, pixels) instead of timing it:
+//! `frame_work <target> [--keys <prod.keys>] [--frames <n>]`.
+//! The target is an `.nro`, `.nsp`, `.xci` or Program `.nca` (retail needs keys).
+mod common;
+
+use clap::Parser;
+use switch_core::cpu::Cpu;
+use switch_core::gpu::exec::GpuStats;
+
+const WARMUP_FRAMES: u64 = 2;
+const FRAME_BUDGET: u64 = 2_000_000_000;
+
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    target: common::Target,
+    #[command(flatten)]
+    shared: common::Shared,
+    #[command(flatten)]
+    play: common::Play,
+    #[command(flatten)]
+    boot: common::Boot,
+    #[command(flatten)]
+    report: common::Report,
+    /// Frames to count.
+    #[arg(short = 'n', long, default_value_t = 30)]
+    frames: u64,
+}
+
+struct Snapshot {
+    steps: u64,
+    entered: u64,
+    linked: u64,
+    translated: u64,
+    invalidated: u64,
+    interpreted: u64,
+    gpu: GpuStats,
+    pixels: u64,
+}
+
+impl Snapshot {
+    fn of(cpu: &Cpu, steps: u64) -> Snapshot {
+        let jit = cpu.jit_stats();
+        let fb = &cpu.nv.gpu.framebuffer;
+        Snapshot {
+            steps,
+            entered: jit.executed,
+            linked: jit.linked,
+            translated: jit.translated,
+            invalidated: jit.invalidated,
+            interpreted: jit.interpreted,
+            gpu: cpu.nv.gpu.stats,
+            pixels: u64::from(fb.width) * u64::from(fb.height),
+        }
+    }
+}
+
+struct Delta {
+    steps: u64,
+    entered: u64,
+    linked: u64,
+    translated: u64,
+    invalidated: u64,
+    interpreted: u64,
+    submissions: u64,
+    methods: u64,
+    inert_methods: u64,
+    draws: u64,
+    draws_skipped: u64,
+    clears: u64,
+    clears_elided: u64,
+    copies: u64,
+    macros: u64,
+    dispatches: u64,
+    dispatches_skipped: u64,
+    pixels: u64,
+}
+
+impl Delta {
+    fn between(before: &Snapshot, after: &Snapshot) -> Delta {
+        Delta {
+            steps: after.steps - before.steps,
+            entered: after.entered - before.entered,
+            linked: after.linked - before.linked,
+            translated: after.translated - before.translated,
+            invalidated: after.invalidated - before.invalidated,
+            interpreted: after.interpreted - before.interpreted,
+            submissions: after.gpu.submissions - before.gpu.submissions,
+            methods: after.gpu.methods - before.gpu.methods,
+            inert_methods: after.gpu.inert_methods - before.gpu.inert_methods,
+            draws: after.gpu.draws - before.gpu.draws,
+            draws_skipped: after.gpu.draws_skipped - before.gpu.draws_skipped,
+            clears: after.gpu.clears - before.gpu.clears,
+            clears_elided: after.gpu.clears_elided - before.gpu.clears_elided,
+            copies: after.gpu.copies - before.gpu.copies,
+            macros: after.gpu.macros - before.gpu.macros,
+            dispatches: after.gpu.dispatches - before.gpu.dispatches,
+            dispatches_skipped: after.gpu.dispatches_skipped - before.gpu.dispatches_skipped,
+            // Scan-out walks the whole surface each frame, so this is not a difference.
+            pixels: after.pixels,
+        }
+    }
+
+    fn add(&mut self, other: &Delta) {
+        self.steps += other.steps;
+        self.entered += other.entered;
+        self.linked += other.linked;
+        self.translated += other.translated;
+        self.invalidated += other.invalidated;
+        self.interpreted += other.interpreted;
+        self.submissions += other.submissions;
+        self.methods += other.methods;
+        self.inert_methods += other.inert_methods;
+        self.draws += other.draws;
+        self.draws_skipped += other.draws_skipped;
+        self.clears += other.clears;
+        self.clears_elided += other.clears_elided;
+        self.copies += other.copies;
+        self.macros += other.macros;
+        self.dispatches += other.dispatches;
+        self.dispatches_skipped += other.dispatches_skipped;
+        self.pixels += other.pixels;
+    }
+
+    fn zero() -> Delta {
+        Delta {
+            steps: 0,
+            entered: 0,
+            linked: 0,
+            translated: 0,
+            invalidated: 0,
+            interpreted: 0,
+            submissions: 0,
+            methods: 0,
+            inert_methods: 0,
+            draws: 0,
+            draws_skipped: 0,
+            clears: 0,
+            clears_elided: 0,
+            copies: 0,
+            macros: 0,
+            dispatches: 0,
+            dispatches_skipped: 0,
+            pixels: 0,
+        }
+    }
+}
+
+fn frame(cpu: &mut Cpu, total_steps: &mut u64) -> Option<Delta> {
+    let before = Snapshot::of(cpu, *total_steps);
+    let target = cpu.nv.gpu.frames + 1;
+    let run = common::run_to(cpu, FRAME_BUDGET, |cpu| cpu.nv.gpu.frames >= target);
+    *total_steps += run.steps;
+    if cpu.nv.gpu.frames < target {
+        return None;
+    }
+    Some(Delta::between(&before, &Snapshot::of(cpu, *total_steps)))
+}
+
+fn main() {
+    let cli = common::parse::<Cli>(|cli| {
+        common::Flags::default()
+            .with(&cli.shared)
+            .with(&cli.play)
+            .with(&cli.boot)
+            .with(&cli.report)
+    });
+    let program = cli.target.open_program();
+    let frames = cli.frames.max(1);
+
+    let mut cpu = common::new_cpu();
+    cpu.bootstrap();
+    program.boot(&mut cpu, None);
+    common::start_play(&mut cpu);
+
+    let Some(boot) = common::reach_frame(&mut cpu, WARMUP_FRAMES, FRAME_BUDGET) else {
+        return;
+    };
+    println!(
+        "startup: {} instructions to frame {WARMUP_FRAMES}",
+        boot.steps
+    );
+    println!(
+        "{:>5}  {:>11}  {:>10}  {:>8}  {:>11}  {:>6}  {:>6}  {:>6}  {:>9}",
+        "frame", "insns", "entries", "new", "interpreted", "draws", "clears", "copies", "methods"
+    );
+
+    let mut total = Delta::zero();
+    let mut counted = 0u64;
+    let mut steps = boot.steps;
+    for n in 0..frames {
+        let Some(delta) = frame(&mut cpu, &mut steps) else {
+            println!("stopped after {counted} frames: no further frame was presented");
+            break;
+        };
+        println!(
+            "{:>5}  {:>11}  {:>10}  {:>8}  {:>11}  {:>6}  {:>6}  {:>6}  {:>9}",
+            WARMUP_FRAMES + n,
+            delta.steps,
+            delta.entered,
+            delta.translated,
+            delta.interpreted,
+            delta.draws,
+            delta.clears,
+            delta.copies,
+            delta.methods,
+        );
+        total.add(&delta);
+        counted += 1;
+    }
+    if counted == 0 {
+        return;
+    }
+
+    let mean = |n: u64| n as f64 / counted as f64;
+    let share = |n: u64, of: u64| {
+        if of == 0 {
+            0.0
+        } else {
+            n as f64 * 100.0 / of as f64
+        }
+    };
+    println!("--- per frame, over {counted} frames ---");
+    println!(
+        "  cpu:    {:.0} instructions, {:.0} block entries ({:.1} instructions each), {:.0} newly translated, {:.0} invalidated",
+        mean(total.steps),
+        mean(total.entered),
+        total.steps as f64 / total.entered.max(1) as f64,
+        mean(total.translated),
+        mean(total.invalidated),
+    );
+    println!(
+        "  cpu:    {:.0} of those entries ({:.1}%) came from the previous block's link",
+        mean(total.linked),
+        share(total.linked, total.entered),
+    );
+    println!(
+        "  cpu:    {:.0} instructions fell back to the interpreter ({:.2}% of the frame)",
+        mean(total.interpreted),
+        share(total.interpreted, total.steps),
+    );
+    println!(
+        "  gpu:    {:.1} submissions, {:.0} methods ({:.1}% inert), {:.1} macros",
+        mean(total.submissions),
+        mean(total.methods),
+        share(total.inert_methods, total.methods),
+        mean(total.macros),
+    );
+    println!(
+        "  gpu:    {:.1} draws ({:.0} skipped), {:.1} clears ({:.1} elided), {:.1} copies, {:.1} dispatches ({:.0} skipped)",
+        mean(total.draws),
+        mean(total.draws_skipped),
+        mean(total.clears),
+        mean(total.clears_elided),
+        mean(total.copies),
+        mean(total.dispatches),
+        mean(total.dispatches_skipped),
+    );
+    println!("  scan-out: {:.0} pixels", mean(total.pixels));
+
+    let used = cpu.mem.mapped_bytes();
+    println!(
+        "  memory: {:.1} MiB of {} MiB backed",
+        used as f64 / (1024.0 * 1024.0),
+        cpu.mem.max_mapped_bytes() / (1024 * 1024),
+    );
+}

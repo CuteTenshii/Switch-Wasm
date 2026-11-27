@@ -1,0 +1,708 @@
+//! A minimal wasm binary encoder: only the sections and instructions emitted
+//! blocks need.
+
+pub(super) const I32: u8 = 0x7F;
+pub(super) const I64: u8 = 0x7E;
+pub(super) const V128: u8 = 0x7B;
+pub(super) const F32: u8 = 0x7D;
+pub(super) const F64: u8 = 0x7C;
+
+pub(super) fn uleb(out: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let mut byte = (v & 0x7F) as u8;
+        v >>= 7;
+        if v != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if v == 0 {
+            return;
+        }
+    }
+}
+
+/// Signed LEB128, for `i32.const` and `i64.const`. Not interchangeable with [`uleb`].
+pub(super) fn sleb(out: &mut Vec<u8>, mut v: i64) {
+    loop {
+        let byte = (v & 0x7F) as u8;
+        v >>= 7;
+        let sign_bit = byte & 0x40 != 0;
+        if (v == 0 && !sign_bit) || (v == -1 && sign_bit) {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+fn section(out: &mut Vec<u8>, id: u8, body: &[u8]) {
+    if body.is_empty() {
+        return;
+    }
+    out.push(id);
+    uleb(out, body.len() as u64);
+    out.extend_from_slice(body);
+}
+
+fn vec_header(out: &mut Vec<u8>, count: usize) {
+    uleb(out, count as u64);
+}
+
+#[derive(Default)]
+pub(super) struct Func {
+    /// Run-length encoded `(count, type)` declarations.
+    locals: Vec<(u32, u8)>,
+    code: Vec<u8>,
+    /// Open `block`, `loop` and `if` constructs, for [`Func::br`].
+    depth: u32,
+}
+
+impl Func {
+    pub(super) fn new() -> Func {
+        Func::default()
+    }
+
+    /// Declares `count` locals of type `ty` and returns the first index, which
+    /// continues after the `params` parameters.
+    pub(super) fn locals(&mut self, params: u32, count: u32, ty: u8) -> u32 {
+        let first = params + self.locals.iter().map(|&(n, _)| n).sum::<u32>();
+        self.locals.push((count, ty));
+        first
+    }
+
+    fn op(&mut self, opcode: u8) {
+        self.code.push(opcode);
+    }
+
+    fn op_idx(&mut self, opcode: u8, idx: u32) {
+        self.code.push(opcode);
+        uleb(&mut self.code, u64::from(idx));
+    }
+
+    pub(super) fn i32_const(&mut self, v: i32) {
+        self.code.push(0x41);
+        sleb(&mut self.code, i64::from(v));
+    }
+
+    pub(super) fn i64_const(&mut self, v: i64) {
+        self.code.push(0x42);
+        sleb(&mut self.code, v);
+    }
+
+    pub(super) fn f32_const(&mut self, v: f32) {
+        self.code.push(0x43);
+        self.code.extend_from_slice(&v.to_bits().to_le_bytes());
+    }
+
+    pub(super) fn f64_const(&mut self, v: f64) {
+        self.code.push(0x44);
+        self.code.extend_from_slice(&v.to_bits().to_le_bytes());
+    }
+
+    /// A one-byte instruction with no immediates, named where it is used.
+    pub(super) fn op_raw(&mut self, opcode: u8) {
+        self.op(opcode);
+    }
+
+    pub(super) fn local_get(&mut self, i: u32) {
+        self.op_idx(0x20, i);
+    }
+
+    pub(super) fn local_set(&mut self, i: u32) {
+        self.op_idx(0x21, i);
+    }
+
+    pub(super) fn local_tee(&mut self, i: u32) {
+        self.op_idx(0x22, i);
+    }
+
+    pub(super) fn drop_value(&mut self) {
+        self.op(0x1A);
+    }
+
+    /// Evaluates both arms, so it must not be used for anything that can trap.
+    pub(super) fn select(&mut self) {
+        self.op(0x1B);
+    }
+
+    pub(super) fn if_result(&mut self, ty: u8) {
+        self.code.push(0x04);
+        self.code.push(ty);
+        self.depth += 1;
+    }
+
+    pub(super) fn if_void(&mut self) {
+        self.code.push(0x04);
+        self.code.push(0x40);
+        self.depth += 1;
+    }
+
+    /// Opens a `block` and returns its label for [`Func::br`].
+    pub(super) fn block_void(&mut self) -> u32 {
+        self.code.push(0x02);
+        self.code.push(0x40);
+        self.depth += 1;
+        self.depth - 1
+    }
+
+    /// Opens a `loop` and returns its label for [`Func::br`].
+    pub(super) fn loop_void(&mut self) -> u32 {
+        self.code.push(0x03);
+        self.code.push(0x40);
+        self.depth += 1;
+        self.depth - 1
+    }
+
+    /// Branches to `label`, as returned when its construct was opened.
+    pub(super) fn br(&mut self, label: u32) {
+        self.op_idx(0x0C, self.depth - 1 - label);
+    }
+
+    /// Branches to the `targets` entry the value on the stack names, or to
+    /// `default`; all relative depths.
+    pub(super) fn br_table(&mut self, targets: &[u32], default: u32) {
+        self.code.push(0x0E);
+        uleb(&mut self.code, targets.len() as u64);
+        for &t in targets {
+            uleb(&mut self.code, u64::from(t));
+        }
+        uleb(&mut self.code, u64::from(default));
+    }
+
+    /// Puts `code` ahead of everything emitted so far.
+    pub(super) fn prepend(&mut self, code: &[u8]) {
+        self.code.splice(0..0, code.iter().copied());
+    }
+
+    pub(super) fn else_(&mut self) {
+        self.op(0x05);
+    }
+
+    /// Order memory against other threads on the shared memory.
+    pub(super) fn atomic_fence(&mut self) {
+        self.code.extend_from_slice(&[0xFE, 0x03, 0x00]);
+    }
+
+    /// Load the naturally aligned `i64` at the address on the stack in one access.
+    pub(super) fn i64_atomic_load(&mut self) {
+        self.code.extend_from_slice(&[0xFE, 0x11, 3, 0]);
+    }
+
+    /// Tail-call the table entry on the stack, with arguments under it, as type `ty`.
+    pub(super) fn return_call_indirect(&mut self, ty: u32) {
+        self.op_idx(0x13, ty);
+        uleb(&mut self.code, 0);
+    }
+
+    /// `align` is a log2 hint and must not exceed the address's real alignment.
+    fn mem(&mut self, opcode: u8, align: u8, offset: u32) {
+        debug_assert!(align <= 3, "an alignment hint is a log2, not a width");
+        self.code.push(opcode);
+        uleb(&mut self.code, u64::from(align));
+        uleb(&mut self.code, u64::from(offset));
+    }
+
+    pub(super) fn i32_load(&mut self, align: u8, offset: u32) {
+        self.mem(0x28, align, offset);
+    }
+
+    pub(super) fn i64_load(&mut self, align: u8, offset: u32) {
+        self.mem(0x29, align, offset);
+    }
+
+    pub(super) fn i64_load8_s(&mut self, offset: u32) {
+        self.mem(0x30, 0, offset);
+    }
+
+    pub(super) fn i64_load8_u(&mut self, offset: u32) {
+        self.mem(0x31, 0, offset);
+    }
+
+    pub(super) fn i64_load16_s(&mut self, align: u8, offset: u32) {
+        self.mem(0x32, align, offset);
+    }
+
+    pub(super) fn i64_load16_u(&mut self, align: u8, offset: u32) {
+        self.mem(0x33, align, offset);
+    }
+
+    pub(super) fn i64_load32_s(&mut self, align: u8, offset: u32) {
+        self.mem(0x34, align, offset);
+    }
+
+    pub(super) fn i64_load32_u(&mut self, align: u8, offset: u32) {
+        self.mem(0x35, align, offset);
+    }
+
+    pub(super) fn i32_store(&mut self, align: u8, offset: u32) {
+        self.mem(0x36, align, offset);
+    }
+
+    /// Compare-and-swap on the `1 << size_log2` bytes at the address under the expected and
+    /// replacement values, answering what was there; sizes under 64 bits work on `i32`s and
+    /// widen unsigned. The address must be naturally aligned or the engine traps.
+    pub(super) fn atomic_cmpxchg(&mut self, size_log2: u8) {
+        let op = match size_log2 {
+            0 => 0x4A,
+            1 => 0x4B,
+            2 => 0x48,
+            _ => 0x49,
+        };
+        self.code
+            .extend_from_slice(&[0xFE, op, size_log2.min(3), 0]);
+    }
+
+    pub(super) fn i64_store(&mut self, align: u8, offset: u32) {
+        self.mem(0x37, align, offset);
+    }
+
+    pub(super) fn i64_store8(&mut self, offset: u32) {
+        self.mem(0x3C, 0, offset);
+    }
+
+    pub(super) fn i64_store16(&mut self, align: u8, offset: u32) {
+        self.mem(0x3D, align, offset);
+    }
+
+    pub(super) fn i64_store32(&mut self, align: u8, offset: u32) {
+        self.mem(0x3E, align, offset);
+    }
+
+    pub(super) fn i32_and(&mut self) {
+        self.op(0x71);
+    }
+
+    pub(super) fn i32_or(&mut self) {
+        self.op(0x72);
+    }
+
+    pub(super) fn i32_xor(&mut self) {
+        self.op(0x73);
+    }
+
+    pub(super) fn i32_shl(&mut self) {
+        self.op(0x74);
+    }
+
+    pub(super) fn i32_shr_u(&mut self) {
+        self.op(0x76);
+    }
+
+    pub(super) fn i32_add(&mut self) {
+        self.op(0x6A);
+    }
+
+    pub(super) fn i32_sub(&mut self) {
+        self.op(0x6B);
+    }
+
+    pub(super) fn i32_eq(&mut self) {
+        self.op(0x46);
+    }
+
+    pub(super) fn i32_ge_s(&mut self) {
+        self.op(0x4E);
+    }
+
+    pub(super) fn i32_lt_s(&mut self) {
+        self.op(0x48);
+    }
+
+    pub(super) fn i64_clz(&mut self) {
+        self.op(0x79);
+    }
+
+    pub(super) fn i32_ne(&mut self) {
+        self.op(0x47);
+    }
+
+    pub(super) fn i32_eqz(&mut self) {
+        self.op(0x45);
+    }
+
+    pub(super) fn i32_gt_u(&mut self) {
+        self.op(0x4B);
+    }
+
+    pub(super) fn i64_add(&mut self) {
+        self.op(0x7C);
+    }
+
+    pub(super) fn i64_sub(&mut self) {
+        self.op(0x7D);
+    }
+
+    pub(super) fn i64_mul(&mut self) {
+        self.op(0x7E);
+    }
+
+    /// Traps on a zero divisor and on `i64::MIN / -1`; callers must guard both.
+    pub(super) fn i64_div_s(&mut self) {
+        self.op(0x7F);
+    }
+
+    pub(super) fn i64_div_u(&mut self) {
+        self.op(0x80);
+    }
+
+    pub(super) fn i64_rem_u(&mut self) {
+        self.op(0x82);
+    }
+
+    pub(super) fn i64_and(&mut self) {
+        self.op(0x83);
+    }
+
+    pub(super) fn i64_or(&mut self) {
+        self.op(0x84);
+    }
+
+    pub(super) fn i64_xor(&mut self) {
+        self.op(0x85);
+    }
+
+    /// Shift distances are taken modulo 64.
+    pub(super) fn i64_shl(&mut self) {
+        self.op(0x86);
+    }
+
+    pub(super) fn i64_shr_s(&mut self) {
+        self.op(0x87);
+    }
+
+    pub(super) fn i64_shr_u(&mut self) {
+        self.op(0x88);
+    }
+
+    pub(super) fn i64_rotr(&mut self) {
+        self.op(0x8A);
+    }
+
+    pub(super) fn i64_eqz(&mut self) {
+        self.op(0x50);
+    }
+
+    pub(super) fn i64_eq(&mut self) {
+        self.op(0x51);
+    }
+
+    pub(super) fn i64_ne(&mut self) {
+        self.op(0x52);
+    }
+
+    pub(super) fn i64_lt_u(&mut self) {
+        self.op(0x54);
+    }
+
+    pub(super) fn i64_gt_u(&mut self) {
+        self.op(0x56);
+    }
+
+    pub(super) fn i64_extend8_s(&mut self) {
+        self.op(0xC2);
+    }
+
+    pub(super) fn i64_extend16_s(&mut self) {
+        self.op(0xC3);
+    }
+
+    pub(super) fn i64_extend32_s(&mut self) {
+        self.op(0xC4);
+    }
+
+    pub(super) fn i32_wrap_i64(&mut self) {
+        self.op(0xA7);
+    }
+
+    pub(super) fn i64_extend_i32_u(&mut self) {
+        self.op(0xAD);
+    }
+
+    pub(super) fn i64_extend_i32_s(&mut self) {
+        self.op(0xAC);
+    }
+
+    /// A SIMD instruction: the `0xFD` prefix and its opcode.
+    pub(super) fn simd(&mut self, opcode: u32) {
+        self.code.push(0xFD);
+        uleb(&mut self.code, u64::from(opcode));
+    }
+
+    /// A saturating truncation: the `0xFC` prefix and its opcode.
+    pub(super) fn trunc_sat(&mut self, opcode: u32) {
+        self.code.push(0xFC);
+        uleb(&mut self.code, u64::from(opcode));
+    }
+
+    /// A SIMD memory access; `align` as for [`Func::i64_load`].
+    pub(super) fn simd_mem(&mut self, opcode: u32, align: u8, offset: u32) {
+        self.simd(opcode);
+        uleb(&mut self.code, u64::from(align));
+        uleb(&mut self.code, u64::from(offset));
+    }
+
+    /// A SIMD access to one lane of the vector on the stack.
+    pub(super) fn simd_mem_lane(&mut self, opcode: u32, align: u8, offset: u32, lane: u8) {
+        self.simd_mem(opcode, align, offset);
+        self.code.push(lane);
+    }
+
+    /// `extract_lane`/`replace_lane`.
+    pub(super) fn simd_lane(&mut self, opcode: u32, lane: u8) {
+        self.simd(opcode);
+        self.code.push(lane);
+    }
+
+    pub(super) fn v128_const(&mut self, bytes: [u8; 16]) {
+        self.simd(0x0C);
+        self.code.extend_from_slice(&bytes);
+    }
+
+    /// `i8x16.shuffle`: byte `i` of the result is byte `lanes[i]` of the two
+    /// operands side by side.
+    pub(super) fn i8x16_shuffle(&mut self, lanes: [u8; 16]) {
+        self.simd(0x0D);
+        self.code.extend_from_slice(&lanes);
+    }
+
+    /// Closes the innermost construct, or the function body when none is open.
+    pub(super) fn end(&mut self) {
+        self.op(0x0B);
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.code.len()
+    }
+
+    pub(super) fn code(&self) -> &[u8] {
+        &self.code
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut inner = Vec::with_capacity(self.code.len() + 8);
+        vec_header(&mut inner, self.locals.len());
+        for &(count, ty) in &self.locals {
+            uleb(&mut inner, u64::from(count));
+            inner.push(ty);
+        }
+        inner.extend_from_slice(&self.code);
+        let mut out = Vec::with_capacity(inner.len() + 5);
+        uleb(&mut out, inner.len() as u64);
+        out.extend_from_slice(&inner);
+        out
+    }
+}
+
+pub(super) struct Type {
+    pub(super) params: Vec<u8>,
+    pub(super) results: Vec<u8>,
+}
+
+/// A module that imports the host's linear memory as `e`.`m`, and with
+/// [`Module::import_table`] its function table as `e`.`t`.
+#[derive(Default)]
+pub(super) struct Module {
+    table: bool,
+    types: Vec<Type>,
+    /// Type index per defined function.
+    funcs: Vec<u32>,
+    bodies: Vec<Func>,
+    /// `(name, function index)`.
+    exports: Vec<(String, u32)>,
+}
+
+impl Module {
+    pub(super) fn new() -> Module {
+        Module::default()
+    }
+
+    pub(super) fn import_table(&mut self) {
+        self.table = true;
+    }
+
+    pub(super) fn add_type(&mut self, params: Vec<u8>, results: Vec<u8>) -> u32 {
+        self.types.push(Type { params, results });
+        self.types.len() as u32 - 1
+    }
+
+    pub(super) fn add_func(&mut self, ty: u32, body: Func) -> u32 {
+        self.funcs.push(ty);
+        self.bodies.push(body);
+        self.funcs.len() as u32 - 1
+    }
+
+    pub(super) fn export(&mut self, name: &str, func: u32) {
+        self.exports.push((name.to_string(), func));
+    }
+
+    pub(super) fn finish(&self) -> Vec<u8> {
+        let mut out = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
+
+        let mut body = Vec::new();
+        vec_header(&mut body, self.types.len());
+        for ty in &self.types {
+            body.push(0x60);
+            vec_header(&mut body, ty.params.len());
+            body.extend_from_slice(&ty.params);
+            vec_header(&mut body, ty.results.len());
+            body.extend_from_slice(&ty.results);
+        }
+        section(&mut out, 1, &body);
+
+        body.clear();
+        vec_header(&mut body, 1 + usize::from(self.table));
+        name_bytes(&mut body, "e");
+        name_bytes(&mut body, "m");
+        body.push(0x02);
+        // Minimum of zero pages; the host memory is already sized. A shared
+        // memory only matches an import that says so, with a maximum.
+        if cfg!(target_feature = "atomics") {
+            body.push(0x03);
+            uleb(&mut body, 0);
+            uleb(&mut body, 65536);
+        } else {
+            body.push(0x00);
+            uleb(&mut body, 0);
+        }
+        if self.table {
+            name_bytes(&mut body, "e");
+            name_bytes(&mut body, "t");
+            // A funcref table with a minimum of zero entries.
+            body.extend_from_slice(&[0x01, 0x70, 0x00, 0x00]);
+        }
+        section(&mut out, 2, &body);
+
+        body.clear();
+        vec_header(&mut body, self.funcs.len());
+        for &ty in &self.funcs {
+            uleb(&mut body, u64::from(ty));
+        }
+        section(&mut out, 3, &body);
+
+        body.clear();
+        vec_header(&mut body, self.exports.len());
+        for (name, func) in &self.exports {
+            name_bytes(&mut body, name);
+            body.push(0x00);
+            uleb(&mut body, u64::from(*func));
+        }
+        section(&mut out, 7, &body);
+
+        body.clear();
+        vec_header(&mut body, self.bodies.len());
+        for func in &self.bodies {
+            body.extend_from_slice(&func.encode());
+        }
+        section(&mut out, 10, &body);
+
+        out
+    }
+}
+
+fn name_bytes(out: &mut Vec<u8>, name: &str) {
+    uleb(out, name.len() as u64);
+    out.extend_from_slice(name.as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn u(v: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        uleb(&mut out, v);
+        out
+    }
+
+    fn s(v: i64) -> Vec<u8> {
+        let mut out = Vec::new();
+        sleb(&mut out, v);
+        out
+    }
+
+    #[test]
+    fn unsigned_leb128_matches_the_spec_examples() {
+        assert_eq!(u(0), vec![0x00]);
+        assert_eq!(u(1), vec![0x01]);
+        assert_eq!(u(127), vec![0x7F]);
+        assert_eq!(u(128), vec![0x80, 0x01]);
+        assert_eq!(u(624485), vec![0xE5, 0x8E, 0x26]);
+        assert_eq!(u(u32::MAX as u64), vec![0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
+    }
+
+    #[test]
+    fn signed_leb128_is_not_the_unsigned_one() {
+        assert_eq!(s(0), vec![0x00]);
+        assert_eq!(s(63), vec![0x3F]);
+        assert_eq!(s(-1), vec![0x7F]);
+        assert_eq!(s(-64), vec![0x40]);
+        assert_eq!(s(64), vec![0xC0, 0x00]);
+        assert_eq!(s(-123456), vec![0xC0, 0xBB, 0x78]);
+        assert_eq!(s(i64::from(i32::MIN)), vec![0x80, 0x80, 0x80, 0x80, 0x78]);
+
+        assert_ne!(s(64), u(64));
+        assert_eq!(s(63), u(63));
+    }
+
+    #[test]
+    fn a_minimal_module_encodes_to_the_expected_bytes() {
+        let mut m = Module::new();
+        let ty = m.add_type(vec![I64, I64], vec![I64]);
+        let mut f = Func::new();
+        f.local_get(0);
+        f.local_get(1);
+        f.i64_add();
+        f.end();
+        let idx = m.add_func(ty, f);
+        m.export("add", idx);
+        let bytes = m.finish();
+
+        assert_eq!(
+            &bytes[..8],
+            &[0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00]
+        );
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
+            0x01, 0x07, 0x01, 0x60, 0x02, 0x7E, 0x7E, 0x01, 0x7E,
+            0x02, 0x08, 0x01, 0x01, b'e', 0x01, b'm', 0x02, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00,
+            0x07, 0x07, 0x01, 0x03, b'a', b'd', b'd', 0x00, 0x00,
+            0x0A, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x7C, 0x0B,
+        ];
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn a_branch_counts_its_depth_from_where_it_is() {
+        let mut f = Func::new();
+        let outer = f.block_void();
+        let inner = f.loop_void();
+        f.if_void();
+        f.br(outer);
+        f.br(inner);
+        f.end();
+        f.end();
+        f.end();
+        assert_eq!(
+            f.code(),
+            &[0x02, 0x40, 0x03, 0x40, 0x04, 0x40, 0x0C, 2, 0x0C, 1, 0x0B, 0x0B, 0x0B]
+        );
+    }
+
+    #[test]
+    fn a_simd_opcode_is_prefixed_and_leb_encoded() {
+        let mut f = Func::new();
+        f.simd(0x0B);
+        f.simd(0x9E);
+        assert_eq!(f.code(), &[0xFD, 0x0B, 0xFD, 0x9E, 0x01]);
+    }
+
+    #[test]
+    fn local_indices_continue_from_the_parameters() {
+        let mut f = Func::new();
+        assert_eq!(f.locals(2, 3, I64), 2);
+        assert_eq!(f.locals(2, 1, I32), 5);
+    }
+}

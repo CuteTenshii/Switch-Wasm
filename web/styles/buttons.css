@@ -1,0 +1,122 @@
+/* buttons */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  gap: 6px;
+  background: var(--chrome-hi);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 6px 12px;
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .12s, border-color .12s, opacity .12s;
+}
+.btn:hover {
+  background: var(--hover-bg);
+  border-color: var(--border-hi);
+}
+.btn:active { transform: translateY(0.5px); }
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  opacity: .4;
+  cursor: not-allowed;
+}
+.btn.primary {
+  background: linear-gradient(180deg, #2b5cb8, #24499a);
+  border-color: #3a6fd0;
+  color: #fff;
+}
+.btn.primary:hover { background: linear-gradient(180deg, #3268cc, #2a54ad); }
+.btn.icon { padding: 6px 8px; }
+.btn svg, .icon-btn svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.btn.small {
+  padding: 4px 9px;
+  font-size: var(--text-xs);
+}
+.btn.big {
+  padding: 9px 16px;
+  font-size: var(--text-base);
+}
+
+.btn.ghost {
+  background: none;
+  border-color: transparent;
+  color: var(--muted);
+}
+.btn.ghost:hover {
+  background: var(--chrome-hi);
+  border-color: var(--border);
+  color: var(--text);
+}
+.btn.danger:hover {
+  background: #2a1416;
+  border-color: var(--danger-dim);
+  color: var(--red);
+}
+
+/* Icon-only chrome: no frame until hovered. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  margin-left: auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.icon-btn:hover {
+  background: var(--chrome-hi);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.btn:focus-visible,
+.icon-btn:focus-visible,
+.tab:focus-visible,
+.dropzone:focus-visible,
+.row-item:focus-visible,
+.section-head:focus-visible,
+.check input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Keep hidden controls hidden inside flex rows. */
+[hidden] { display: none !important; }
+
+.select {
+  background: var(--chrome-hi);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.select.big {
+  padding: 9px 12px;
+  font-size: var(--text-base);
+}

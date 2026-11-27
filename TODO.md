@@ -3,7 +3,7 @@
 ## Multi-process kernel
 
 Library applets must run as processes beside their caller, in one kernel with one set of console services.
-Each stage builds, passes `make test` and clippy, keeps every title in `docs/progress.md` booting to the same frames, and is committed on its own.
+Each stage builds, passes `cargo test --workspace` and clippy, keeps every title in `docs/compat.md` booting to the same frames, and is committed on its own.
 
 1. nvmap handles are console-wide and name a CPU address in the allocating process; a handle another process maps or presents is read from that process's memory at the same address.
 
@@ -19,12 +19,23 @@ Each stage builds, passes `make test` and clippy, keeps every title in `docs/pro
 
 ## Open gaps
 
-- The worker's host file table keeps every update and DLC added during a visit, each with up to 16 MiB of chunk cache; it should drop a file the session no longer reads.
+- The host file table keeps every update and DLC added during a visit; it should drop a file the session no longer reads.
 - `npns:s` cmd 3 (Receive) is refused; qlaunch polls it constantly. Switchbrew's NPNS page does not give the empty-queue result, so find it first.
 - Once `Receive` is handled, raise the system's own alerts: low battery for the console and for each controller, controller connected and disconnected.
-- `ssl:s` cmd 5 is stubbed and the `ssl:s` name is not routed like `ssl`.
-- Guest output since the last drain is lost when the run loop dies on a trap or panic, or the session is recycled mid-run (`web/main/runloop.ts` catch path, `recycleSession`).
+- Whether browsers let an `https://` page open `ws://127.0.0.1` (Chrome and Firefox are expected to; Safari is not known to) has not been tried on the deployed site.
+- The relay socket, its frames and TLS run on the emulator's thread, once per slice: a handshake or a big download costs guest time, and every answer from the relay waits for the next slice. A network worker could own the WebSocket and `rustls` and share the command and event queue with `net::exchange` through a mutex.
+- `ssl` and `ssl:s` refuse the commands switchbrew does not describe: `GetCertificateByIndex` (10), `GetTrustedCertificateCount` (11) and `VerifySignature` (103) are names only, and `DebugIoctl` (4) is an error on retail with no code given. A guest that sends one gets a refusal in the log.
 - The log file is hard to read: per-call `[ipc]`/`[wait]` trace lines, `[thread]` reports repeated every few seconds even when nothing changed, and periodic `[audio]`/`[io]`/`[fs]` stats.
-- Just Dance 2019 stops presenting on "Hold on... and warm up..." after one to two minutes and stays there (0 fps, over 100B instructions). The main thread only sleeps and polls, while two priority-29 threads run flat out on the other cores (a float-to-16-bit conversion loop, and `nn::hid::VibrationMixer`). Whether it waits on something the emulator never delivers is not known.
-- Compute dispatches, and copy-engine transfers that are not one plain run or that overlap a held surface, still send every held surface back; a per-surface flush would keep the rest on the device.
+- Compute dispatches, and copy-engine transfers that are not one plain run or that overlap a held surface, still send every held surface back; `Renderer::sync_ranges`, which refused 2D blits use, would keep the rest on the device where the ranges are known.
 - Minecraft's Terms and Conditions page panics in the `web` applet (`010000000000100a`): `Heap::allocate` fails for `0x2c000` bytes (2048 elements of `0x58`, built at `0x0818039c` in the 21.2.0 applet, count read from a config struct at `+0x9c`) from a heap object at `0x3004d000` in the applet's `SetHeapSize` region. Neither the applet heap size nor any `GetInfo` answer explains it; find where that heap's capacity is set.
+- Tomodachi Life: Living the Dream stays on its loading screen through frame 1500 (19.3B steps; `docs/compat.md`).
+- Firefox loses the device to `Out of memory` in Breath of the Wild's first scene (about 13 to 15B steps) on a GPU without resizable BAR. Its wgpu stages every queue write in the small host-visible device-local heap (246 MiB on an RTX 3060 Ti, its budget shared with every other application), loses the device once a heap reaches 99% of its budget and refuses an allocation past 95% (`memory_budget_thresholds` in `gfx/wgpu_bindings/src/server.rs`). It refused a 12.5 KB request with 145 MiB of that heap used against a budget other applications had shrunk to 100 MiB; the 246 MiB card has 8 GiB free beside it. Native wgpu sets no thresholds, so only a native run given Firefox's (`MemoryBudgetThresholds { for_resource_creation: Some(95), for_device_loss: Some(99) }`) reproduces it, and `RUST_LOG=wgpu_hal=warn` with Playwright's `DEBUG=pw:browser` shows the refusal from `browser_boot.mjs --firefox`. Bounding the backend's writes between submits and splitting texture uploads into 4 MiB pieces got it further but not past, so this is to report to Mozilla: wgpu should fall back to host memory rather than lose the device. Resizable BAR avoids it.
+- A Firefox run of Breath of the Wild faulted with `GPU: the readback was not mapped` (a readback's `mapAsync` rejected) with no device error before it. Not explained: Firefox keeps a mappable buffer's shared memory until it is collected, but the segments stayed flat over a 400 s run.
+- `ncm` has no implementation. Homebrew also still opens a service under an empty name (Checkpoint does), and `sm` hands out a working handle instead of failing as real `sm` would.
+- Hinted fonts render 1-3px wide. The guest's own FreeType, running on the emulated CPU, gives glyphs from a font with hinting programs (`fpgm`/`prep`/`cvt`) correct heights and advances but collapsed bitmaps, as if untouched points never get interpolated; the same subset built with `tools/make_font.py --no-hinting` renders perfectly, so something the emulator runs under the hinting interpreter is wrong. The stand-in `web/font.ttf` has no hinting; whether the firmware fonts `pl:u` serves do is unchecked, and the bug has not been retested since many decode fixes landed.
+
+## Video
+
+- Mario Kart 8 Deluxe's menu movie still shows black: its H.264 pictures decode, VIC composes them and the title copies each frame into a texture at `0x204490000`, but no draw samples that texture.
+- H.264 with Chrome's software decoder drops pictures that arrive out of display order, since the rebuilt SPS asks for no reordering (`docs/video.md`).
+- JD2022's intro video decodes and plays; see `docs/video.md` for what is still missing: counter output for streams that adapt probabilities (which also cannot go to the browser's decoder, so they decode in software), nvdec surfaces in guest memory, and VIC pitch alignment.

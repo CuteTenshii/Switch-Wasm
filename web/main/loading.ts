@@ -6,23 +6,37 @@ import { hideCrash } from './crash';
 const rootEl = $('loading');
 const iconEl = $<HTMLImageElement>('loading-icon');
 const titleEl = $('loading-title');
-const fillEl = $('loading-fill');
 const phaseEl = $('loading-phase');
 const detailEl = $('loading-detail');
 const dismissEl = $('loading-dismiss');
+const actionEl = $<HTMLButtonElement>('loading-action');
 
-function setBar(fraction: number | null): void {
-  rootEl.classList.toggle('is-determinate', fraction !== null);
-  fillEl.style.width = fraction === null ? '' : (fraction * 100).toFixed(1) + '%';
+/** A failure screen's way forward, shown beside Dismiss. */
+export interface LoadAction {
+  label: string;
+  run: () => void;
+}
+
+let action: LoadAction | null = null;
+
+/** The action the failure screen offers now; null once it is dismissed or another load begins. */
+export function currentAction(): LoadAction | null {
+  return action;
+}
+
+function setAction(next: LoadAction | null): void {
+  action = next;
+  actionEl.hidden = !next;
+  actionEl.textContent = next ? next.label : '';
 }
 
 export function beginLoad(title: string, phase: string, iconUrl?: string | null): void {
   hideCrash();
   rootEl.classList.remove('hidden', 'is-error');
-  setBar(null);
   phaseEl.textContent = phase;
   detailEl.textContent = '';
   dismissEl.hidden = true;
+  setAction(null);
   loadIdentity(title, iconUrl ?? null);
 }
 
@@ -35,34 +49,32 @@ export function loadIdentity(title: string, iconUrl: string | null): void {
 }
 
 export function loadPhase(phase: string, detail?: string): void {
-  setBar(null);
   phaseEl.textContent = phase;
   detailEl.textContent = detail || '';
 }
 
-export function loadProgress(done: number, total: number): void {
-  setBar(total > 0 ? Math.min(1, done / total) : null);
-}
-
 // The guest is running but has not presented a frame; offers a way out.
 export function awaitFirstFrame(): void {
-  loadPhase('booting', 'waiting for the first frame');
+  loadPhase('Booting', 'Waiting for the first frame');
   dismissEl.hidden = false;
 }
 
 export function endLoad(): void {
   rootEl.classList.add('hidden');
   dismissEl.hidden = true;
+  setAction(null);
 }
 
-// The load failed; the screen stays up showing why.
-export function failLoad(message: string): void {
+// The load failed; the screen stays up showing why, retitled when `title` is given.
+export function failLoad(message: string, title?: string, next?: LoadAction): void {
   rootEl.classList.remove('hidden');
   rootEl.classList.add('is-error');
-  setBar(1);
+  if (title) loadIdentity(title, null);
   phaseEl.textContent = message;
   detailEl.textContent = '';
   dismissEl.hidden = false;
+  setAction(next ?? null);
 }
 
 dismissEl.addEventListener('click', endLoad);
+actionEl.addEventListener('click', () => action?.run());

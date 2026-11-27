@@ -1,6 +1,7 @@
 // Stage-level end state and recovery options for a run that cannot continue.
 
 import { $ } from './dom';
+import { stopTitle } from './launch';
 import { saveLog } from './log';
 import { openPanel } from './shell';
 
@@ -32,8 +33,8 @@ saveEl.addEventListener('click', saveLog);
 
 $('crash-console').addEventListener('click', () => openPanel('console'));
 $('crash-stop').addEventListener('click', () => {
-  const stopEl = $<HTMLButtonElement>('btn-stop');
   hideCrash();
-  stopEl.focus();
-  stopEl.click();
+  // The crash screen held the focus, and Stop hides the run controls.
+  $('btn-stop').focus();
+  void stopTitle();
 });

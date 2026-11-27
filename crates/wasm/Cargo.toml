@@ -1,0 +1,103 @@
+[package]
+name = "switch-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WASM bindings exposing switch-core to the browser"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+switch-core = { path = "../core" }
+switch-vp9 = { path = "../vp9" }
+switch-relay-proto = { path = "../relay-proto" }
+
+[lib]
+crate-type = ["cdylib"]
+
+# Used directly so it can grow memory in larger steps (see `src/heap.rs`).
+[target.'cfg(target_arch = "wasm32")'.dependencies.dlmalloc]
+version = "0.2"
+
+# rustls's ring needs random bytes, which a browser gives through `crypto.getRandomValues`.
+[target.'cfg(target_arch = "wasm32")'.dependencies.ring]
+version = "0.17"
+features = ["wasm32_unknown_unknown_js"]
+
+# ...and the current time to check certificate dates, from `Date.now`.
+[target.'cfg(target_arch = "wasm32")'.dependencies.rustls-pki-types]
+version = "1"
+features = ["web"]
+
+[dependencies.switch-gpu]
+path = "../gpu"
+
+[dependencies.wasm-bindgen]
+version = "0.2"
+
+[dependencies.wasm-bindgen-futures]
+version = "0.4"
+
+[dependencies.js-sys]
+version = "0.3"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "BinaryType",
+  "Blob",
+  "Event",
+  "File",
+  "FileReaderSync",
+  "FileSystemDirectoryHandle",
+  "FileSystemFileHandle",
+  "FileSystemGetDirectoryOptions",
+  "FileSystemGetFileOptions",
+  "FileSystemHandle",
+  "FileSystemReadWriteOptions",
+  "FileSystemRemoveOptions",
+  "FileSystemSyncAccessHandle",
+  "IdbCursorWithValue",
+  "IdbDatabase",
+  "IdbFactory",
+  "IdbObjectStore",
+  "IdbOpenDbRequest",
+  "IdbRequest",
+  "IdbTransaction",
+  "IdbTransactionMode",
+  "ImageData",
+  "MessageEvent",
+  "OffscreenCanvas",
+  "Performance",
+  "OffscreenCanvasRenderingContext2d",
+  "StorageEstimate",
+  "StorageManager",
+  "WebSocket",
+  "Worker",
+  "WorkerGlobalScope",
+  "WorkerNavigator",
+  "AbortController",
+  "AbortSignal",
+  "DedicatedWorkerGlobalScope",
+  "DomStringList",
+  "CodecState",
+  "DomException",
+  "DomRectReadOnly",
+  "EncodedVideoChunk",
+  "EncodedVideoChunkInit",
+  "EncodedVideoChunkType",
+  "HardwareAcceleration",
+  "PlaneLayout",
+  "VideoDecoder",
+  "VideoDecoderConfig",
+  "VideoDecoderInit",
+  "VideoDecoderSupport",
+  "console",
+  "VideoFrame",
+  "VideoPixelFormat",
+]
+
+[dev-dependencies]
+switch-core = { path = "../core", features = ["testing"] }
+
+[lints]
+workspace = true

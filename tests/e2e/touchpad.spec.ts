@@ -1,5 +1,5 @@
 import type { CDPSession, Page } from '@playwright/test';
-import { aarch64Elf, bootElf, expect, openPage, test } from './page';
+import { aarch64Elf, ASM, bootElf, expect, openPage, test } from './page';
 
 test.use({ viewport: { width: 412, height: 860 }, isMobile: true, hasTouch: true });
 
@@ -24,7 +24,7 @@ test('the on-screen controller shows while a program runs, and a finger slides b
   await openPage(page);
   const pad = page.locator('#touchpad');
   await expect(pad).toBeHidden();
-  await bootElf(page, aarch64Elf([0x14000000]));
+  await bootElf(page, aarch64Elf([ASM.spin]), 'running');
   await expect(pad).toBeVisible();
   // The program never presents, so the first-frame wait has to be dismissed.
   await page.locator('#loading-dismiss').click();
@@ -35,7 +35,6 @@ test('the on-screen controller shows while a program runs, and a finger slides b
   const b = page.locator('[data-button="B"]');
   await touch.down(await centre(page, '[data-button="A"]'));
   await expect(a).toHaveClass(/is-down/);
-  await expect(page.locator('#input-state')).toHaveText('touch controls');
   await touch.move(await centre(page, '[data-button="B"]'));
   await expect(b).toHaveClass(/is-down/);
   await expect(a).not.toHaveClass(/is-down/);
@@ -62,7 +61,7 @@ test('a landscape phone hides the bars while a program runs, and the chevron bri
   const toggle = page.locator('#btn-chrome');
   await expect(bar).toBeVisible();
   await expect(toggle).toBeHidden();
-  await bootElf(page, aarch64Elf([0x14000000]));
+  await bootElf(page, aarch64Elf([ASM.spin]), 'running');
   await expect(bar).toBeHidden();
   await expect(page.locator('.statusbar')).toBeHidden();
   await page.locator('#loading-dismiss').click();

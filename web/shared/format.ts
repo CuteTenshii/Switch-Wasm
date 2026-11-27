@@ -6,6 +6,14 @@ export function fmtSize(n: number): string {
   return n + ' B';
 }
 
+// Coarser than `fmtSize`, since it updates several times a second.
+export function formatBytes(n: number): string {
+  if (n >= 1024 * 1024 * 1024) return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GiB';
+  if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MiB';
+  if (n >= 1024) return (n / 1024).toFixed(0) + ' KiB';
+  return n + ' B';
+}
+
 // A large count as 12.3M; M/B/T rather than SI prefixes, so it doesn't read as bytes.
 export function fmtCount(n: number): string {
   if (n >= 1e12) return (n / 1e12).toFixed(2) + 'T';

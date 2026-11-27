@@ -1,8 +1,7 @@
 // Installing the WebGPU backend between run slices, and replacing a lost device.
 
-import { switch_gpu_lost, switch_gpu_open, switch_gpu_report_json } from '@core/switch_wasm.js';
+import { switch_gpu_lost, switch_gpu_open } from '@core/switch_wasm.js';
 import { workerLog } from './log';
-import { parseOr } from './wasm';
 
 // GPU install state. Installed as the loop starts, between slices: opening a device
 // needs promises a slice cannot await.
@@ -24,11 +23,6 @@ const GPU_INTERLEAVE = false;
 const GPU_REOPENS = 3;
 let gpuReopens = 0;
 
-// Cheaper than parsing the JSON report after every slice.
-function gpuLost(): boolean {
-  return switch_gpu_lost();
-}
-
 export function tryGpu(): void {
   if (!GPU_BACKEND_READY) {
     if (gpu === 'no') {
@@ -37,7 +31,8 @@ export function tryGpu(): void {
     }
     return;
   }
-  if (gpu === 'done' && gpuLost()) {
+  // Cheaper than parsing the JSON report after every slice.
+  if (gpu === 'done' && switch_gpu_lost()) {
     if (gpuReopens >= GPU_REOPENS) {
       gpu = 'never';
       workerLog(
@@ -47,9 +42,8 @@ export function tryGpu(): void {
     }
     gpuReopens++;
     gpu = 'no';
-    const report = parseOr<{ lostBecause?: string | null }>(switch_gpu_report_json(), {});
-    const why = report.lostBecause ? ` (${report.lostBecause})` : '';
-    workerLog(`[gpu] the device was lost${why} - opening another (attempt ${gpuReopens})`, 'error');
+    // The core has logged why the device was lost.
+    workerLog(`[gpu] opening another device (attempt ${gpuReopens})`);
   }
   if (gpu !== 'no') return;
   gpu = 'trying';

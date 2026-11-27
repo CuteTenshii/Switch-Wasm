@@ -19,11 +19,11 @@ the TypeScript frontend plus the Rust core compiled to `wasm32-unknown-unknown`.
 
 ## Repository map
 
-- `crates/switch-core`: dependency-free emulator core, including the AArch64
+- `crates/core`: dependency-free emulator core, including the AArch64
   interpreter and JIT, loaders, services, memory, audio, and software GPU.
-- `crates/switch-gpu`: optional `wgpu` renderer behind the core renderer
+- `crates/gpu`: optional `wgpu` renderer behind the core renderer
   interface. The software renderer is its correctness reference.
-- `crates/switch-wasm`: browser bindings over the one global session. Buffers cross the
+- `crates/wasm`: browser bindings over the one global session. Buffers cross the
   boundary through WebAssembly linear memory. JSON for the page is written
   with `switch_core::json`; do not add serde merely for bindings.
 - `web/main`: DOM, persistence, controls, display, audio, and worker RPC.
@@ -44,56 +44,82 @@ other assets must be imported so Vite can hash and rewrite their URLs.
 
 ```sh
 bun install
-make test
 make wasm
 make assets
-bun run typecheck
-bun run eslint
-bun run stylelint
-bun run test:e2e
+cargo test --workspace
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
+bun run typecheck
+bun run lint
+bun run stylelint
+bun run test:unit
+bun run test:e2e
 ```
-
-- `bun install` also installs the pre-commit hook in `lefthook.yml`: CI's
-  rustfmt and clippy checks when Rust changed, the TypeScript typecheck and
-  ESLint when TypeScript did, and Stylelint when CSS did.
-- `node tools/jit_wasm_check.mjs` checks that the browser build runs the blocks
-  it emits, against the interpreter, after `make wasm`. Host tests cannot: the
-  offsets emitted code uses are wasm32's, and only the browser build has
-  anything that can compile a module.
-- `bun run test:e2e` runs the Playwright page tests in `tests/e2e` against
-  the dev server, so `make wasm` first (and `bunx playwright install
-  chromium` once per machine). CI runs them against `dist`.
-- `node tools/browser_boot.mjs <container> [--keys=…] [--title-keys=…]
-  [--seconds=N] [--out=log.txt]` boots a container in the built site in a real
-  browser and saves what the page and its worker said. It serves `dist` itself,
-  so run `make assets` first. The browser is Playwright's
-  (`bunx playwright install chromium`, once per machine); `--headed` opens a
-  window, which gets the machine's GPU.
-- `make all` runs the Rust tests and builds the browser site.
-- `make wasm` builds `switch-wasm` with the WebGPU feature in cargo's dev
-  profile and runs `wasm-bindgen`. The installed CLI version must match
-  `Cargo.lock`. `make wasm-release` is the same in the release profile, the
-  only build performance results are quoted from.
-- Both wasm builds use the nightly the `Makefile` pins (`NIGHTLY`), with
-  `rust-src`, because the core's memory is shared between workers and stable's
-  prebuilt std has no wasm atomics. Host builds, tests and clippy stay on
-  stable. The `Makefile` prints the `rustup` command when that nightly is missing.
-- `make assets` builds the release WebAssembly and then the Vite site in
-  `dist`.
-- There are two cargo profiles, `dev` and `release`. Host examples that run a
-  title use `--release`.
-- `bun run dev` serves the source on port 8000 after `make wasm`.
-- `bun run preview` serves `dist`.
-- Vite does not type-check. Run `bun run typecheck` explicitly.
-- `bun run eslint` lints the TypeScript and tools (typescript-eslint with
-  type information, and `@stylistic`); `bun run stylelint` lints the CSS.
-  Both take `--fix` for most stylistic findings.
 
 Use the narrowest relevant check while iterating, then run checks proportional
 to the changed surface. Browser-facing changes need a WebAssembly build or an
 actual browser run, not just host tests.
+
+### Checks
+
+- `bun install` also installs the pre-commit hook in `lefthook.yml`: CI's
+  rustfmt and clippy checks when Rust changed, the TypeScript typecheck and
+  Oxlint when TypeScript did, and Stylelint when CSS did.
+- Vite does not type-check. Run `bun run typecheck` explicitly.
+- `bun run lint` lints the TypeScript and tools with Oxlint, type-aware; `bun run stylelint` lints the CSS.
+- `bun run test:unit` runs the `bun test` unit tests in `tests/unit` for the
+  `web` modules that need no page: zip, file detection, formatting and display
+  metrics, and CRC-32. They need no wasm build.
+- `bun run test:e2e` runs the Playwright page tests in `tests/e2e` against
+  the dev server, so `make wasm` first (and `bunx playwright install
+  chromium` once per machine). CI runs them against `dist`.
+- `node tools/jit_wasm_check.mjs` checks that the browser build runs the blocks
+  it emits, against the interpreter, after `make wasm`. Host tests cannot: the
+  offsets emitted code uses are wasm32's, and only the browser build has
+  anything that can compile a module.
+
+### Builds
+
+- `make` with no target is `make assets`.
+- `make wasm` builds `switch-wasm`, with its WebGPU backend, in cargo's dev
+  profile and runs `wasm-bindgen`. The installed CLI version must match
+  `Cargo.lock`. `make wasm-release` is the same in the release profile, the
+  only build performance results are quoted from.
+- `make assets` builds the release WebAssembly and then the Vite site in
+  `dist`.
+- There are two cargo profiles, `dev` and `release`. Host examples that run a
+  title use `--release`.
+- Both wasm builds use the nightly the `Makefile` names (`NIGHTLY`), with
+  `rust-src`; see `docs/tooling.md`. Host builds, tests and clippy stay on
+  stable. The `Makefile` prints the `rustup` command when that nightly is missing.
+- `ring`, under `rustls`, compiles C for wasm32, so the build needs a `clang`
+  that targets it. On macOS, Apple's `ar` writes an empty archive for wasm
+  objects and the wasm link fails on `ring_core_*` symbols. Put Homebrew LLVM's
+  tools in your user-level `~/.cargo/config.toml`: `[env]` with
+  `CC_wasm32_unknown_unknown = "/opt/homebrew/opt/llvm/bin/clang"` and
+  `AR_wasm32_unknown_unknown = "/opt/homebrew/opt/llvm/bin/llvm-ar"`. The repo
+  does not set them, and Linux needs nothing.
+
+### Running
+
+- `bun run dev` serves the source on port 8000 after `make wasm`.
+- `bun run preview` serves `dist`.
+- `node tools/browser_boot.mjs <container> [--keys=…] [--title-keys=…]
+  [--seconds=N] [--out=log.txt]` boots a container in the built site in a real
+  browser and saves what the page and its worker said. It serves `dist` itself,
+  so run `make assets` first. The browser is Playwright's
+  (`bunx playwright install chromium`, once per machine). Flags are in
+  `docs/tooling.md`.
+- The GPU fallbacks to fix in a title are the ones a browser run reports: the
+  Rendering section that `tools/browser_boot.mjs` saves lists every fallback
+  reason with its count. Get that list before changing anything. Native
+  `screenshot` runs are native wgpu, not the browser's WebGPU; use them to
+  narrow down a fallback the browser reported, not to find which ones exist.
+- Before reproducing a fault or fallback in a title, find out how the title
+  gets there: a menu, a prompt or a scene that waits for input may have to be
+  passed (`--press`, `--draw-from-frame`, shots to look at the screen) before
+  the fault can occur. Check the screenshots as the run goes; running to a
+  large frame count blind only waits for something that input never triggers.
 
 ## Browser invariants
 
@@ -107,7 +133,7 @@ actual browser run, not just host tests.
 - Container offsets remain `u64` end to end. A cast to `usize` can truncate
   offsets above 4 GiB on wasm32.
 - Never load an entire NSP, XCI, NCA, or RomFS into WebAssembly memory. Preserve
-  the `ByteSource` range-reading stack and per-file caching.
+  the `ByteSource` range-reading stack and the shared chunk cache.
 - Do not retain typed-array views across operations that can grow WebAssembly
   memory. Free staging buffers after use.
 - Stop must invalidate the main-thread session before the worker frees the
@@ -118,6 +144,9 @@ actual browser run, not just host tests.
 - Anything users need to see must use the emulator diagnostic channel. Native
   stderr and environment variables are unavailable on
   `wasm32-unknown-unknown`.
+- Crates compiled to wasm (`switch-core`, `switch-gpu`, `switch-wasm`) never read
+  environment variables, tests included. Only `examples/` and host tools may,
+  and they pass the value in as an argument.
 
 ## Change discipline
 
@@ -129,8 +158,9 @@ actual browser run, not just host tests.
   an assembler rather than hand-deriving expected values. The interpreter is
   the JIT correctness reference.
 - Do not optimize from host timing alone. Browser performance claims require the
-  produced WebAssembly artifact and `tools/wasm_bench.mjs`; native examples are
-  for diagnosis and work counts.
+  produced WebAssembly artifact running in a headed browser
+  (`tools/browser_boot.mjs`, `tools/profile_ingame.mjs`); native examples are for
+  diagnosis and work counts.
 - Keep generated output, game images, keys, firmware, and other copyrighted or
   secret material out of the repository.
 - Do not edit unrelated user changes. `dist` and Cargo target output are build

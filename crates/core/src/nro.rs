@@ -1,0 +1,1010 @@
+//! Homebrew NRO loader: a header, `.text`/`.rodata`/`.data` loaded contiguously, then BSS.
+//!
+//! Header layout (offsets relative to the file start):
+//!
+//! ```text
+//! 0x00  magic "NRO0"
+//! 0x04  version (0, 1 or 2)
+//! 0x08  total NRO size
+//! 0x0C  flags
+//! 0x10  text: u32 offset, u32 size
+//! 0x18  ro:   u32 offset, u32 size
+//! 0x20  data: u32 offset, u32 size
+//! 0x28  bss size (u32)
+//! 0x2C  reserved
+//! 0x30  build id [0x20]
+//! 0x50  (version 2 only) "NRO2" header
+//! ```
+//!
+//! `elf2nro`'s optional asset section, at the header's total size:
+//!
+//! ```text
+//! 0x00  magic "ASET"
+//! 0x04  version (0)
+//! 0x08  icon:  u64 offset, u64 size
+//! 0x18  nacp:  u64 offset, u64 size
+//! 0x28  romfs: u64 offset, u64 size
+//! ```
+//!
+//! Offsets are relative to the asset header; absent parts are zeroed.
+
+use crate::mem::Memory;
+use crate::nsp::read_u32;
+use crate::source::ByteSource;
+use crate::{Error, Result};
+
+pub const NRO0_MAGIC: u32 = 0x304f524e; // "NRO0"
+pub const NRO2_MAGIC: u32 = 0x32524f4e; // "NRO2"
+pub const ASET_MAGIC: u32 = 0x54455341; // "ASET"
+/// Where HBL maps NROs; homebrew is linked against it.
+pub const NRO_BASE: u32 = 0x0800_0000;
+const HEADER_MIN: usize = 0x50;
+/// Largest icon or NACP [`assets_from_source`] reads; real ones are a few hundred KiB at most.
+const MAX_ASSET_PART: u64 = 16 << 20;
+const ASSET_HEADER_SIZE: usize = 0x38;
+const ASSET_VERSION: u32 = 0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NroHeader {
+    /// File offset of the "NRO0" magic; nonzero after a boot stub.
+    pub magic_offset: u32,
+    pub version: u32,
+    pub nro_size: u32,
+    pub flags: u32,
+    pub text_offset: u32,
+    pub text_size: u32,
+    pub ro_offset: u32,
+    pub ro_size: u32,
+    pub data_offset: u32,
+    pub data_size: u32,
+    pub bss_size: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadedNro {
+    pub base: u32,
+    pub entry: u32,
+    pub text: Segment,
+    pub ro: Segment,
+    pub data: Segment,
+    pub bss_size: u32,
+    pub build_id: [u8; 0x20],
+    pub is_64bit: bool,
+    /// Homebrew environment block passed in the crt0's `x0`, or 0.
+    pub env_addr: u32,
+}
+
+/// The blobs after an NRO's image; each is empty when absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Assets<'a> {
+    /// A 256x256 JPEG in every build seen so far.
+    pub icon: &'a [u8],
+    /// A `control.nacp`.
+    pub nacp: &'a [u8],
+    /// Unread: the NRO on the emulated SD card already serves it.
+    pub romfs: &'a [u8],
+}
+
+pub fn assets(data: &[u8]) -> Option<Assets<'_>> {
+    NroHeader::parse(data).ok()?.assets(data)
+}
+
+/// An NRO's icon and `control.nacp`, read out of its source; each is empty when absent.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AssetData {
+    pub icon: Vec<u8>,
+    pub nacp: Vec<u8>,
+}
+
+/// [`assets`] read by range from `src`: the header, the asset header and the two parts, so
+/// the image before them is never read. `None` when there is no asset section.
+pub fn assets_from_source<S: ByteSource>(src: &S) -> Option<AssetData> {
+    let head = src
+        .read_vec(0, src.len().min(0x100 + HEADER_MIN as u64))
+        .ok()?;
+    let h = find_magic(&head, NRO0_MAGIC)?;
+    if head.len() < h + 0x0C {
+        return None;
+    }
+    let base = u64::from(read_u32(&head, h + 0x08));
+    let header = src.read_vec(base, ASSET_HEADER_SIZE as u64).ok()?;
+    if read_u32(&header, 0) != ASET_MAGIC || read_u32(&header, 4) > ASSET_VERSION {
+        return None;
+    }
+    let part = |index: usize| -> Vec<u8> {
+        let entry = 8 + index * 16;
+        let size = read_u64(&header, entry + 8);
+        base.checked_add(read_u64(&header, entry))
+            .filter(|start| {
+                size <= MAX_ASSET_PART
+                    && start.checked_add(size).is_some_and(|end| end <= src.len())
+            })
+            .and_then(|start| src.read_vec(start, size).ok())
+            .unwrap_or_default()
+    };
+    Some(AssetData {
+        icon: part(0),
+        nacp: part(1),
+    })
+}
+
+/// Kept out of the image so crt0 BSS zeroing never touches it.
+pub const ENV_BLOCK_ADDR: u32 = 0x0010_0000;
+
+/// The NRO's SD card path, advertised as `argv[0]` for `romfsMountSelf`.
+pub const HOMEBREW_NRO_PATH: &str = "sdmc:/switch/homebrew.nro";
+
+/// Entry keys of the libnx homebrew ABI (`nx/source/runtime/env.h`).
+const ENTRY_MAIN_THREAD_HANDLE: u32 = 1;
+const ENTRY_NEXT_LOAD_PATH: u32 = 2;
+const ENTRY_ARGV: u32 = 5;
+const ENTRY_HOS_VERSION: u32 = 16;
+const ENTRY_END_OF_LIST: u32 = 0;
+
+/// `EntryType_NextLoadPath` buffers; hbmenu's `launchInit()` requires them.
+pub const NEXT_LOAD_PATH_ADDR: u32 = ENV_BLOCK_ADDR + 0x400;
+pub const NEXT_LOAD_ARGV_ADDR: u32 = ENV_BLOCK_ADDR + 0x800;
+/// Size of each, as hbloader sizes them.
+pub const NEXT_LOAD_BUFFER_SIZE: usize = 0x300;
+
+/// Write a minimal homebrew ABI environment block for the crt0's `envSetup`,
+/// using 24-byte `ConfigEntry`s. Returns [`ENV_BLOCK_ADDR`].
+pub fn setup_env_block(mem: &Memory) -> u32 {
+    let a = ENV_BLOCK_ADDR;
+    // MainThreadHandle (Key 1): required by __libnx_init_thread.
+    let _ = mem.write_u32(u64::from(a), ENTRY_MAIN_THREAD_HANDLE);
+    let _ = mem.write_u32(u64::from(a + 4), 0);
+    let _ = mem.write_u64(u64::from(a + 8), 1);
+    let _ = mem.write_u64(u64::from(a + 16), 0);
+    // HosVersion: 0xFFFFFFFF ("current") with the "ATMOSPHR" magic.
+    let _ = mem.write_u32(u64::from(a + 24), ENTRY_HOS_VERSION);
+    let _ = mem.write_u32(u64::from(a + 28), 0);
+    let _ = mem.write_u64(u64::from(a + 32), 0xFFFF_FFFF);
+    let _ = mem.write_u64(u64::from(a + 40), 0x4154_4D4F_5350_4852); // "ATMOSPHR"
+    let _ = mem.write_u32(u64::from(a + 48), ENTRY_ARGV);
+    let _ = mem.write_u32(u64::from(a + 52), 0);
+    let _ = mem.write_u64(u64::from(a + 56), 0);
+    let _ = mem.write_u64(u64::from(a + 64), u64::from(ARGV_STRING_ADDR));
+    // NextLoadPath (Key 2): { path buffer, argv buffer }.
+    let _ = mem.write_u32(u64::from(a + 72), ENTRY_NEXT_LOAD_PATH);
+    let _ = mem.write_u32(u64::from(a + 76), 0);
+    let _ = mem.write_u64(u64::from(a + 80), u64::from(NEXT_LOAD_PATH_ADDR));
+    let _ = mem.write_u64(u64::from(a + 88), u64::from(NEXT_LOAD_ARGV_ADDR));
+    let _ = mem.map_zero(u64::from(NEXT_LOAD_PATH_ADDR), NEXT_LOAD_BUFFER_SIZE as u64);
+    let _ = mem.map_zero(u64::from(NEXT_LOAD_ARGV_ADDR), NEXT_LOAD_BUFFER_SIZE as u64);
+    let _ = mem.write_u32(u64::from(a + 96), ENTRY_END_OF_LIST);
+    let _ = mem.write_u32(u64::from(a + 100), 0);
+    let _ = mem.write_u64(u64::from(a + 104), 0);
+    let _ = mem.write_u64(u64::from(a + 112), 0);
+    write_argv0(mem, HOMEBREW_NRO_PATH);
+    a
+}
+
+/// Where the environment block keeps the argument string, up to the next-load buffers.
+const ARGV_STRING_ADDR: u32 = ENV_BLOCK_ADDR + 0x100;
+const ARGV_STRING_MAX: usize = (NEXT_LOAD_PATH_ADDR - ARGV_STRING_ADDR) as usize - 1;
+
+/// Make `path` the homebrew's `argv[0]`, the path it reads files beside.
+/// Longer than the block holds, it is cut short.
+pub fn write_argv0(mem: &Memory, path: &str) {
+    let path = &path.as_bytes()[..path.len().min(ARGV_STRING_MAX)];
+    let _ = mem.write_bytes(u64::from(ARGV_STRING_ADDR), path);
+    let _ = mem.write_u8(u64::from(ARGV_STRING_ADDR + path.len() as u32), 0);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Segment {
+    pub file_offset: u32,
+    pub file_size: u32,
+    pub mem_addr: u32,
+}
+
+impl NroHeader {
+    /// Parse an NRO header, scanning the first 0x100 bytes for the magic.
+    pub fn parse(data: &[u8]) -> Result<NroHeader> {
+        if data.len() < HEADER_MIN {
+            return Err(Error::Truncated {
+                what: "NRO header".into(),
+                expected: HEADER_MIN,
+                got: data.len(),
+            });
+        }
+        let magic_at = find_magic(data, NRO0_MAGIC).ok_or(Error::BadMagic {
+            what: "NRO".into(),
+            found: crate::nsp::read_u32(data, 0),
+        })?;
+        let h = magic_at;
+        let magic = crate::nsp::read_u32(data, h);
+        if magic != NRO0_MAGIC {
+            return Err(Error::BadMagic {
+                what: "NRO".into(),
+                found: magic,
+            });
+        }
+        let version = crate::nsp::read_u32(data, h + 0x04);
+        if version > 2 {
+            return Err(Error::Nro(format!("unsupported NRO version {}", version)));
+        }
+        let text_offset = crate::nsp::read_u32(data, h + 0x10);
+        let text_size = crate::nsp::read_u32(data, h + 0x14);
+        let ro_offset = crate::nsp::read_u32(data, h + 0x18);
+        let ro_size = crate::nsp::read_u32(data, h + 0x1C);
+        let data_offset = crate::nsp::read_u32(data, h + 0x20);
+        let data_size = crate::nsp::read_u32(data, h + 0x24);
+
+        let nro_size = crate::nsp::read_u32(data, h + 0x08);
+        if nro_size as usize > data.len() {
+            return Err(Error::Nro(format!(
+                "header claims {} bytes but file has {}",
+                nro_size,
+                data.len()
+            )));
+        }
+        for (name, off, size) in [
+            ("text", text_offset, text_size),
+            ("ro", ro_offset, ro_size),
+            ("data", data_offset, data_size),
+        ] {
+            if off as usize + size as usize > nro_size as usize {
+                return Err(Error::Nro(format!(
+                    "{} segment [{:#x}, {:#x}) out of bounds (nro_size {:#x})",
+                    name,
+                    off,
+                    off + size,
+                    nro_size
+                )));
+            }
+        }
+
+        Ok(NroHeader {
+            magic_offset: h as u32,
+            version,
+            nro_size,
+            flags: crate::nsp::read_u32(data, h + 0x0C),
+            text_offset,
+            text_size,
+            ro_offset,
+            ro_size,
+            data_offset,
+            data_size,
+            bss_size: crate::nsp::read_u32(data, h + 0x28),
+        })
+    }
+
+    pub fn is_64bit(&self, data: &[u8]) -> bool {
+        if self.version >= 2 && data.len() >= self.magic_offset as usize + 0x64 {
+            let is_64 = data[self.magic_offset as usize + 0x60];
+            if is_64 == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The asset section, at `nro_size` from the file start. Parts running past
+    /// the file are dropped.
+    pub fn assets<'a>(&self, data: &'a [u8]) -> Option<Assets<'a>> {
+        let base = self.nro_size as usize;
+        if data.len() < base + ASSET_HEADER_SIZE
+            || read_u32(data, base) != ASET_MAGIC
+            || read_u32(data, base + 4) > ASSET_VERSION
+        {
+            return None;
+        }
+        let part = |index: usize| -> &'a [u8] {
+            let entry = base + 8 + index * 16;
+            let start = base.wrapping_add(read_u64(data, entry) as usize);
+            let end = start.wrapping_add(read_u64(data, entry + 8) as usize);
+            data.get(start..end).unwrap_or_default()
+        };
+        Some(Assets {
+            icon: part(0),
+            nacp: part(1),
+            romfs: part(2),
+        })
+    }
+
+    pub fn build_id(&self, data: &[u8]) -> [u8; 0x20] {
+        let mut id = [0u8; 0x20];
+        let start = self.magic_offset as usize + 0x30;
+        let end = (start + 0x20).min(data.len());
+        id[..end - start].copy_from_slice(&data[start..end]);
+        id
+    }
+}
+
+fn find_magic(data: &[u8], magic: u32) -> Option<usize> {
+    let magic_le = magic.to_le_bytes();
+    data[..data.len().min(0x100)]
+        .windows(4)
+        .position(|w| w == &magic_le[..])
+}
+
+fn read_u64(data: &[u8], off: usize) -> u64 {
+    let mut b = [0u8; 8];
+    let n = (data.len().saturating_sub(off)).min(8);
+    b[..n].copy_from_slice(&data[off..off + n]);
+    u64::from_le_bytes(b)
+}
+
+fn read_cstr(data: &[u8], off: usize) -> &str {
+    if off >= data.len() {
+        return "";
+    }
+    let end = data[off..]
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(data.len() - off);
+    std::str::from_utf8(&data[off..off + end]).unwrap_or("")
+}
+
+fn elf_hash(name: &str) -> u32 {
+    let mut h: u32 = 0;
+    for &b in name.as_bytes() {
+        h = (h << 4).wrapping_add(b as u32);
+        let g = h & 0xF000_0000;
+        if g != 0 {
+            h ^= g >> 24;
+            h &= !g;
+        }
+    }
+    h
+}
+
+/// `st_value` of `name` via the legacy DT_HASH tables, relative to the load base.
+pub fn symbol_value(data: &[u8], name: &str) -> Option<u64> {
+    let word = |at: usize| -> Option<u32> {
+        let bytes = data.get(at..at.checked_add(4)?)?;
+        Some(u32::from_le_bytes(bytes.try_into().ok()?))
+    };
+    let mod0 = find_mod0(data)?;
+    let dyn_off = mod0.wrapping_add(word(mod0 + 4)? as usize);
+    let mut symtab = 0u64;
+    let mut strtab = 0u64;
+    let mut hash_off = 0u64;
+    let mut off = dyn_off;
+    while off + 16 <= data.len() {
+        let tag = read_u64(data, off);
+        let val = read_u64(data, off + 8);
+        off += 16;
+        if tag == 0 {
+            break;
+        }
+        match tag {
+            0x06 => symtab = val,   // DT_SYMTAB
+            0x05 => strtab = val,   // DT_STRTAB
+            0x04 => hash_off = val, // DT_HASH
+            _ => {}
+        }
+    }
+    if symtab == 0 || strtab == 0 || hash_off == 0 {
+        return None;
+    }
+    let symtab = symtab as usize;
+    let strtab = strtab as usize;
+    let hash_off = hash_off as usize;
+    let nbucket = word(hash_off)? as usize;
+    let nchain = word(hash_off.checked_add(4)?)? as usize;
+    // lld writes a table with no buckets for a module that exports nothing (Taisei).
+    if nbucket == 0 {
+        return None;
+    }
+    let buckets_off = hash_off + 8;
+    let chains_off = buckets_off.checked_add(nbucket.checked_mul(4)?)?;
+    if chains_off.checked_add(nchain.checked_mul(4)?)? > data.len() {
+        return None;
+    }
+
+    let h = elf_hash(name) as usize;
+    let mut idx = word(buckets_off + 4 * (h % nbucket))? as usize;
+    // A chain visits each symbol at most once; more steps than symbols means a cycle.
+    for _ in 0..nchain {
+        if idx == 0 || idx >= nchain {
+            break;
+        }
+        let sym_off = symtab.checked_add(idx * 24)?;
+        if sym_off.checked_add(24)? > data.len() {
+            break;
+        }
+        let name_off = word(sym_off)? as usize;
+        if read_cstr(data, strtab.saturating_add(name_off)) == name {
+            return Some(read_u64(data, sym_off + 8));
+        }
+        idx = word(chains_off + 4 * idx)? as usize;
+    }
+    if idx == 0 {
+        let sym_off = symtab;
+        if sym_off.checked_add(24)? <= data.len() {
+            let name_off = word(sym_off)? as usize;
+            if read_cstr(data, strtab.saturating_add(name_off)) == name {
+                return Some(read_u64(data, sym_off + 8));
+            }
+        }
+    }
+    None
+}
+
+/// Force libtransistor's live `_trn_runconf_heap_mode` (found by decoding
+/// `_sbrk_r`) to NORMAL, so a tiny OVERRIDE heap does not fail the first malloc.
+fn patch_libtransistor_runconf(mem: &Memory, data: &[u8], base: u32, text_end: u32) -> Result<()> {
+    if let Some(off) = symbol_value(data, "_trn_runconf_heap_mode") {
+        let addr = base.wrapping_add(off as u32);
+        let _ = mem.write_u32(u64::from(addr), 1);
+    }
+    let _ = patch_sbrk_runconf_via_code(mem, base, text_end);
+    Ok(())
+}
+
+fn read_insn(mem: &Memory, addr: u32) -> Option<u32> {
+    mem.read_u32(u64::from(addr)).ok()
+}
+
+fn is_svc(insn: u32, imm: u16) -> bool {
+    insn == (0xD4000001 | ((imm as u32) << 5))
+}
+
+fn decode_bl_target(pc: u32, insn: u32) -> Option<u32> {
+    if insn & 0xFC000000 != 0x94000000 {
+        return None;
+    }
+    let imm26 = insn & 0x03FFFFFF;
+    let offset = if imm26 < 0x02000000 {
+        imm26 as i32
+    } else {
+        (imm26 as i32) - 0x04000000
+    };
+    Some(pc.wrapping_add((offset * 4) as u32))
+}
+
+fn decode_adrp_target(pc: u32, insn: u32) -> Option<u32> {
+    if insn & 0x9F000000 != 0x90000000 {
+        return None;
+    }
+    let immhi = (insn >> 5) & 0x7FFFF;
+    let immlo = (insn >> 29) & 0x3;
+    let imm = ((immhi << 2) | immlo) as i32;
+    let imm = if imm >= (1 << 20) {
+        imm - (1 << 21)
+    } else {
+        imm
+    };
+    let page = (pc & !0xFFFu32).wrapping_add((imm << 12) as u32);
+    Some(page)
+}
+
+fn decode_ldr_x_imm_offset(insn: u32) -> Option<u32> {
+    // ldr Xt, [Xn, #imm12], scaled by 8.
+    if insn & 0xFFC00000 == 0xF9400000 {
+        Some(((insn >> 10) & 0xFFF) * 8)
+    } else {
+        None
+    }
+}
+
+fn decode_cmp_w_imm(insn: u32) -> Option<(u8, u16)> {
+    // subs wzr, wn, #imm
+    if insn & 0xFF80001F != 0x7100001F {
+        return None;
+    }
+    let rn = ((insn >> 5) & 0x1F) as u8;
+    let imm = ((insn >> 10) & 0xFFF) as u16;
+    Some((rn, imm))
+}
+
+fn is_b_cond(insn: u32, cond: u8) -> bool {
+    insn & 0xFF00000F == (0x54000000 | (cond as u32))
+}
+
+/// Find `_sbrk_r` from its `bl` to `svc #1` and patch the heap mode it reads.
+fn patch_sbrk_runconf_via_code(mem: &Memory, base: u32, text_end: u32) -> Result<()> {
+    let mut svc_addr = None;
+    let mut addr = base;
+    while addr < text_end {
+        if let Some(insn) = read_insn(mem, addr) {
+            if is_svc(insn, 1) {
+                svc_addr = Some(addr);
+                break;
+            }
+        }
+        addr = addr.wrapping_add(4);
+    }
+    let svc_addr = match svc_addr {
+        Some(a) => a,
+        None => return Ok(()),
+    };
+
+    let mut bl_addr = None;
+    addr = base;
+    while addr < text_end {
+        if let Some(insn) = read_insn(mem, addr) {
+            if let Some(tgt) = decode_bl_target(addr, insn) {
+                if tgt == svc_addr {
+                    bl_addr = Some(addr);
+                    break;
+                }
+            }
+        }
+        addr = addr.wrapping_add(4);
+    }
+    let bl_addr = match bl_addr {
+        Some(a) => a,
+        None => return Ok(()),
+    };
+
+    // Walk back to the function start.
+    let mut func_start = base;
+    addr = bl_addr;
+    while addr > base {
+        addr = addr.wrapping_sub(4);
+        if let Some(insn) = read_insn(mem, addr) {
+            if insn & 0xFFFFFC1F == 0xD65F0000 {
+                func_start = addr.wrapping_add(4);
+                break;
+            }
+            // stp x29, x30, [sp, #imm]! prologue
+            if insn & 0xFFE07FFF == 0xA9007BFD {
+                func_start = addr;
+                break;
+            }
+        }
+    }
+
+    // Scan the function for the mode-test pattern:
+    //   adrp  xN, ...
+    //   ldr   xN, [xN, #off]      ; load pointer to mode
+    //   ldr   wN, [xN]            ; load mode value
+    //   cmp   wN, #2
+    //   b.eq  override_path
+    //   cmp   wN, #1
+    //   b.ne  error_path
+    addr = func_start;
+    while addr < bl_addr {
+        let window = [
+            read_insn(mem, addr),
+            read_insn(mem, addr.wrapping_add(4)),
+            read_insn(mem, addr.wrapping_add(8)),
+            read_insn(mem, addr.wrapping_add(12)),
+            read_insn(mem, addr.wrapping_add(16)),
+            read_insn(mem, addr.wrapping_add(20)),
+            read_insn(mem, addr.wrapping_add(24)),
+        ];
+        if let [Some(i0), Some(i1), Some(i2), Some(i3), Some(i4), Some(i5), Some(i6)] = window {
+            if let Some(page) = decode_adrp_target(addr, i0) {
+                if let Some(off) = decode_ldr_x_imm_offset(i1) {
+                    let ptr_addr = page.wrapping_add(off);
+                    let reg = i1 & 0x1F;
+                    let i2_is_ldrw = i2 & 0xFFC00000 == 0xB9400000;
+                    let i2_reg = i2 & 0x1F;
+                    let i2_base = (i2 >> 5) & 0x1F;
+                    if i2_is_ldrw && i2_base == reg && ((i2 >> 10) & 0xFFF) == 0 {
+                        if let Some((cmp_reg, imm)) = decode_cmp_w_imm(i3) {
+                            if cmp_reg == i2_reg as u8 && imm == 2 && is_b_cond(i4, 0) {
+                                if let Some((cmp_reg2, imm2)) = decode_cmp_w_imm(i5) {
+                                    if cmp_reg2 == i2_reg as u8 && imm2 == 1 && is_b_cond(i6, 1) {
+                                        return mem.write_u32(u64::from(ptr_addr), 1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        addr = addr.wrapping_add(4);
+    }
+
+    Ok(())
+}
+
+/// The MOD0 header, usually near the end of the image.
+fn find_mod0(data: &[u8]) -> Option<usize> {
+    let magic = 0x30444f4du32.to_le_bytes(); // "MOD0"
+    data.windows(4).position(|w| w == &magic[..])
+}
+
+/// Apply RELR relocations, stopping at the first backward or out-of-range
+/// address (some sections end in garbage).
+fn apply_relr(mem: &Memory, base: u32, end_addr: u32, relr: &[u8]) -> Result<()> {
+    let mut addr: u32 = 0;
+    let mut last: u32 = 0;
+    for chunk in relr.chunks(8) {
+        let mut bytes = [0u8; 8];
+        bytes[..chunk.len()].copy_from_slice(chunk);
+        let word = u64::from_le_bytes(bytes);
+        if word & 1 == 0 {
+            addr = base.wrapping_add(word as u32);
+            if addr < last || addr >= end_addr {
+                return Ok(());
+            }
+            last = addr;
+            let cur = mem.read_u64(u64::from(addr))?;
+            mem.write_u64(u64::from(addr), cur.wrapping_add(base as u64))?;
+        } else {
+            if addr >= end_addr {
+                return Ok(());
+            }
+            for bit in 1..64u32 {
+                if word & (1u64 << bit) != 0 {
+                    let a = addr.wrapping_add(8 * (bit - 1));
+                    if a < last || a >= end_addr {
+                        return Ok(());
+                    }
+                    last = a;
+                    let cur = mem.read_u64(u64::from(a))?;
+                    mem.write_u64(u64::from(a), cur.wrapping_add(base as u64))?;
+                }
+            }
+            addr = addr.wrapping_add(8 * 63);
+        }
+    }
+    Ok(())
+}
+
+/// Apply the image's RELR relocations, if any.
+fn apply_nro_relocations(mem: &Memory, data: &[u8], image_end: u32) -> Result<()> {
+    let mod0 = match find_mod0(data) {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+    let dyn_off = mod0.wrapping_add(read_u32(data, mod0 + 4) as usize);
+    if dyn_off + 16 > data.len() {
+        return Ok(());
+    }
+    let mut off = dyn_off;
+    let mut relr_off = 0u32;
+    let mut relr_size = 0u32;
+    let mut relr_count = 0u64;
+    loop {
+        if off + 16 > data.len() {
+            break;
+        }
+        let tag = read_u64(data, off);
+        let val = read_u64(data, off + 8);
+        off += 16;
+        if tag == 0 {
+            break;
+        }
+        match tag {
+            0x24 => relr_off = val as u32,  // DT_RELR
+            0x23 => relr_count = val,       // DT_RELRCOUNT
+            0x25 => relr_size = val as u32, // DT_RELRSZ
+            _ => {}
+        }
+    }
+    // hbmenu writes the byte size into DT_RELRCOUNT; take the larger.
+    let size = relr_size.max(relr_count as u32);
+    let start = relr_off as usize;
+    let end = start.saturating_add(size as usize);
+    if size > 0 && end <= data.len() {
+        apply_relr(mem, NRO_BASE, image_end, &data[start..end])?;
+    }
+    Ok(())
+}
+
+/// The "HOME BREW" self-relocating crt0, which applies RELR itself.
+fn has_self_relocating_crt0(data: &[u8]) -> bool {
+    data.len() >= 0x10
+        && read_u32(data, 0x08) == 0x454d_4f48 // "HOME"
+        && read_u32(data, 0x0C) == 0x5745_5242 // "BREW"
+}
+
+/// Load an NRO into `mem` at [`NRO_BASE`], returning its entry point.
+pub fn load_nro(mem: &Memory, data: &[u8]) -> Result<LoadedNro> {
+    let h = NroHeader::parse(data)?;
+    let build_id = h.build_id(data);
+    let is_64bit = h.is_64bit(data);
+
+    let base = NRO_BASE;
+    let text_addr = base;
+    let ro_addr = text_addr.wrapping_add(h.text_size);
+    let data_addr = ro_addr.wrapping_add(h.ro_size);
+    let end_addr = data_addr.wrapping_add(h.data_size);
+
+    copy_segment(mem, data, h.text_offset, h.text_size, text_addr)?;
+    copy_segment(mem, data, h.ro_offset, h.ro_size, ro_addr)?;
+    copy_segment(mem, data, h.data_offset, h.data_size, data_addr)?;
+    mem.map_zero(u64::from(end_addr), u64::from(h.bss_size))?;
+    let image_end = end_addr.wrapping_add(h.bss_size);
+    if !has_self_relocating_crt0(data) {
+        apply_nro_relocations(mem, data, image_end)?;
+    }
+    let text_end = text_addr.wrapping_add(h.text_size);
+    let _ = patch_libtransistor_runconf(mem, data, base, text_end);
+    // Lock `.text`; `.rodata` stays writable for a crt0 patching `.data.rel.ro`.
+    mem.mark_readonly(u64::from(text_addr), u64::from(ro_addr));
+    // See `Memory::mark_module`.
+    mem.mark_module(
+        (u64::from(text_addr), u64::from(data_addr)),
+        (u64::from(data_addr), u64::from(image_end)),
+        false,
+    );
+
+    let env_addr = if has_self_relocating_crt0(data) {
+        setup_env_block(mem)
+    } else {
+        0
+    };
+
+    Ok(LoadedNro {
+        base,
+        entry: text_addr,
+        text: Segment {
+            file_offset: h.text_offset,
+            file_size: h.text_size,
+            mem_addr: text_addr,
+        },
+        ro: Segment {
+            file_offset: h.ro_offset,
+            file_size: h.ro_size,
+            mem_addr: ro_addr,
+        },
+        data: Segment {
+            file_offset: h.data_offset,
+            file_size: h.data_size,
+            mem_addr: data_addr,
+        },
+        bss_size: h.bss_size,
+        build_id,
+        is_64bit,
+        env_addr,
+    })
+}
+
+fn copy_segment(mem: &Memory, data: &[u8], off: u32, size: u32, addr: u32) -> Result<()> {
+    if size == 0 {
+        return Ok(());
+    }
+    let start = off as usize;
+    let end = start + size as usize;
+    if end > data.len() {
+        return Err(Error::Nro("segment exceeds input data".into()));
+    }
+    mem.map(u64::from(addr), &data[start..end])
+}
+
+/// NRO fixtures; other crates' tests get them through the `testing` feature.
+#[cfg(any(test, feature = "testing"))]
+pub mod testing {
+    use super::*;
+
+    /// A minimal NRO, no code, with an asset section holding `icon` and `nacp`.
+    pub fn with_assets(icon: &[u8], nacp: &[u8]) -> Vec<u8> {
+        const HEADER_SIZE: u32 = 0x50;
+        let mut out = vec![0u8; HEADER_SIZE as usize];
+        out[0..4].copy_from_slice(&NRO0_MAGIC.to_le_bytes());
+        out[4..8].copy_from_slice(&1u32.to_le_bytes());
+        out[8..12].copy_from_slice(&HEADER_SIZE.to_le_bytes());
+        out.extend_from_slice(&ASET_MAGIC.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        let mut offset = ASSET_HEADER_SIZE as u64;
+        for part in [icon, nacp, &[][..]] {
+            out.extend_from_slice(&offset.to_le_bytes());
+            out.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            offset += part.len() as u64;
+        }
+        out.extend_from_slice(icon);
+        out.extend_from_slice(nacp);
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_nro(text: &[u8], data: &[u8]) -> Vec<u8> {
+        let text_size = align4(text.len());
+        let data_off = 0x50 + text_size;
+        let data_size = align4(data.len());
+        let mut out = vec![0u8; data_off + data_size];
+        out[0..4].copy_from_slice(&NRO0_MAGIC.to_le_bytes());
+        out[4..8].copy_from_slice(&1u32.to_le_bytes()); // version 1
+        let total = out.len() as u32;
+        out[8..12].copy_from_slice(&total.to_le_bytes());
+        out[0x10..0x14].copy_from_slice(&0x50u32.to_le_bytes());
+        out[0x14..0x18].copy_from_slice(&(text_size as u32).to_le_bytes());
+        out[0x18..0x1C].copy_from_slice(&0u32.to_le_bytes());
+        out[0x1C..0x20].copy_from_slice(&0u32.to_le_bytes());
+        out[0x20..0x24].copy_from_slice(&(data_off as u32).to_le_bytes());
+        out[0x24..0x28].copy_from_slice(&(data_size as u32).to_le_bytes());
+        out[0x28..0x2C].copy_from_slice(&0x100u32.to_le_bytes()); // bss
+        out[0x50..0x50 + text.len()].copy_from_slice(text);
+        out[data_off..data_off + data.len()].copy_from_slice(data);
+        out
+    }
+
+    fn align4(n: usize) -> usize {
+        (n + 3) & !3
+    }
+
+    /// Append an asset section the way `elf2nro` does.
+    fn append_assets(nro: &mut Vec<u8>, icon: &[u8], nacp: &[u8], romfs: &[u8]) {
+        let base = nro.len();
+        nro.extend_from_slice(&ASET_MAGIC.to_le_bytes());
+        nro.extend_from_slice(&ASSET_VERSION.to_le_bytes());
+        let mut offset = ASSET_HEADER_SIZE as u64;
+        for part in [icon, nacp, romfs] {
+            nro.extend_from_slice(&offset.to_le_bytes());
+            nro.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            offset += part.len() as u64;
+        }
+        assert_eq!(nro.len() - base, ASSET_HEADER_SIZE);
+        for part in [icon, nacp, romfs] {
+            nro.extend_from_slice(part);
+        }
+    }
+
+    #[test]
+    fn reads_the_appended_asset_section() {
+        let mut nro = build_nro(&[0u8; 4], &[]);
+        append_assets(&mut nro, b"\xFF\xD8\xFFicon", b"nacp", b"romfs");
+        let assets = assets(&nro).unwrap();
+        assert_eq!(assets.icon, b"\xFF\xD8\xFFicon");
+        assert_eq!(assets.nacp, b"nacp");
+        assert_eq!(assets.romfs, b"romfs");
+    }
+
+    #[test]
+    fn an_nro_built_without_assets_has_none() {
+        assert_eq!(assets(&build_nro(&[0u8; 4], &[])), None);
+    }
+
+    #[test]
+    fn an_asset_part_the_build_omitted_is_empty() {
+        // `--icon` without `--nacp`.
+        let mut nro = build_nro(&[0u8; 4], &[]);
+        append_assets(&mut nro, b"icon", b"", b"");
+        let assets = assets(&nro).unwrap();
+        assert_eq!(assets.icon, b"icon");
+        assert!(assets.nacp.is_empty());
+        assert!(assets.romfs.is_empty());
+    }
+
+    #[test]
+    fn an_asset_part_running_past_the_file_is_dropped() {
+        let mut nro = build_nro(&[0u8; 4], &[]);
+        let base = nro.len();
+        append_assets(&mut nro, b"icon", b"nacp", b"");
+        // A RomFS past the file end leaves the other parts readable.
+        let romfs = base + 0x28;
+        nro[romfs..romfs + 8].copy_from_slice(&(ASSET_HEADER_SIZE as u64).to_le_bytes());
+        nro[romfs + 8..romfs + 16].copy_from_slice(&u64::MAX.to_le_bytes());
+        let assets = assets(&nro).unwrap();
+        assert_eq!(assets.icon, b"icon");
+        assert_eq!(assets.nacp, b"nacp");
+        assert!(assets.romfs.is_empty());
+    }
+
+    #[test]
+    fn loads_and_lays_out_segments() {
+        let text = [0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00];
+        let data = [0xDE, 0xAD, 0xBE, 0xEF];
+        let nro = build_nro(&text, &data);
+        let mem = Memory::new();
+        let loaded = load_nro(&mem, &nro).unwrap();
+        assert_eq!(loaded.entry, NRO_BASE);
+        assert_eq!(mem.read_u32(u64::from(NRO_BASE)).unwrap(), 0x01);
+        assert_eq!(mem.read_u32(u64::from(NRO_BASE + 4)).unwrap(), 0x02);
+        assert_eq!(
+            mem.read_u32(u64::from(loaded.data.mem_addr)).unwrap(),
+            0xEFBE_ADDE
+        );
+        assert_eq!(
+            mem.read_u8(u64::from(loaded.data.mem_addr + loaded.data.file_size))
+                .unwrap(),
+            0
+        );
+        assert!(loaded.is_64bit);
+        assert_eq!(loaded.build_id, [0u8; 0x20]);
+    }
+
+    #[test]
+    fn loaded_text_is_read_only_but_data_is_not() {
+        let text = [0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00];
+        let data = [0xDE, 0xAD, 0xBE, 0xEF];
+        let nro = build_nro(&text, &data);
+        let mem = Memory::new();
+        let loaded = load_nro(&mem, &nro).unwrap();
+        // this was locked down) now faults instead of silently succeeding.
+        assert!(mem
+            .write_u32(u64::from(loaded.text.mem_addr), 0xDEAD_BEEF)
+            .is_err());
+        assert_eq!(mem.read_u32(u64::from(loaded.text.mem_addr)).unwrap(), 0x01);
+        mem.write_u32(u64::from(loaded.data.mem_addr), 0x1234)
+            .unwrap();
+        assert_eq!(
+            mem.read_u32(u64::from(loaded.data.mem_addr)).unwrap(),
+            0x1234
+        );
+    }
+
+    #[test]
+    fn apply_relr_relocates_and_stops_at_backward_jump() {
+        let mem = Memory::new();
+        mem.map_zero(u64::from(NRO_BASE), 0x2000).unwrap();
+        mem.write_u64(u64::from(NRO_BASE + 0x1000), 0x1234).unwrap();
+        mem.write_u64(u64::from(NRO_BASE + 0x1008), 0x5678).unwrap();
+        // An address, a bitmap, then a backward address that stops the walk.
+        let mut relr = Vec::new();
+        relr.extend_from_slice(&0x1000u64.to_le_bytes());
+        relr.extend_from_slice(&0b101u64.to_le_bytes()); // bitmap: bit0=1, bit2 → +8
+        relr.extend_from_slice(&0u64.to_le_bytes()); // address 0 → backwards → stop
+        apply_relr(&mem, NRO_BASE, NRO_BASE + 0x2000, &relr).unwrap();
+        assert_eq!(
+            mem.read_u64(u64::from(NRO_BASE + 0x1000)).unwrap(),
+            0x1234 + NRO_BASE as u64
+        );
+        assert_eq!(
+            mem.read_u64(u64::from(NRO_BASE + 0x1008)).unwrap(),
+            0x5678 + NRO_BASE as u64
+        );
+    }
+
+    #[test]
+    fn rejects_bad_magic() {
+        let mut nro = build_nro(&[0u8; 4], &[]);
+        nro[0] = b'X';
+        assert!(matches!(
+            NroHeader::parse(&nro),
+            Err(Error::BadMagic { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_truncated() {
+        assert!(matches!(
+            NroHeader::parse(&[0u8; 0x20]),
+            Err(Error::Truncated { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_segment_out_of_bounds() {
+        let mut nro = build_nro(&[0u8; 4], &[]);
+        nro[0x14..0x18].copy_from_slice(&0xFFFFu32.to_le_bytes());
+        assert!(matches!(NroHeader::parse(&nro), Err(Error::Nro(_))));
+    }
+
+    /// MOD0 at 0, its dynamic section at 0x10, `DT_HASH` at 0x60, symbols at 0x80, names at 0xC0.
+    fn module_with_hash(nbucket: u32, nchain: u32, buckets: &[u32], chains: &[u32]) -> Vec<u8> {
+        let mut out = vec![0u8; 0x100];
+        out[0..4].copy_from_slice(b"MOD0");
+        out[4..8].copy_from_slice(&0x10u32.to_le_bytes());
+        for (i, (tag, value)) in [(4u64, 0x60u64), (5, 0xC0), (6, 0x80), (0, 0)]
+            .into_iter()
+            .enumerate()
+        {
+            out[0x10 + i * 16..0x18 + i * 16].copy_from_slice(&tag.to_le_bytes());
+            out[0x18 + i * 16..0x20 + i * 16].copy_from_slice(&value.to_le_bytes());
+        }
+        out[0x60..0x64].copy_from_slice(&nbucket.to_le_bytes());
+        out[0x64..0x68].copy_from_slice(&nchain.to_le_bytes());
+        for (i, word) in buckets.iter().chain(chains).enumerate() {
+            out[0x68 + i * 4..0x6C + i * 4].copy_from_slice(&word.to_le_bytes());
+        }
+        // Symbol 1 is named "other" and has the value 0x1234.
+        out[0x98..0x9C].copy_from_slice(&1u32.to_le_bytes());
+        out[0xA0..0xA8].copy_from_slice(&0x1234u64.to_le_bytes());
+        out[0xC1..0xC6].copy_from_slice(b"other");
+        out
+    }
+
+    #[test]
+    fn a_symbol_is_found_through_its_hash_chain() {
+        let module = module_with_hash(1, 2, &[1], &[0, 0]);
+        assert_eq!(symbol_value(&module, "other"), Some(0x1234));
+        assert_eq!(symbol_value(&module, "missing"), None);
+    }
+
+    #[test]
+    fn a_hash_table_with_no_buckets_has_no_symbols() {
+        let module = module_with_hash(0, 1, &[], &[0]);
+        assert_eq!(symbol_value(&module, "_trn_runconf_heap_mode"), None);
+    }
+
+    #[test]
+    fn a_hash_chain_that_loops_ends_the_lookup() {
+        let module = module_with_hash(1, 2, &[1], &[0, 1]);
+        assert_eq!(symbol_value(&module, "missing"), None);
+    }
+}

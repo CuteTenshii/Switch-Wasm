@@ -1,7 +1,5 @@
 // The page/worker command contract; both TypeScript builds check against it.
 
-import type { NandEntry, StoredEntry } from './db';
-
 // Byte payloads own a plain ArrayBuffer, so they can go to ImageData, Blob or a transfer.
 export type Bytes = Uint8Array<ArrayBuffer>;
 
@@ -39,7 +37,6 @@ export interface GpuReport {
   modules?: number;
   // Surfaces held on the device; every flush writes them all back.
   held?: number;
-  evicted?: number;
   pending?: number;
   // Bytes lifted from guest memory by `Uploads::of`, by category.
   read?: { textures: number; vertex: number; constants: number; index: number };
@@ -49,6 +46,27 @@ export interface GpuReport {
   // Texture reads served from cached deswizzled bytes vs re-read from guest memory.
   textureHits?: number;
   textureMisses?: number;
+  // Stage bind groups reused from the cache, built and kept, and built for one draw.
+  bindHits?: number;
+  bindMisses?: number;
+  bindUncached?: number;
+  // Of the uncached ones, how many bound each kind of resource; one can count in several.
+  bindUncachedImage?: number;
+  bindUncachedShadow?: number;
+  bindUncachedTexture?: number;
+  bindUncachedGlobal?: number;
+  // Draws in the pass before them, and why the others opened one of their own, most frequent first.
+  passesJoined?: number;
+  passSplits?: Record<string, number>;
+  // Copies of held surfaces made or brought up to date, by the shape a draw sampled.
+  heldCopyShapes?: Record<string, number>;
+  // Presents that asked for every held surface back, by what asked.
+  syncNoScanout?: number;
+  syncOverBytes?: number;
+  syncAll?: number;
+  syncAliases?: number;
+  syncReads?: number;
+  syncWrites?: number;
   // The rasterizer holds frames after a fallback until enough in a row could run on the device.
   softwareFrame?: boolean;
   // Times the software-frame latch let go.
@@ -76,6 +94,96 @@ export interface GpuReport {
     flushWait?: number;
     flushLand?: number;
   };
+  // Present while device time is on; `unsupported` when the device has no timestamp queries.
+  deviceTime?: DeviceTime;
+}
+
+export type DeviceTimingMode = 'off' | 'passes' | 'draws';
+
+// Time the device took over passes since device time was turned on, slowest rows first.
+export interface DeviceTime {
+  mode: 'passes' | 'draws' | 'unsupported';
+  seconds?: number;
+  ms?: number;
+  passes?: number;
+  // Passes left untimed: the queries or readbacks were full, or a map failed.
+  untimed?: number;
+  // A row is a pass's kind and attachments, and the shaders its draws ran, by WGSL hash.
+  rows?: { what: string; passes: number; ms: number; maxMs: number }[];
+}
+
+// One guest thread as the last activity report found it.
+export interface ThreadActivity {
+  // 0 is the main thread, the rest in creation order.
+  index: number;
+  // The `nn::os` name, quoted, or "unnamed, runs <function>".
+  name: string | null;
+  // As `module+offset`; null for the main thread.
+  entry: string | null;
+  // The pc and its callers.
+  at: string;
+  state: string;
+  priority: number;
+  running: boolean;
+  // Instructions retired and times scheduled over the reading.
+  ran: number;
+  switches: number;
+}
+
+// The last per-thread reading; `seconds` is null until one covers a known span.
+export interface ThreadReading {
+  seconds: number | null;
+  threads: ThreadActivity[];
+}
+
+// `switch_audio_json`: totals since each counter started; the Audio section turns them into rates.
+export interface AudioReport {
+  // The clock's catch-ups with real time, in cycles of a clock running at `hz`.
+  clock: { hz: number; jumps: number; skipped: number; ahead: number };
+  // The host ring the worklet plays from, in interleaved samples.
+  ring: {
+    sampleRate: number; channels: number;
+    produced: number; taken: number; dropped: number; backlog: number;
+  };
+  renderers: AudioRendererReport[];
+  outputs: AudioOutReport[];
+}
+
+export interface AudioRendererReport {
+  handle: number;
+  sampleRate: number;
+  started: boolean;
+  updates: number;
+  renderedFrames: number;
+  frameWakes: number;
+  frameWakesDropped: number;
+  voices: number;
+  voicesPlaying: number;
+  sinkChannels: number;
+  underruns: number;
+  voiceList: AudioVoiceReport[];
+}
+
+export interface AudioVoiceReport {
+  id: number;
+  format: string;
+  sampleRate: number;
+  pitch: number;
+  channels: number;
+  volume: number;
+  playing: boolean;
+  queuedBuffers: number;
+  underruns: number;
+}
+
+export interface AudioOutReport {
+  handle: number;
+  sampleRate: number;
+  channels: number;
+  started: boolean;
+  appendedFrames: number;
+  pendingBuffers: number;
+  discardedFrames: number;
 }
 
 export interface JitStats {
@@ -91,12 +199,29 @@ export interface JitStats {
   enteredEmitted?: number;
   // Of those, entries a compiled block made by jumping into the next.
   chained?: number;
+  // Instructions the block loops retired, and how many of them compiled code ran.
+  retired?: number;
+  retiredEmitted?: number;
+  // Compiled blocks dropped for handing their first instruction back too often.
+  dropped?: number;
+  // Instructions run on the interpreter in blocks not yet hot, and in blocks never to be compiled.
+  retiredCold?: number;
+  retiredNever?: number;
 }
 
-// Firmware NCA kind: 0 program, 1 data archive, 2 other.
+// What a firmware NCA holds, as the core numbers it.
+export const NAND_KIND = { program: 0, dataArchive: 1, other: 2 } as const;
+export type NandKind = typeof NAND_KIND[keyof typeof NAND_KIND];
+
 export interface NandIdentity {
   id: string;
-  kind: number;
+  kind: NandKind;
+}
+
+// The title index's entry for an installed NCA; `other` is never stored.
+export interface NandEntry {
+  name: string;
+  kind: NandKind;
 }
 
 // An update container the core accepted: the base title it patches and its display version.
@@ -105,18 +230,46 @@ export interface UpdateInfo {
   version: string;
 }
 
-// Add-on content from `switch_dlc_json`.
+// One piece of add-on content the core holds.
 export interface DlcEntry {
   id: string;
   title_id: string;
   index: number;
 }
 
+// What an opened file turned out to be: an update or add-on content, held for its title,
+// or anything else, which became the open container.
+export type OpenedContainer =
+  | ({ kind: 'update' } & UpdateInfo)
+  | { kind: 'dlc'; packs: DlcEntry[] }
+  | { kind: 'container'; files: NspFile[] };
+
+// What a file holds, read without opening it. Details a file lacks are empty strings.
+export type PeekedTitle =
+  | {
+    kind: 'game' | 'homebrew';
+    // Empty for homebrew.
+    title_id: string;
+    name?: string;
+    publisher?: string;
+    version?: string;
+    icon_mime?: string;
+    icon_size?: number;
+  }
+  | ({ kind: 'update'; title_id: string; version: string })
+  | { kind: 'dlc'; title_id: string; packs: DlcEntry[] };
+
+// A peeked file with its icon, or null.
+export interface Peek {
+  title: PeekedTitle;
+  icon: Bytes | null;
+}
+
 // An installed NAND title with the size of its content.
 export interface NandTitle {
   id: string;
   name: string;
-  kind: number;
+  kind: NandKind;
   size: number;
 }
 
@@ -128,7 +281,9 @@ export interface StorageInfo {
   size: number;
 }
 
-// `ids` are the stored saves (`<hex save id>[@<user uid>]`); `names` map a uid to its nickname.
+export type StoredEntry = { kind: 'dir' } | { kind: 'file'; data: Bytes };
+
+// `ids` are the stored saves, as `shared/saves.ts` reads them; `names` map a uid to its nickname.
 export interface SaveListing {
   ids: string[];
   names: [string, string][];
@@ -145,7 +300,7 @@ export interface NcaSection {
   size: number;
 }
 
-// `switch_parse_nca`'s JSON; `error` replaces the rest if the header can't be read.
+// `switch_inspect_nca`'s JSON; `error` replaces the rest if the header can't be read.
 export interface NcaInfo {
   error?: string;
   title_id: string;
@@ -162,7 +317,8 @@ export interface AgeRating {
   age: number;
 }
 
-// The NACP from `switch_control_json`; fields past the name are often absent.
+// The NACP from `switch_control_json`; fields past the name are often absent. Empty when
+// there is no control data.
 export interface ControlInfo {
   name: string;
   publisher?: string;
@@ -186,6 +342,12 @@ export interface ControlInfo {
   save_data_owner_id?: string;
   error_code_category?: string;
   isbn?: string;
+}
+
+// Control data, with its icon or null.
+export interface ControlData {
+  info: ControlInfo;
+  icon: Bytes | null;
 }
 
 export interface UserRecord {
@@ -216,6 +378,26 @@ export interface ErrorDialog {
   message: string;
 }
 
+export type NetState = 'off' | 'connecting' | 'open' | 'unreachable';
+
+// One of the guest's sockets; a UDP socket or a listener has only the port it asked for (0 is any).
+export interface NetConnection {
+  id: number;
+  host: string;
+  port: number;
+  proto: 'tcp' | 'udp' | 'listen';
+  state: string;
+  sent: number;
+  received: number;
+}
+
+// The relay socket's state and the frames that crossed it.
+export interface NetStatus {
+  socket: string;
+  out: number;
+  in: number;
+}
+
 export interface Commands {
   // End the running title and its applets; the console stays.
   endTitle(): void;
@@ -229,6 +411,18 @@ export interface Commands {
   // Open the first WebHID controller the page was granted; its name, or empty for none.
   attachMotion(): string;
   detachMotion(): void;
+  // Draw every frame on the CPU rasterizer, or hand the frames back to the device.
+  forceSoftware(on: boolean): void;
+  // Measure the device's time per pass or per draw, for `GpuReport.deviceTime`.
+  setDeviceTiming(mode: DeviceTimingMode): void;
+  // Give the guest a network through the relay at `url`, or take it away.
+  connectNetwork(url: string): void;
+  disconnectNetwork(): void;
+  // The guest's connections, newest first.
+  netConnections(): NetConnection[];
+  netStatus(): NetStatus;
+  // Ask the connected relay to change its settings; the answers come as `net_settings`.
+  setRelaySettings(port: number, allowPrivate: boolean, allowInbound: boolean, origins: string[]): void;
 
   // An ELF or an NRO, told apart by its magic; the worker reads the file itself.
   loadProgram(file: File): number;
@@ -237,32 +431,27 @@ export interface Commands {
   // The SD path the exited homebrew asked to run next, or empty.
   nextLoad(): string;
 
-  // The container's file table; throws the reason if it cannot be read.
-  openNsp(file: File): NspFile[];
+  // Throws the reason if it is no container.
+  openContainer(file: File): OpenedContainer;
+  // What `file` holds; the open container, update and add-on content are left as they are.
+  // Throws the reason when it is neither a container nor an NRO, or holds no title.
+  peekTitle(file: File): Peek;
   openNca(file: File): number;
   restoreNand(): number;
-  addUpdate(file: File): UpdateInfo | null;
-  // The pieces the container holds; none if it is not add-on content.
-  addDlc(file: File): DlcEntry[];
-  clearDlc(): void;
-  clearUpdate(): void;
-  nandIdentify(file: File): NandIdentity | null;
+  nandIdentify(content: Blob): NandIdentity;
   // The stored content named `name`; it is read here, not by the page.
   nandLaunch(name: string): number;
-  loadNcaFromNsp(index: number): number;
-  loadNca(): number;
-  programNcaIndex(): number;
+  // NSP file `index`, else the container's Program NCA, else the container as an NCA.
+  launch(index?: number): number;
   loadKeys(prod: Bytes | null, title: Bytes | null): void;
-  readFile(index: number, offset: number, len: number): Bytes;
+  // The header of NSP file `index`, or of the container when it is a standalone NCA.
+  inspectNca(index?: number): NcaInfo;
 
-  // The title's NACP and icon, from the container's Control NCA or a standalone one.
-  // Throws the reason when there is none.
-  loadControl(): void;
-  controlJson(): string;
-  controlIcon(): Bytes;
-  // Store the control data just read, so a later session's ns can describe the title.
-  rememberControl(): void;
-  parseNca(header: Bytes): string;
+  // Read the container's Control NCA, or a standalone one, store it so a later session's ns
+  // can describe the title, and return it as `control` does. Throws the reason when there is none.
+  loadControl(): ControlData;
+  // The cached control data: the container's, or a homebrew's.
+  control(): ControlData;
 
   run(budget: number): number;
   // The worker runs slices itself until paused, halted or faulted, reporting each.
@@ -283,7 +472,9 @@ export interface Commands {
   ram(): RamUsage;
   memory(): MemoryReport;
   jitStats(): JitStats;
+  threads(): ThreadReading;
   gpuReport(): GpuReport;
+  audioReport(): AudioReport;
   lastError(): string;
 
   // The stored SD card and saves. Changes go to IndexedDB first, then to the running session.
@@ -301,6 +492,8 @@ export interface Commands {
   savesList(): SaveListing;
   // Delete the saves a profile owns; how many entries went.
   savesDeleteUser(uid: string): number;
+  // Give `from`'s saves to `to`, refused if both own a save of the same title; how many entries moved.
+  savesMoveUser(from: string, to: string): number;
 
   // Profile records by uid, plus the playing one under its own key.
   usersRead(): [string, unknown][];
@@ -311,8 +504,8 @@ export interface Commands {
   nandTitles(): [string, NandEntry][];
   nandList(): NandTitle[];
   nandContent(name: string): Blob | undefined;
-  // Store `file` under its name and index it as title `id`.
-  nandInstall(file: File, id: string, kind: number): void;
+  // Store `content` as `name` and index it as title `id`.
+  nandInstall(content: Blob, name: string, id: string, kind: NandKind): void;
   nandRemove(id: string): void;
   nandErase(): void;
 
@@ -327,11 +520,11 @@ export interface Commands {
 
 export type CommandName = keyof Commands;
 
-// The worker's implementation: same signatures, or `{ error }` on failure.
+// The worker's implementation: same signatures, throwing why a command failed.
 export type CommandHandlers = {
   [K in CommandName]: (
     ...args: Parameters<Commands[K]>
-  ) => ReturnType<Commands[K]> | Promise<ReturnType<Commands[K]>> | { error: string };
+  ) => ReturnType<Commands[K]> | Promise<ReturnType<Commands[K]>>;
 };
 
 export interface CallRequest {
@@ -340,13 +533,16 @@ export interface CallRequest {
   args: unknown[];
 }
 
+// What the page sends the worker: calls, and once at startup the canvas it paints.
+export type PageMessage = CallRequest | { type: 'screen'; canvas: OffscreenCanvas };
+
 // A log line's severity; the console shows those at or above its chosen level.
 export type LogLevel = 'error' | 'warn' | 'info' | 'log' | 'debug' | 'trace';
 
 // What the worker gathers every few slices, so the page polls for nothing.
 export interface Housekeeping {
   steps: number;
-  ram: { guest: number; wasm: number };
+  ram: RamUsage;
 }
 
 // One slice of the worker's run loop.
@@ -367,9 +563,11 @@ export interface SliceReport {
   housekeeping: Housekeeping | null;
 }
 
-// `log` is unprompted worker output, routed through the page's log; `slice` and
-// `loop_failed` come from the worker's run loop.
+// `reply` answers the `CallRequest` with its id; `log` is unprompted worker output, routed through
+// the page's log; `slice` and `loop_failed` come from the worker's run loop.
 export type WorkerMessage =
+  | { type: 'reply'; id: number; ok: true; result: unknown }
+  | { type: 'reply'; id: number; ok: false; error: string }
   | { type: 'ready'; error?: string }
   | { type: 'log'; text: string; level: LogLevel }
   | { type: 'slice'; report: SliceReport }
@@ -382,12 +580,16 @@ export type WorkerMessage =
   | { type: 'input_mailbox'; buffer: SharedArrayBuffer; at: number }
   // `(channels << 24) | rate` of the audio in the ring, sent when it changes; 0 before a device opens.
   | { type: 'audio_format'; format: number }
-  // From `crates/switch-wasm/src/keyboard.rs`: the guest raised an error applet, or waits for text.
+  // From `crates/wasm/src/keyboard.rs`: the guest raised an error applet, or waits for text.
   | ({ type: 'error_dialog' } & ErrorDialog)
   | ({ type: 'keyboard' } & KeyboardRequest)
   // The motion controller the worker streams from changed; null once it is gone.
   | { type: 'motion'; device: string | null }
   // The guest's profile edits are stored; the page reloads them.
   | { type: 'profiles_edited' }
-  | { id: number; ok: true; result: unknown }
-  | { id: number; ok: false; error: string };
+  // Once at startup: another tab holds the stored card, saves and NAND, so this one keeps no changes.
+  | { type: 'storage_read_only' }
+  // The link to the relay changed: `unreachable` is a socket that failed or closed.
+  | { type: 'net_state'; state: NetState }
+  // The relay's settings or an answer about changing them, as JSON (`net/settings.rs`).
+  | { type: 'net_settings'; json: string };

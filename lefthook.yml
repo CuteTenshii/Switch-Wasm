@@ -1,31 +1,28 @@
-# Pre-commit hooks mirroring CI's lint job, installed by `bun install`.
-# They check the working tree, not the index. Unset a leftover
-# `core.hooksPath` first, or lefthook won't install.
 pre-commit:
-  piped: true
+  parallel: true
   jobs:
-    - name: rustfmt
+    - name: Cargo fmt
       glob: "*.rs"
       run: cargo fmt --all --check
-      fail_text: "Not rustfmt-clean: run `cargo fmt --all`."
+      fail_text: "Not rustfmt-clean: run `cargo fmt --all`"
 
-    - name: clippy
+    - name: Clippy
       glob: "*.rs"
       run: cargo clippy --workspace --all-targets -- -D warnings
-      fail_text: "Clippy warnings, which CI treats as errors."
+      fail_text: "Clippy errors: run `cargo clippy --workspace --all-targets`"
 
-    - name: eslint
+    - name: Oxlint
       glob: "*.{ts,mjs}"
-      run: bun run eslint
-      fail_text: "ESLint errors: run `bunx eslint . --fix` for the stylistic ones."
+      run: bun run lint
+      fail_text: "Lint errors: run `bun run lint --fix`"
 
-    - name: stylelint
+    - name: Stylelint
       glob: "*.css"
       run: bun run stylelint
-      fail_text: "Stylelint errors: run `bunx stylelint 'web/**/*.css' --fix`."
+      fail_text: "Stylelint errors: run `bunx stylelint 'web/**/*.css' --fix`"
 
     # Vite does not type-check.
-    - name: typecheck
+    - name: Typecheck
       glob: "*.ts"
       run: bun run typecheck
 
@@ -33,10 +30,17 @@ pre-commit:
 pre-push:
   piped: true
   jobs:
-    - name: tests
-      run: make test
+    - name: Tests
+      glob: "*.rs"
+      run: cargo test --workspace
       fail_text: "Host tests failed."
 
-    - name: e2e
+    - name: Unit tests
+      glob: "*.{ts,mjs}"
+      run: bun run test:unit
+      fail_text: "Unit tests failed."
+
+    - name: E2E tests
+      glob: "*.{ts,mjs}"
       run: bun run test:e2e
       fail_text: "Page tests failed."

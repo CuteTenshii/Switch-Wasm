@@ -1,17 +1,21 @@
 // The debug panel: instruction tracing, register dumps, and the translator and
 // renderer readouts.
 
-import type { GpuReport } from '../shared/protocol';
+import type {
+  DeviceTime, DeviceTimingMode, GpuReport, ThreadActivity, ThreadReading,
+} from '../shared/protocol';
 import {
   displayMetrics, resetDisplayMetrics, type DisplayMetrics, type DisplayTiming,
 } from './display-metrics';
+import { screenSize } from './display';
 import { $, el } from './dom';
 import './elements/info-tip';
-import { fmtCount } from '../shared/format';
-import { formatBytes } from './format';
+import { fmtCount, formatBytes } from '../shared/format';
 import { log } from './log';
+import { updateAudioDebug } from './audio-debug';
 import { updateMemoryDebug } from './memory';
 import { call, hasSession } from './rpc';
+import { titleBooted } from './session';
 import { openPanel, setNote } from './shell';
 
 const traceCb = $<HTMLInputElement>('trace-cb');
@@ -33,6 +37,8 @@ function selectDebugGroup(name: string): void {
     if (hasSession()) void updateRenderDebug();
   }
   if (name === 'memory') void updateMemoryDebug();
+  if (name === 'audio') void updateAudioDebug();
+  if (name === 'cpu') void updateThreadsDebug();
 }
 
 for (const button of debugGroups) {
@@ -72,9 +78,130 @@ async function updateJitDebug(): Promise<void> {
   $('jit-reuse').textContent = s.translated ? fmtCount(s.executed / s.translated) : '-';
   $('jit-entered-emitted').textContent = ofEntries(s.enteredEmitted ?? 0);
   $('jit-chained').textContent = ofEntries(s.chained ?? 0);
+  const retired = s.retired ?? 0;
+  const ofRetired = (part: number) =>
+    fmtCount(part) + (retired ? ` (${((100 * part) / retired).toFixed(1)}%)` : '');
+  $('jit-retired-emitted').textContent = ofRetired(s.retiredEmitted ?? 0);
+  $('jit-retired-cold').textContent = ofRetired(s.retiredCold ?? 0);
+  $('jit-retired-never').textContent = ofRetired(s.retiredNever ?? 0);
+  $('jit-dropped').textContent = fmtCount(s.dropped ?? 0);
 }
 
+const threadsSection = $<HTMLDetailsElement>('threads-debug-section');
+
+function showThreadsStatus(text: string): void {
+  const status = $('threads-status');
+  status.textContent = text;
+  status.hidden = false;
+  $('threads-table').hidden = true;
+  $('threads-idle').hidden = true;
+  setNote('threads-badge', '');
+}
+
+function threadLabel(t: ThreadActivity): string {
+  const who = t.name ?? t.entry ?? (t.index === 0 ? 'main' : null);
+  return who ? `${t.index} ${who}` : String(t.index);
+}
+
+function threadRow(t: ThreadActivity, total: number, seconds: number | null): HTMLTableRowElement {
+  const name = el('th', null, threadLabel(t));
+  name.scope = 'row';
+  const switches = `${fmtCount(t.switches)} ${t.switches === 1 ? 'switch' : 'switches'}`;
+  name.append(
+    el('span', 'thread-detail', `${t.state}, priority ${t.priority}, ${switches}`),
+    el('span', 'thread-detail at', t.at),
+  );
+  const tr = el('tr');
+  tr.append(
+    name,
+    el('td', null, total ? `${((100 * t.ran) / total).toFixed(1)}%` : '-'),
+    el('td', null, seconds ? fmtCount(t.ran / seconds) : '-'),
+  );
+  return tr;
+}
+
+function showThreads(reading: ThreadReading): void {
+  const byWork = [...reading.threads].sort((a, b) => b.ran - a.ran || a.index - b.index);
+  const busy = byWork.filter((t) => t.ran > 0);
+  // An exited thread that did nothing in the reading is history, not load.
+  const idle = byWork.filter((t) => t.ran === 0 && t.state !== 'exited');
+  if (!busy.length && !idle.length) {
+    showThreadsStatus('Waiting for the first reading, a second after the title starts.');
+    return;
+  }
+  const total = busy.reduce((sum, t) => sum + t.ran, 0);
+  const status = $('threads-status');
+  status.hidden = busy.length > 0;
+  status.textContent = 'No thread ran in the last reading.';
+  $('threads-table').hidden = !busy.length;
+  $('threads-rows').replaceChildren(...busy.map((t) => threadRow(t, total, reading.seconds)));
+  $('threads-idle').hidden = !idle.length;
+  $('threads-idle-summary').textContent =
+    `${idle.length} ${idle.length === 1 ? 'thread' : 'threads'} did not run`;
+  $('threads-idle-list').replaceChildren(
+    ...idle.map((t) => el('li', null, `${threadLabel(t)}: ${t.state}, priority ${t.priority}`)),
+  );
+  setNote('threads-badge', reading.seconds ? `${fmtCount(total / reading.seconds)} instructions/s` : '');
+}
+
+async function updateThreadsDebug(): Promise<void> {
+  if (!titleBooted()) {
+    showThreadsStatus('Start a title to see its threads.');
+    return;
+  }
+  let reading: ThreadReading;
+  try {
+    reading = await call('threads');
+  } catch (err) {
+    showThreadsStatus(`Couldn't read the threads: ${String(err)}`);
+    return;
+  }
+  // The title may have ended while the worker answered.
+  if (titleBooted()) showThreads(reading);
+  else showThreadsStatus('Start a title to see its threads.');
+}
+
+threadsSection.addEventListener('toggle', () => {
+  if (threadsSection.open && onScreen(threadsSection)) void updateThreadsDebug();
+});
+
 const renderSection = $<HTMLDetailsElement>('render-debug-section');
+
+$<HTMLInputElement>('render-force-software').addEventListener('change', (event) => {
+  void call('forceSoftware', (event.target as HTMLInputElement).checked);
+});
+
+$<HTMLSelectElement>('render-device-time').addEventListener('change', (event) => {
+  void call('setDeviceTiming', (event.target as HTMLSelectElement).value as DeviceTimingMode);
+});
+
+function showDeviceTime(time: DeviceTime | undefined): void {
+  $('render-device-time-block').hidden = !time;
+  if (!time) return;
+  const rows = time.rows ?? [];
+  $('render-device-time-table').hidden = !rows.length;
+  let summary: string;
+  if (time.mode === 'unsupported') {
+    summary = 'This GPU has no timestamp queries, so its time cannot be measured.';
+  } else if (!time.passes) {
+    summary = 'No timed pass has come back from the GPU yet.';
+  } else {
+    const untimed = time.untimed ? `, ${fmtCount(time.untimed)} untimed` : '';
+    summary = `${(time.ms ?? 0).toFixed(1)} ms on the GPU in ${fmtCount(time.passes)} passes `
+      + `over ${time.seconds ?? 0} s${untimed}`;
+  }
+  $('render-device-time-summary').textContent = summary;
+  $('render-device-time-rows').replaceChildren(...rows.map((row) => {
+    const tr = el('tr');
+    tr.append(
+      el('td', null, row.ms.toFixed(1)),
+      el('td', null, row.maxMs.toFixed(1)),
+      el('td', null, fmtCount(row.passes)),
+      el('td', null, row.what),
+    );
+    return tr;
+  }));
+}
 
 const RENDER_PHASES = ['translate', 'upload', 'modules', 'bind', 'pipeline', 'encode', 'flush'] as const;
 
@@ -128,7 +255,7 @@ function renderState(g: GpuReport, fallback: boolean): RenderState {
   }
   return {
     badge: 'WebGPU',
-    status: fallback ? 'WebGPU draws, on a CPU fallback adapter.' : 'WebGPU draws.',
+    status: fallback ? 'WebGPU runs on a CPU fallback adapter.' : '',
     on: true,
     detail: 'A draw the device cannot take runs on the software rasterizer instead, and once enough '
       + 'have, the rasterizer keeps every frame after, however well the device is working.',
@@ -146,7 +273,9 @@ async function updateRenderDebug(): Promise<void> {
   const { badge, status, on, detail } = renderState(g, info?.isFallbackAdapter ?? false);
   setNote('render-debug-badge', badge, on);
   const unlatched = g.unlatched ? ` It has handed frames back to the device ${g.unlatched} time(s).` : '';
-  $('render-status').textContent = status + unlatched;
+  const line = (status + unlatched).trim();
+  $('render-status').textContent = line;
+  $('render-status').hidden = !line;
   $('render-tip').setAttribute('text', detail);
   $('render-debug-data').hidden = !g.backend;
   showList('render-reasons-block', 'render-reasons', g.reasons ?? []);
@@ -165,10 +294,29 @@ async function updateRenderDebug(): Promise<void> {
   $('render-rejected').textContent = fmtCount(g.deviceErrorCount ?? 0);
   $('render-pipelines').textContent = fmtCount(g.pipelines ?? 0);
   $('render-modules').textContent = fmtCount(g.modules ?? 0);
-  $('render-held').textContent = `${g.held ?? 0} (${g.evicted ?? 0} evicted, ${g.pending ?? 0} pending)`;
+  $('render-held').textContent = `${g.held ?? 0} (${g.pending ?? 0} pending)`;
+  $('render-syncs').textContent = `${fmtCount(g.syncAll ?? 0)} asked (${fmtCount(g.syncAliases ?? 0)} aliased, `
+    + `${fmtCount(g.syncReads ?? 0)} read, ${fmtCount(g.syncWrites ?? 0)} guest-written), `
+    + `${fmtCount(g.syncNoScanout ?? 0)} without a scan-out, ${fmtCount(g.syncOverBytes ?? 0)} over the cap`;
   const hits = g.textureHits ?? 0;
   const lookups = hits + (g.textureMisses ?? 0);
   $('render-texture-hits').textContent = lookups ? `${((hits * 100) / lookups).toFixed(1)}%` : '-';
+  const binds = (g.bindHits ?? 0) + (g.bindMisses ?? 0) + (g.bindUncached ?? 0);
+  $('render-bind-hits').textContent = binds
+    ? `${(((g.bindHits ?? 0) * 100) / binds).toFixed(1)}% (${fmtCount(g.bindMisses ?? 0)} missed, ${fmtCount(g.bindUncached ?? 0)} uncached: `
+    + `${fmtCount(g.bindUncachedImage ?? 0)} image, ${fmtCount(g.bindUncachedShadow ?? 0)} shadow, `
+    + `${fmtCount(g.bindUncachedTexture ?? 0)} texture, ${fmtCount(g.bindUncachedGlobal ?? 0)} global)`
+    : '-';
+  const splits = Object.entries(g.passSplits ?? {});
+  const opened = splits.reduce((sum, [, n]) => sum + n, 0);
+  $('render-pass-splits').textContent = opened
+    ? `${fmtCount(opened)}, ${fmtCount(g.passesJoined ?? 0)} joined the pass before: `
+    + splits.map(([why, n]) => `${fmtCount(n)} ${why}`).join(', ')
+    : '-';
+  const shapes = Object.entries(g.heldCopyShapes ?? {});
+  $('render-held-copies').textContent = shapes.length
+    ? shapes.map(([shape, n]) => `${fmtCount(n)} ${shape}`).join(', ')
+    : '-';
   const r = g.read;
   for (const kind of ['textures', 'vertex', 'constants', 'index'] as const) {
     $(`render-read-${kind}`).textContent = formatBytes(r?.[kind] ?? 0);
@@ -179,6 +327,7 @@ async function updateRenderDebug(): Promise<void> {
     $(`render-${phase}-frame`).textContent = total === undefined ? '-' : (total / frames).toFixed(1);
     $(`render-${phase}-total`).textContent = total === undefined ? '-' : String(total);
   }
+  showDeviceTime(g.deviceTime);
 }
 
 // Rendered, so its panel, tab, group and section are all open.
@@ -191,6 +340,7 @@ renderSection.addEventListener('toggle', () => {
 });
 // Live sections ask the worker only while someone can see them.
 setInterval(() => {
+  if (threadsSection.open && onScreen(threadsSection)) void updateThreadsDebug();
   if (!hasSession()) return;
   if (renderSection.open && onScreen(renderSection)) void updateRenderDebug();
   if (onScreen(jitSection)) void updateJitDebug();
@@ -216,6 +366,8 @@ function updateDisplayDebug(): void {
   $('display-debug-data').hidden = !sampled;
   $<HTMLButtonElement>('btn-reset-display-debug').disabled = !sampled;
   if (!sampled) return;
+  const { width, height } = screenSize();
+  $('display-frame-size').textContent = width ? `${width}×${height}` : '-';
   $('display-guest-frames').textContent = String(metrics.guestFrames);
   $('display-canvas-updates').textContent = String(metrics.canvasUpdates);
   $('display-skipped-frames').textContent = String(metrics.skippedFrames);

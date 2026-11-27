@@ -1,0 +1,344 @@
+//! Backend-internal shaders for passes a Maxwell draw does not describe:
+//! depth uploads, partial clears, and multisample resampling.
+
+use switch_core::gpu::surface::{SampleGrid, MAX_SAMPLES};
+
+/// A scan-out surface onto the canvas, one texel to a pixel: the queued window, flipped as the
+/// producer asked, with alpha ignored.
+pub(crate) const SCAN_OUT_WGSL: &str = "\
+struct Parameters {
+  crop: vec2<i32>,
+  size: vec2<i32>,
+  flip: vec2<u32>,
+}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> p: Parameters;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+  let x = f32(i32(vertex) / 2) * 4.0 - 1.0;
+  let y = f32(i32(vertex) & 1) * 4.0 - 1.0;
+  return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
+  let x = i32(at.x);
+  let y = i32(at.y);
+  let sx = p.crop.x + select(x, p.size.x - 1 - x, p.flip.x != 0u);
+  let sy = p.crop.y + select(y, p.size.y - 1 - y, p.flip.y != 0u);
+  return vec4<f32>(textureLoad(src, vec2<i32>(sx, sy), 0).rgb, 1.0);
+}
+";
+
+/// A 2D engine blit, computing what `Engine2D` does per texel: `taps` and `blend` when
+/// filtered, a clamped truncation when not.
+pub(crate) const BLIT_WGSL: &str = "\
+struct Parameters {
+  origin: vec2<f32>,
+  step: vec2<f32>,
+  first: vec2<f32>,
+  last: vec2<f32>,
+  round: f32,
+  srgb: u32,
+}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> p: Parameters;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+  let x = f32(i32(vertex) / 2) * 4.0 - 1.0;
+  let y = f32(i32(vertex) & 1) * 4.0 - 1.0;
+  return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+fn to_srgb(v: vec3<f32>) -> vec3<f32> {
+  return select(1.055 * pow(v, vec3<f32>(1.0 / 2.4)) - 0.055, v * 12.92, v <= vec3<f32>(0.0031308));
+}
+
+fn to_linear(v: vec3<f32>) -> vec3<f32> {
+  return select(pow((v + 0.055) / 1.055, vec3<f32>(2.4)), v / 12.92, v <= vec3<f32>(0.04045));
+}
+
+// An sRGB target is rounded in sRGB and given back the linear value the device encodes onto it.
+fn rounded(colour: vec4<f32>) -> vec4<f32> {
+  if p.round == 0.0 {
+    return colour;
+  }
+  if p.srgb == 0u {
+    return floor(colour * p.round + 0.5) / p.round;
+  }
+  let stored = floor(clamp(vec4<f32>(to_srgb(colour.rgb), colour.a), vec4<f32>(0.0), vec4<f32>(1.0)) * p.round + 0.5) / p.round;
+  return vec4<f32>(to_linear(stored.rgb), stored.a);
+}
+
+@fragment
+fn fs_point(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
+  let c = max(p.origin + p.step * (floor(at.xy) - p.first), vec2<f32>(0.0));
+  return rounded(textureLoad(src, vec2<u32>(min(floor(c), p.last)), 0));
+}
+
+@fragment
+fn fs_filtered(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
+  let c = max(p.origin + p.step * (floor(at.xy) - p.first) - vec2<f32>(0.5), vec2<f32>(0.0));
+  let whole = floor(c);
+  let f = c - whole;
+  let a = vec2<u32>(min(whole, p.last));
+  let b = vec2<u32>(min(whole + vec2<f32>(1.0), p.last));
+  let top = mix(textureLoad(src, a, 0), textureLoad(src, vec2<u32>(b.x, a.y), 0), f.x);
+  let bottom = mix(textureLoad(src, vec2<u32>(a.x, b.y), 0), textureLoad(src, b, 0), f.x);
+  return rounded(mix(top, bottom, f.y));
+}
+";
+
+/// Writes an uploaded `r32float` texture into a depth surface as frag depth;
+/// a copy cannot write `depth32float`.
+pub(crate) const LOAD_DEPTH_WGSL: &str = "\
+@group(0) @binding(0) var src: texture_2d<f32>;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+  // One triangle covering the whole of clip space, out of three vertices and
+  // no vertex buffer at all.
+  let x = f32(i32(vertex) / 2) * 4.0 - 1.0;
+  let y = f32(i32(vertex) & 1) * 4.0 - 1.0;
+  return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(@builtin(position) position: vec4<f32>) -> @builtin(frag_depth) f32 {
+  return textureLoad(src, vec2<u32>(position.xy), 0).x;
+}
+";
+
+/// A depth surface's values written as the red of a colour target.
+pub(crate) const DEPTH_TO_COLOUR_WGSL: &str = "\
+@group(0) @binding(0) var src: texture_depth_2d;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+  let x = f32(i32(vertex) / 2) * 4.0 - 1.0;
+  let y = f32(i32(vertex) & 1) * 4.0 - 1.0;
+  return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+  return vec4<f32>(textureLoad(src, vec2<u32>(position.xy), 0), 0.0, 0.0, 1.0);
+}
+";
+
+/// An `S8D24` image's words, uploaded as they are, as the rasterizer reads them: the stencil's
+/// bits in red and the unorm depth in green. `fs_held` takes the depth from a held
+/// `depth32float` instead, as guest memory would hold it.
+/// `fs_blit` is the 2D engine's move of those words into an 8-bit surface, byte for byte.
+/// The integer arithmetic reproduces both conversions exactly; floats would round.
+pub(crate) const PACKED_DEPTH_WGSL: &str = "\
+@group(0) @binding(0) var depth: texture_depth_2d;
+@group(0) @binding(1) var words: texture_2d<u32>;
+
+struct Blit {
+  origin: vec2<f32>,
+  step: vec2<f32>,
+  first: vec2<f32>,
+  last: vec2<f32>,
+  bgra: u32,
+}
+@group(0) @binding(2) var<uniform> blit: Blit;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+  let x = f32(i32(vertex) / 2) * 4.0 - 1.0;
+  let y = f32(i32(vertex) & 1) * 4.0 - 1.0;
+  return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+// `DepthLayout::encode_depth`'s round(d * (2^24 - 1)), with d = m * 2^-k and the product in 48 bits.
+fn unorm24(d: f32) -> u32 {
+  if (!(d > 0.0)) { return 0u; }
+  if (d >= 1.0) { return 0xffffffu; }
+  let bits = bitcast<u32>(d);
+  let exponent = (bits >> 23u) & 0xffu;
+  let k = 150u - exponent;
+  if (exponent == 0u || k >= 49u) { return 0u; }
+  let m = (bits & 0x7fffffu) | 0x800000u;
+  var lo = m << 24u;
+  var hi = (m >> 8u) - select(0u, 1u, lo < m);
+  lo = lo - m;
+  if (k <= 32u) {
+    let sum = lo + (1u << (k - 1u));
+    hi = hi + select(0u, 1u, sum < lo);
+    lo = sum;
+  } else {
+    hi = hi + (1u << (k - 33u));
+  }
+  if (k < 32u) { return (lo >> k) | (hi << (32u - k)); }
+  return hi >> (k - 32u);
+}
+
+// `n / (2^24 - 1)` rounded to f32: its bits are n's 24 repeating, so after the leading one
+// come n's lower bits, then n's top bit (a one) and more, which always rounds up.
+fn from_unorm24(n: u32) -> f32 {
+  if (n == 0u) { return 0.0; }
+  if (n == 0xffffffu) { return 1.0; }
+  let lz = countLeadingZeros(n) - 8u;
+  let mantissa = (n << lz) + 1u;
+  return bitcast<f32>(((126u - lz) << 23u) | (mantissa & 0x7fffffu));
+}
+
+@fragment
+fn fs_words(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+  let word = textureLoad(words, vec2<u32>(position.xy), 0).x;
+  return vec4<f32>(bitcast<f32>(word & 0xffu), from_unorm24(word >> 8u), 0.0, 1.0);
+}
+
+@fragment
+fn fs_held(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+  let at = vec2<u32>(position.xy);
+  let stencil = textureLoad(words, at, 0).x & 0xffu;
+  let d = textureLoad(depth, at, 0);
+  return vec4<f32>(bitcast<f32>(stencil), from_unorm24(unorm24(d)), 0.0, 1.0);
+}
+
+// `BLIT_WGSL`'s `fs_point` texel; a BGRA target takes the word's first byte as blue.
+@fragment
+fn fs_blit(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+  let c = max(blit.origin + blit.step * (floor(position.xy) - blit.first), vec2<f32>(0.0));
+  let at = vec2<u32>(min(floor(c), blit.last));
+  let word = (textureLoad(words, at, 0).x & 0xffu) | (unorm24(textureLoad(depth, at, 0)) << 8u);
+  let bytes = unpack4x8unorm(word);
+  return select(bytes, bytes.zyxw, blit.bgra != 0u);
+}
+";
+
+/// A partial clear: a fullscreen triangle under a scissor, for rectangles or
+/// channel masks a load operation cannot express.
+pub(crate) const CLEAR_RECT_WGSL: &str = "\
+struct Clear {
+  color: vec4<f32>,
+  depth: f32,
+}
+@group(0) @binding(0) var<uniform> clear: Clear;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+  let x = f32(i32(vertex) / 2) * 4.0 - 1.0;
+  let y = f32(i32(vertex) & 1) * 4.0 - 1.0;
+  return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_color() -> @location(0) vec4<f32> {
+  return clear.color;
+}
+
+@fragment
+fn fs_depth() -> @builtin(frag_depth) f32 {
+  return clear.depth;
+}
+";
+
+/// The WGSL that moves a multisampled surface between Maxwell's spatial
+/// layout (a `samples_x` by `samples_y` texel tile per pixel, as guest memory
+/// holds it) and a device multisample texture: `gather` in, `scatter` out.
+pub(crate) fn resample_wgsl(sampled: &str, load: &str, depth: bool) -> String {
+    let output = if depth {
+        "@builtin(frag_depth) f32"
+    } else {
+        "@location(0) vec4<f32>"
+    };
+    format!(
+        "\
+struct Grid {{
+  size: vec2<u32>,
+  // Which texel of a pixel's tile holds each sample, as x and y.
+  slot_x: array<u32, 16>,
+  slot_y: array<u32, 16>,
+  // The inverse: which sample each texel of the tile holds.
+  sample_of_slot: array<u32, 16>,
+}}
+@group(0) @binding(0) var<storage, read> grid: Grid;
+@group(0) @binding(1) var src: {sampled};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {{
+  let x = f32(i32(vertex) / 2) * 4.0 - 1.0;
+  let y = f32(i32(vertex) & 1) * 4.0 - 1.0;
+  return vec4<f32>(x, y, 0.0, 1.0);
+}}
+
+// Into the companion: this fragment is one pixel, and `sample` says which of
+// its samples. The texel it comes from is that sample's slot in the tile.
+@fragment
+fn fs_gather(
+  @builtin(position) position: vec4<f32>,
+  @builtin(sample_index) sample: u32,
+) -> {output} {{
+  let pixel = vec2<u32>(position.xy);
+  let slot = vec2<u32>(grid.slot_x[sample], grid.slot_y[sample]);
+  let texel = pixel * grid.size + slot;
+  return {load};
+}}
+
+// The same fragment for a companion that has one sample per pixel: every
+// texel of the tile holds the same value, so sample 0's slot is the one to
+// read and `sample_index` means nothing.
+@fragment
+fn fs_gather_flat(@builtin(position) position: vec4<f32>) -> {output} {{
+  let pixel = vec2<u32>(position.xy);
+  let slot = vec2<u32>(grid.slot_x[0], grid.slot_y[0]);
+  let texel = pixel * grid.size + slot;
+  let sample = 0u;
+  // Named whether or not this direction's load reads it, so that one text
+  // serves all four: a phony assignment is what WGSL has for saying so.
+  _ = sample;
+  return {load};
+}}
+
+// Out of the companion: this fragment is one texel of the expanded surface,
+// and which sample it holds is its place in its pixel's tile.
+@fragment
+fn fs_scatter(@builtin(position) position: vec4<f32>) -> {output} {{
+  let texel = vec2<u32>(position.xy);
+  let pixel = texel / grid.size;
+  let slot = texel % grid.size;
+  let sample = grid.sample_of_slot[slot.y * grid.size.x + slot.x];
+  _ = sample;
+  return {load};
+}}
+"
+    )
+}
+
+/// What a resampling pipeline is built from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ResampleKey {
+    /// Which fragment entry point of [`resample_wgsl`] runs.
+    pub(crate) entry: &'static str,
+    /// The destination's format, which is also the source's.
+    pub(crate) dst: wgpu::TextureFormat,
+    /// The destination's sample count.
+    pub(crate) samples: u32,
+    /// Whether the source is a device multisample texture.
+    pub(crate) ms_source: bool,
+    pub(crate) depth: bool,
+}
+
+/// The grid, as the storage buffer [`resample_wgsl`] reads.
+pub(crate) fn grid_bytes(grid: SampleGrid) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + 3 * 16 * 4);
+    out.extend_from_slice(&grid.samples_x.to_le_bytes());
+    out.extend_from_slice(&grid.samples_y.to_le_bytes());
+    for sample in 0..MAX_SAMPLES as u32 {
+        let (x, _) = grid.slot(sample.min(grid.count() - 1));
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    for sample in 0..MAX_SAMPLES as u32 {
+        let (_, y) = grid.slot(sample.min(grid.count() - 1));
+        out.extend_from_slice(&y.to_le_bytes());
+    }
+    for sample in grid.sample_of_slot() {
+        out.extend_from_slice(&sample.to_le_bytes());
+    }
+    out
+}
