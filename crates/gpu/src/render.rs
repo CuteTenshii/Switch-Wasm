@@ -472,14 +472,6 @@ impl Gpu {
                     depth_or_array_layers: 1,
                 };
                 let texture = self.colour_scratch(held.format(), size);
-                // In the batch, so each draw's copies run in order around it without a submit.
-                let mut encoder = self.take_batch();
-                encoder.copy_texture_to_texture(
-                    held.as_image_copy(),
-                    texture.as_image_copy(),
-                    size,
-                );
-                self.restore_batch(encoder);
                 Some((held, texture, size))
             }
             _ => None,
@@ -540,7 +532,13 @@ impl Gpu {
             Some("copies into its buffers".into())
         } else if stores {
             Some("stores to an image".into())
-        } else if scratch.is_some() {
+        } else if scratch.is_some()
+            && self
+                .pass
+                .as_ref()
+                .and_then(|open| open.scratch.as_ref())
+                .is_none_or(|open| Some(open) != scratch.as_ref())
+        {
             Some("renders to a copy of its target".into())
         } else {
             match &self.pass {
@@ -586,6 +584,14 @@ impl Gpu {
             }
         } else {
             let mut encoder = self.take_batch();
+            // Copied in once per pass; draws joining it render on, and `end_pass` copies it back.
+            if let Some((held, texture, size)) = &scratch {
+                encoder.copy_texture_to_texture(
+                    held.as_image_copy(),
+                    texture.as_image_copy(),
+                    *size,
+                );
+            }
             for (_, layers) in &p.images {
                 for layer in layers {
                     layer.copy_in(&mut encoder);
@@ -664,6 +670,7 @@ impl Gpu {
                 set: crate::PassState::default(),
                 pending: None,
                 timed,
+                scratch: scratch.clone(),
             });
         }
         let timed = self.pass.as_ref().and_then(|open| open.timed);
@@ -866,16 +873,6 @@ impl Gpu {
                 held.overwritten.clear();
             }
         }
-        if let Some((held, texture, size)) = &scratch {
-            self.end_pass();
-            if let Some(encoder) = self.batch.as_mut() {
-                encoder.copy_texture_to_texture(
-                    texture.as_image_copy(),
-                    held.as_image_copy(),
-                    *size,
-                );
-            }
-        }
         self.later_instances += u64::from(p.instance > 0);
         self.batched_draws += 1;
         if self.batched_draws >= crate::MAX_BATCHED_DRAWS {
@@ -957,7 +954,11 @@ impl Gpu {
             self.pass_closed_at = Some(std::panic::Location::caller());
         }
         self.emit_pending();
-        self.pass = None;
+        let scratch = self.pass.take().and_then(|open| open.scratch);
+        // Whatever reads the surface next does so outside a pass, so after this copy.
+        if let (Some((held, texture, size)), Some(encoder)) = (scratch, self.batch.as_mut()) {
+            encoder.copy_texture_to_texture(texture.as_image_copy(), held.as_image_copy(), size);
+        }
     }
 
     /// Record the draw the open pass holds back. Instances merged into it read their instanced

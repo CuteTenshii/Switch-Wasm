@@ -535,6 +535,9 @@ struct OpenPass {
     pending: Option<DrawCall>,
     /// Where its timestamps go, when it is timed.
     timed: Option<u32>,
+    /// The held surface its colour scratch stands in for, the scratch, and the part they share,
+    /// copied back when it ends. See [`Prepared::color_scratch`].
+    scratch: Option<(wgpu::Texture, wgpu::Texture, wgpu::Extent3d)>,
 }
 
 /// One draw call: vertices or indices, the base vertex of an indexed one, and its instances.

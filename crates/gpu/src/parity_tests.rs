@@ -3666,7 +3666,7 @@ fn a_depth_surface_smaller_than_the_colour_target_confines_the_draw() {
 }
 
 /// Two draws into a colour target larger than their depth surface share one scratch texture
-/// on the device, and the second keeps what the first drew.
+/// and one pass on the device, and the second keeps what the first drew.
 #[test]
 fn draws_into_a_colour_target_larger_than_their_depth_surface_keep_each_other() {
     let Some((_serial, mut gpu)) = device() else {
@@ -3721,6 +3721,11 @@ fn draws_into_a_colour_target_larger_than_their_depth_surface_keep_each_other() 
         gpu.colour_scratches.len(),
         1,
         "each draw made its own scratch"
+    );
+    assert_eq!(
+        gpu.pass_splits.get("renders to a copy of its target"),
+        Some(&1),
+        "the second draw opened a pass of its own"
     );
     assert_eq!(got, want, "the colour surface differs");
 }
