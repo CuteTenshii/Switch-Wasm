@@ -1,6 +1,6 @@
 // The file manager: the SD card, save data and NAND titles as stored in this browser.
 
-import type { StorageInfo, StorageVolume } from '../shared/protocol';
+import { NAND_KIND, type StorageInfo, type StorageVolume } from '../shared/protocol';
 import { parseSaveId } from '../shared/saves';
 import {
   Archive, Database, Download, File, FileArchive, FilePen, FileUp, Folder, FolderPlus, FolderUp,
@@ -361,7 +361,7 @@ async function renderFiles(volume: StorageVolume, dir: string, mine: number): Pr
       action(actions, 'Open ' + name, () => void openFile(volume, path, name), false, FilePen);
       action(actions, 'Download ' + name, () => void guarded(async () => {
         const value = await call('storageRead', volume, path);
-        saveBlob(name, new Blob([value?.data ?? new Uint8Array(0)]));
+        saveBlob(name, new Blob([value?.kind === 'file' ? value.data : new Uint8Array(0)]));
       }), false, Download);
     } else {
       action(actions, 'Export ' + name + ' as .zip', () => void guarded(() => exportZip(volume, path, name)), false, Archive);
@@ -388,7 +388,7 @@ async function openFile(volume: StorageVolume, path: string, name: string): Prom
     return undefined;
   });
   if (!value || value.kind !== 'file') return;
-  const data = value.data ?? new Uint8Array(0);
+  const { data } = value;
   setStatus('');
   const dirty = showView(view, {
     name,
@@ -439,8 +439,9 @@ async function renderNand(mine: number): Promise<void> {
   }
   titles.sort((a, b) => a.kind - b.kind || titleLabel(a.id).localeCompare(titleLabel(b.id)));
   for (const title of titles) {
-    const kind = title.kind === 0 ? 'program' : 'data archive';
-    const { actions } = row(title.kind === 0 ? Package : Database, titleLabel(title.id),
+    const program = title.kind === NAND_KIND.program;
+    const kind = program ? 'program' : 'data archive';
+    const { actions } = row(program ? Package : Database, titleLabel(title.id),
       title.id + ' · ' + kind + ' · ' + fmtSize(title.size), null);
     action(actions, 'Download ' + title.name, () => void guarded(async () => {
       const content = await call('nandContent', title.name);

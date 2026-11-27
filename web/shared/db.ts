@@ -1,7 +1,5 @@
 // The IndexedDB databases and transaction helpers, shared by the page and the worker.
 
-import type { Bytes } from './protocol';
-
 export const SD_DB_NAME = 'switch-wasm-sd';
 export const SD_STORE = 'entries';
 
@@ -21,17 +19,6 @@ export const NAND_CONTROLS = 'controls';
 export const LIBRARY_DB_NAME = 'switch-wasm-library';
 export const LIBRARY_STORE = 'folder';
 export const LIBRARY_KEY = 'handle';
-
-export interface StoredEntry {
-  kind: 'dir' | 'file';
-  data?: Bytes;
-}
-
-// `kind` is 0 for a program and 1 for a data archive.
-export interface NandEntry {
-  name: string;
-  kind: number;
-}
 
 let sdDb: IDBDatabase | null = null;
 

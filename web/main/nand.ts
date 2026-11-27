@@ -1,6 +1,6 @@
 // The NAND: NCA content by file name (OPFS, or IndexedDB without it) and an index of titles by id.
 
-import type { NandEntry } from '../shared/db';
+import { NAND_KIND, type NandEntry } from '../shared/protocol';
 import { $, el } from './dom';
 import { gatherNcas, type FirmwareFound } from './firmware';
 import { beginLoad } from './loading';
@@ -107,7 +107,7 @@ export function titleLabel(id: string): string {
 function renderNandTitles(): void {
   const host = $('nand-titles');
   host.textContent = '';
-  const programs = nandTitles.filter(([id, entry]) => entry.kind === 0 && STANDALONE_TITLES.has(id));
+  const programs = nandTitles.filter(([id, entry]) => entry.kind === NAND_KIND.program && STANDALONE_TITLES.has(id));
   programs.sort((a, b) => titleLabel(a[0]).localeCompare(titleLabel(b[0])));
   $('nand-tools').hidden = nandTitles.length === 0;
   if (!programs.length) {
@@ -235,7 +235,7 @@ async function installFirmwareNcas(
       const blob = await nca.open();
       // Identify from the header without reading the rest.
       const what = await call('nandIdentify', blob);
-      if (what.kind === 2) continue;
+      if (what.kind === NAND_KIND.other) continue;
       // Store the Blob itself so the browser owns the bytes.
       await call('nandInstall', blob, nca.name, what.id, what.kind);
       installed++;

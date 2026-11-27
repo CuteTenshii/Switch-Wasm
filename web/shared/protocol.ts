@@ -1,7 +1,5 @@
 // The page/worker command contract; both TypeScript builds check against it.
 
-import type { NandEntry, StoredEntry } from './db';
-
 // Byte payloads own a plain ArrayBuffer, so they can go to ImageData, Blob or a transfer.
 export type Bytes = Uint8Array<ArrayBuffer>;
 
@@ -211,10 +209,19 @@ export interface JitStats {
   retiredNever?: number;
 }
 
-// Firmware NCA kind: 0 program, 1 data archive, 2 other.
+// What a firmware NCA holds, as the core numbers it.
+export const NAND_KIND = { program: 0, dataArchive: 1, other: 2 } as const;
+export type NandKind = typeof NAND_KIND[keyof typeof NAND_KIND];
+
 export interface NandIdentity {
   id: string;
-  kind: number;
+  kind: NandKind;
+}
+
+// The title index's entry for an installed NCA; `other` is never stored.
+export interface NandEntry {
+  name: string;
+  kind: NandKind;
 }
 
 // An update container the core accepted: the base title it patches and its display version.
@@ -262,7 +269,7 @@ export interface Peek {
 export interface NandTitle {
   id: string;
   name: string;
-  kind: number;
+  kind: NandKind;
   size: number;
 }
 
@@ -273,6 +280,8 @@ export interface StorageInfo {
   kind: 'dir' | 'file';
   size: number;
 }
+
+export type StoredEntry = { kind: 'dir' } | { kind: 'file'; data: Bytes };
 
 // `ids` are the stored saves, as `shared/saves.ts` reads them; `names` map a uid to its nickname.
 export interface SaveListing {
@@ -476,7 +485,7 @@ export interface Commands {
   nandList(): NandTitle[];
   nandContent(name: string): Blob | undefined;
   // Store `content` as `name` and index it as title `id`.
-  nandInstall(content: Blob, name: string, id: string, kind: number): void;
+  nandInstall(content: Blob, name: string, id: string, kind: NandKind): void;
   nandRemove(id: string): void;
   nandErase(): void;
 
@@ -510,7 +519,7 @@ export type LogLevel = 'error' | 'warn' | 'info' | 'log' | 'debug' | 'trace';
 // What the worker gathers every few slices, so the page polls for nothing.
 export interface Housekeeping {
   steps: number;
-  ram: { guest: number; wasm: number };
+  ram: RamUsage;
 }
 
 // One slice of the worker's run loop.

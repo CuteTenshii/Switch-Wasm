@@ -1,15 +1,9 @@
 // The SD card, saves, profiles and NAND as stored, read and written here so the page stays free.
 
-import type { CommandHandlers, NandTitle, StorageInfo, StorageVolume } from '../shared/protocol';
-import {
-  idbApply,
-  idbGetAll,
-  NAND_TITLES,
-  NAND_USERS,
-  nandIdb,
-  type NandEntry,
-  type StoredEntry,
-} from '../shared/db';
+import type {
+  CommandHandlers, NandEntry, NandTitle, StorageInfo, StorageVolume, StoredEntry,
+} from '../shared/protocol';
+import { idbApply, idbGetAll, NAND_TITLES, NAND_USERS, nandIdb } from '../shared/db';
 import { parseSaveId, saveIdFor } from '../shared/saves';
 import {
   switch_flush_storage, switch_fs_create_dir, switch_fs_entries, switch_fs_read, switch_fs_remove,
@@ -76,7 +70,7 @@ async function apply(volume: StorageVolume, changes: [string, StoredEntry | null
   for (const path of removals) switch_fs_remove(name, path);
   for (const [path, value] of changes) {
     if (value?.kind === 'dir') switch_fs_create_dir(name, path);
-    else if (value) switch_fs_write(name, path, value.data ?? new Uint8Array(0));
+    else if (value) switch_fs_write(name, path, value.data);
   }
   await switch_flush_storage();
 }
@@ -122,7 +116,7 @@ export const STORAGE = {
       if (!rel) continue;
       const value = readEntry(volume, path, all.get(path));
       if (value?.kind === 'dir') entries.push({ name: rel + '/', data: new Uint8Array(0) });
-      else if (value) entries.push({ name: rel, data: value.data ?? new Uint8Array(0) });
+      else if (value) entries.push({ name: rel, data: value.data });
     }
     return { blob: await zipOffThread(entries), entries: entries.length };
   },
