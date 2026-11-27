@@ -38,7 +38,12 @@ struct Cli {
     #[command(flatten)]
     report: common::Report,
     /// Where the modules and the manifest are written.
-    #[arg(long, default_value = "target/emit-difftest", value_name = "DIR")]
+    #[arg(
+        short = 'o',
+        long,
+        default_value = "target/emit-difftest",
+        value_name = "DIR"
+    )]
     out: String,
     /// Run to this presented frame first, to sample a title's later code.
     #[arg(long, value_name = "N")]

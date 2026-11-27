@@ -28,7 +28,7 @@ const FALLBACK_FONT: &[u8] = include_bytes!("../../../../web/font.ttf");
 #[derive(ClapArgs, Clone, Default)]
 pub struct Shared {
     /// Trace channels to switch on (`svc`, `ipc`, ...).
-    #[arg(long, value_delimiter = ',', value_parser = channel)]
+    #[arg(short = 't', long, value_delimiter = ',', value_parser = channel)]
     trace: Vec<Trace>,
     /// Leave `--trace` off until this presented frame, to trace a late scene with its history drawn.
     #[arg(long, value_name = "N")]
@@ -45,13 +45,13 @@ pub struct Shared {
 #[derive(ClapArgs, Clone, Default)]
 pub struct Boot {
     /// Boot docked (1080p).
-    #[arg(long)]
+    #[arg(short = 'd', long)]
     docked: bool,
     /// Register the system data archives of this firmware directory.
-    #[arg(long, value_name = "DIR")]
+    #[arg(short = 'f', long, value_name = "DIR")]
     firmware: Option<String>,
     /// An update container whose RomFS reads over the base title's.
-    #[arg(long, value_name = "NSP")]
+    #[arg(short = 'u', long, value_name = "NSP")]
     update: Option<String>,
     /// Add-on content containers to mount.
     #[arg(long, value_delimiter = ',', value_name = "NSP")]
@@ -320,10 +320,10 @@ pub struct Target {
     /// An `.nro`, or a retail container (`.nsp`, `.xci` or a program `.nca`).
     pub target: String,
     /// `prod.keys`; a retail container needs it, and so does `--firmware` with an `.nro`.
-    #[arg(long, value_name = "FILE")]
+    #[arg(short = 'k', long, value_name = "FILE")]
     keys: Option<String>,
     /// `title.keys`.
-    #[arg(long, value_name = "FILE")]
+    #[arg(short = 'K', long, value_name = "FILE")]
     title_keys: Option<String>,
     /// A TTF/OTF to serve as the shared font instead of the built-in one.
     #[arg(long, value_name = "TTF")]

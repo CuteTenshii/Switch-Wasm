@@ -24,7 +24,7 @@ struct Cli {
     #[command(flatten)]
     report: common::Report,
     /// The presented frame to sample; the default skips startup to a steady frame.
-    #[arg(long, default_value_t = 2)]
+    #[arg(short = 'n', long, default_value_t = 2)]
     frame: u64,
 }
 

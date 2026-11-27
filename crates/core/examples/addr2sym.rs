@@ -11,7 +11,7 @@ const BASE: u64 = 0x0800_0000;
 struct Cli {
     nro: String,
     /// Hexadecimal address to look up.
-    #[arg(long, value_parser = common::hex32)]
+    #[arg(short = 'a', long, value_parser = common::hex32)]
     addr: u32,
 }
 

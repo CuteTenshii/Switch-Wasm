@@ -22,7 +22,7 @@ struct Cli {
     /// The vector directory.
     dir: String,
     /// Where decoded output goes; the vector directory by default.
-    #[arg(long, value_name = "DIR")]
+    #[arg(short = 'o', long, value_name = "DIR")]
     out: Option<String>,
 }
 

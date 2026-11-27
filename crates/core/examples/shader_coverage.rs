@@ -23,7 +23,7 @@ struct Cli {
     #[command(flatten)]
     report: common::Report,
     /// Presented frame to start recording after.
-    #[arg(long, default_value_t = 4)]
+    #[arg(short = 'n', long, default_value_t = 4)]
     frame: u64,
     /// Frames to record.
     #[arg(long, default_value_t = 1)]

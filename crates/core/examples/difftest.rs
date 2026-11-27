@@ -12,7 +12,7 @@ struct Cli {
     shared: common::Shared,
     #[arg(long, value_name = "FILE")]
     inputs: String,
-    #[arg(long, value_name = "FILE")]
+    #[arg(short = 'o', long, value_name = "FILE")]
     out: String,
     /// The test ELF's `.data` address, in hexadecimal.
     #[arg(long, value_parser = common::hex32, value_name = "ADDR")]

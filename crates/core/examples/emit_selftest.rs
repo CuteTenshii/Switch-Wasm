@@ -108,7 +108,12 @@ struct Cli {
     #[command(flatten)]
     shared: common::Shared,
     /// Where the modules and the manifest are written.
-    #[arg(long, default_value = "target/emit-selftest", value_name = "DIR")]
+    #[arg(
+        short = 'o',
+        long,
+        default_value = "target/emit-selftest",
+        value_name = "DIR"
+    )]
     out: String,
 }
 

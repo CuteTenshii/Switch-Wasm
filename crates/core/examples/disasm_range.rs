@@ -11,10 +11,10 @@ use switch_core::nro::load_nro;
 struct Cli {
     nro: String,
     /// Hexadecimal address to start at.
-    #[arg(long, value_parser = common::hex32)]
+    #[arg(short = 'a', long, value_parser = common::hex32)]
     addr: u32,
     /// Instructions to print.
-    #[arg(long, default_value_t = 64)]
+    #[arg(short = 'c', long, default_value_t = 64)]
     count: u32,
 }
 

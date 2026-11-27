@@ -24,7 +24,7 @@ struct Cli {
     #[command(flatten)]
     report: common::Report,
     /// Frames to count.
-    #[arg(long, default_value_t = 30)]
+    #[arg(short = 'n', long, default_value_t = 30)]
     frames: u64,
 }
 

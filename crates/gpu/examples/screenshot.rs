@@ -31,10 +31,10 @@ struct Cli {
     #[command(flatten)]
     probe: common::Probe,
     /// Where the frame is written.
-    #[arg(long, value_name = "OUT.PPM")]
+    #[arg(short = 'o', long, value_name = "OUT.PPM")]
     out: String,
     /// The presented frame to write.
-    #[arg(long, default_value_t = 1)]
+    #[arg(short = 'n', long, default_value_t = 1)]
     frame: u64,
     /// Copy this host directory onto the SD card; an NRO inside it is launched from its SD path,
     /// as the page's Files dialog does, so it finds the files beside it.

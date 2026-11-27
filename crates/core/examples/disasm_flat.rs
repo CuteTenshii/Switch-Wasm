@@ -12,10 +12,10 @@ struct Cli {
     #[arg(long, value_parser = common::hex32)]
     base: u32,
     /// Hexadecimal address to start at.
-    #[arg(long, value_parser = common::hex32)]
+    #[arg(short = 'a', long, value_parser = common::hex32)]
     addr: u32,
     /// Instructions to print.
-    #[arg(long, default_value_t = 48)]
+    #[arg(short = 'c', long, default_value_t = 48)]
     count: u32,
 }
 

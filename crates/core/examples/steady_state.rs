@@ -22,7 +22,7 @@ struct Cli {
     #[command(flatten)]
     report: common::Report,
     /// Presented frame to start sampling after.
-    #[arg(long, default_value_t = 60)]
+    #[arg(short = 'n', long, default_value_t = 60)]
     frame: u64,
     /// Instructions to sample once the frame is reached.
     #[arg(long, default_value_t = DEFAULT_STEPS)]

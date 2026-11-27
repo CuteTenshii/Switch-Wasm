@@ -10,7 +10,7 @@ struct Cli {
     #[command(flatten)]
     target: common::Target,
     /// Directory the images and `symbols.txt` are written to.
-    #[arg(long, value_name = "DIR")]
+    #[arg(short = 'o', long, value_name = "DIR")]
     out: String,
 }
 

@@ -16,7 +16,7 @@ use switch_vp9::{Decoder, Frame};
 #[derive(Parser)]
 struct Cli {
     dir: PathBuf,
-    #[arg(long)]
+    #[arg(short = 'o', long)]
     out: Option<PathBuf>,
 }
 

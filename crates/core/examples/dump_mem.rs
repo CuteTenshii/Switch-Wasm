@@ -10,7 +10,7 @@ use switch_core::nro::load_nro;
 struct Cli {
     nro: String,
     /// Hexadecimal address to start at.
-    #[arg(long, value_parser = common::hex64)]
+    #[arg(short = 'a', long, value_parser = common::hex64)]
     addr: u64,
     /// Bytes to print.
     #[arg(long, default_value_t = 64)]

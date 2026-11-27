@@ -32,7 +32,7 @@ struct Cli {
     #[arg(long, default_value_t = 2)]
     from_frame: u64,
     /// Frames to profile.
-    #[arg(long, default_value_t = 1)]
+    #[arg(short = 'n', long, default_value_t = 1)]
     frames: u64,
 }
 
