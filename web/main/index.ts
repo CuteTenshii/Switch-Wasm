@@ -1,9 +1,7 @@
 // switch-wasm browser frontend entry: starts the worker, restores a session
 // and wires Stop.
 
-import { resetAudio } from './audio';
 import { watchBattery } from './battery';
-import { resetDisplay } from './display';
 import { $ } from './dom';
 import { hasKeys, stageKeys, updateKeysState } from './keys';
 import { log, logLevel, offerPreviousLog, onLogLevel } from './log';
@@ -76,8 +74,6 @@ $('btn-stop').addEventListener('click', async () => {
   // Stops the run before any slice report is handled.
   const ended = endTitle();
   endLoad();
-  resetAudio();
-  resetDisplay();
   setRunning(null);
   setState('idle');
   showOverlay(true);

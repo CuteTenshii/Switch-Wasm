@@ -1,6 +1,8 @@
 // Session bring-up and ending a title. The session is the console, staged once; each title
 // is a process in it.
 
+import { resetAudio } from './audio';
+import { resetDisplay } from './display';
 import { log } from './log';
 import { resetMemoryHistory } from './memory';
 import { bootRefusal } from './nandbusy';
@@ -37,6 +39,9 @@ if (!import.meta.env.DEV) {
 // End the running title; the console, with its storage, keys and system data, stays.
 export async function endTitle(): Promise<void> {
   abortRun();
+  // The next title counts its frames and plays its sound from zero.
+  resetAudio();
+  resetDisplay();
   await call('endTitle');
   booted = false;
   resetMemoryHistory();
