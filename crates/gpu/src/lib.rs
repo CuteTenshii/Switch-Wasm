@@ -712,6 +712,17 @@ type ShaderKey = (u64, Option<ShaderStage>);
 /// A sampled texture, the view it is sampled through, and whether it is compared.
 type HeldCopyKey = (TextureKey, wgpu::TextureViewDimension, bool);
 
+/// What [`Gpu::held_copy_shapes`] counts by: what became of the copy, and the size, format and
+/// view sampled.
+pub type HeldCopyShape = (
+    &'static str,
+    u32,
+    u32,
+    u32,
+    switch_core::gpu::pipeline::Format,
+    wgpu::TextureViewDimension,
+);
+
 /// A texture every layer of which was copied from a held surface; see [`Gpu::texture_over_held`].
 #[derive(Debug)]
 struct HeldCopy {
@@ -925,7 +936,7 @@ pub struct Gpu {
     pub pass_splits: std::collections::HashMap<String, u64>,
     pass_closed_at: Option<&'static std::panic::Location<'static>>,
     /// Copies of held surfaces made or brought up to date, by the shape sampled.
-    pub held_copy_shapes: std::collections::HashMap<String, u64>,
+    pub held_copy_shapes: std::collections::HashMap<HeldCopyShape, u64>,
     /// Draws of a second or later instance, and how many of those widened the draw call
     /// before them instead of making their own.
     pub later_instances: u64,
@@ -1582,10 +1593,13 @@ impl Renderer for Gpu {
             .field("croppedBinds", self.cropped_binds)
             .field("passesJoined", self.passes_joined)
             .object("heldCopyShapes", |o| {
-                let mut shapes: Vec<(&String, &u64)> = self.held_copy_shapes.iter().collect();
+                let mut shapes: Vec<_> = self.held_copy_shapes.iter().collect();
                 shapes.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
-                for (shape, n) in shapes.into_iter().take(PASS_SPLITS_SHOWN) {
-                    o.field(shape, *n);
+                for ((what, width, height, layers, format, view), n) in
+                    shapes.into_iter().take(PASS_SPLITS_SHOWN)
+                {
+                    let shape = format!("{what}: {width}x{height}x{layers} {format:?} as {view:?}");
+                    o.field(&shape, *n);
                 }
             })
             .object("passSplits", |o| {

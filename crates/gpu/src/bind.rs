@@ -1197,13 +1197,17 @@ impl Gpu {
 
     fn count_held_copy(
         &mut self,
-        what: &str,
+        what: &'static str,
         upload: &switch_core::gpu::upload::TextureUpload,
         view: wgpu::TextureViewDimension,
     ) {
-        let shape = format!(
-            "{what}: {}x{}x{} {:?} as {view:?}",
-            upload.width, upload.height, upload.layers, upload.format
+        let shape = (
+            what,
+            upload.width,
+            upload.height,
+            upload.layers,
+            upload.format,
+            view,
         );
         *self.held_copy_shapes.entry(shape).or_default() += 1;
     }
