@@ -380,6 +380,24 @@ export interface ErrorDialog {
 
 export type NetState = 'off' | 'connecting' | 'open' | 'unreachable';
 
+// One of the guest's sockets; a UDP socket or a listener has only the port it asked for (0 is any).
+export interface NetConnection {
+  id: number;
+  host: string;
+  port: number;
+  proto: 'tcp' | 'udp' | 'listen';
+  state: string;
+  sent: number;
+  received: number;
+}
+
+// The relay socket's state and the frames that crossed it.
+export interface NetStatus {
+  socket: string;
+  out: number;
+  in: number;
+}
+
 export interface Commands {
   // End the running title and its applets; the console stays.
   endTitle(): void;
@@ -397,10 +415,9 @@ export interface Commands {
   // Give the guest a network through the relay at `url`, or take it away.
   connectNetwork(url: string): void;
   disconnectNetwork(): void;
-  // The guest's connections, newest first: `[{id, host, port, proto, state, sent, received}]`.
-  netConnections(): string;
-  // The relay socket's state and the frames that crossed it: `{socket, out, in}`.
-  netStatus(): string;
+  // The guest's connections, newest first.
+  netConnections(): NetConnection[];
+  netStatus(): NetStatus;
   // Ask the connected relay to change its settings; the answers come as `net_settings`.
   setRelaySettings(port: number, allowPrivate: boolean, allowInbound: boolean, origins: string[]): void;
 

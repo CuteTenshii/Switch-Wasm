@@ -2,7 +2,7 @@
 
 import type {
   AudioReport, CommandHandlers, ControlData, ControlInfo, GpuReport, JitStats, MemoryReport, NandIdentity, NcaInfo,
-  OpenedContainer, PeekedTitle, ThreadReading,
+  NetConnection, NetStatus, OpenedContainer, PeekedTitle, ThreadReading,
 } from '../shared/protocol';
 import { noteRegistered } from './activity';
 import { flushLog } from './log';
@@ -48,8 +48,12 @@ export const CMD = {
   setDeviceTiming: switch_set_device_timing,
   connectNetwork: switch_net_connect,
   disconnectNetwork: switch_net_disconnect,
-  netConnections: switch_net_connections_json,
-  netStatus: switch_net_status_json,
+  netConnections() {
+    return JSON.parse(switch_net_connections_json()) as NetConnection[];
+  },
+  netStatus() {
+    return JSON.parse(switch_net_status_json()) as NetStatus;
+  },
   setRelaySettings: switch_net_set_settings,
 
   // The core reads the file itself, so the page never holds a copy.

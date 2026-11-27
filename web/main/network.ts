@@ -3,7 +3,7 @@
 // connections. Off, the guest sees a network that never answers.
 
 import { Download, Power, PowerOff } from 'lucide';
-import type { NetState } from '../shared/protocol';
+import type { NetConnection, NetState } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
 import { $ } from './dom';
 import { icon } from './icons';
@@ -13,16 +13,6 @@ import { call, onNetState, whenReady } from './rpc';
 const DEFAULT_URL = 'ws://127.0.0.1:18787';
 const URL_KEY = 'relay-url';
 const ON_KEY = 'relay-on';
-
-interface Connection {
-  id: number;
-  host: string;
-  port: number;
-  proto: 'tcp' | 'udp' | 'listen';
-  state: string;
-  sent: number;
-  received: number;
-}
 
 const button = $<HTMLButtonElement>('btn-net');
 const urlInput = $<HTMLInputElement>('net-url');
@@ -67,7 +57,7 @@ function render(): void {
 }
 
 /** A UDP socket or a listener has no single peer, only the port it asked for (0 is any). */
-function describe(c: Connection): string {
+function describe(c: NetConnection): string {
   const port = c.port === 0 ? 'any port' : `port ${c.port}`;
   switch (c.proto) {
     case 'tcp': return `${c.host}:${c.port}`;
@@ -76,7 +66,7 @@ function describe(c: Connection): string {
   }
 }
 
-function showConnections(list: Connection[]): void {
+function showConnections(list: NetConnection[]): void {
   $('net-count').textContent = String(list.length);
   $('net-empty').hidden = list.length > 0;
   table.hidden = list.length === 0;
@@ -96,8 +86,8 @@ function showConnections(list: Connection[]): void {
 }
 
 async function refresh(): Promise<void> {
-  showConnections(JSON.parse(await call('netConnections')) as Connection[]);
-  const status = JSON.parse(await call('netStatus')) as { socket: string; out: number; in: number };
+  showConnections(await call('netConnections'));
+  const status = await call('netStatus');
   link.textContent = `Socket ${status.socket}, ${status.out} frames out, ${status.in} in.`;
 }
 
