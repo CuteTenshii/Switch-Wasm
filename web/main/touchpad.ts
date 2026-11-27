@@ -2,6 +2,7 @@
 // toolbar toggle of landscape phones.
 
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp } from 'lucide';
+import { isButton, type Button } from './buttons';
 import { $ } from './dom';
 import { icon } from './icons';
 
@@ -13,7 +14,7 @@ for (const [name, glyph] of [['UP', ChevronUp], ['DOWN', ChevronDown], ['LEFT', 
 }
 
 // The button each finger is on; a finger slides from one to the next.
-const held = new Map<number, string>();
+const held = new Map<number, Button>();
 
 interface Stick {
   el: HTMLElement;
@@ -30,8 +31,7 @@ for (const el of padEl.querySelectorAll<HTMLElement>('[data-stick]')) {
 // The stick each finger drags.
 const dragging = new Map<number, Stick>();
 
-// Names from `data-button`, as `input.ts` maps them.
-export function touchpadButtons(): Iterable<string> {
+export function touchpadButtons(): Iterable<Button> {
   return held.values();
 }
 
@@ -46,14 +46,14 @@ export function touchpadActive(): boolean {
 }
 
 function showHeld(): void {
-  const down = new Set(held.values());
-  for (const el of buttonEls) el.classList.toggle('is-down', down.has(el.dataset.button!));
+  const down = new Set<string>(held.values());
+  for (const el of buttonEls) el.classList.toggle('is-down', down.has(el.dataset.button ?? ''));
 }
 
 function holdAt(e: PointerEvent): void {
   const name = document.elementFromPoint(e.clientX, e.clientY)
     ?.closest<HTMLElement>('#touchpad [data-button]')?.dataset.button;
-  if (name) held.set(e.pointerId, name);
+  if (isButton(name)) held.set(e.pointerId, name);
   else held.delete(e.pointerId);
   showHeld();
 }

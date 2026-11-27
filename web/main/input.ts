@@ -1,5 +1,6 @@
 // Keyboard, gamepad, on-screen controller and touch input, pushed to the emulator as one state.
 
+import { BTN } from './buttons';
 import { $ } from './dom';
 import { log } from './log';
 import { call, hasSession, isReady } from './rpc';
@@ -9,14 +10,13 @@ import { screenSize } from './display';
 import { screenEl } from './shell';
 import { touchpadActive, touchpadButtons, touchpadStick } from './touchpad';
 
-// HidNpadButton bits, in Horizon's order.
-const BTN: Record<string, number> = {
-  A: 1 << 0, B: 1 << 1, X: 1 << 2, Y: 1 << 3,
-  STICK_L: 1 << 4, STICK_R: 1 << 5,
-  L: 1 << 6, R: 1 << 7, ZL: 1 << 8, ZR: 1 << 9,
-  PLUS: 1 << 10, MINUS: 1 << 11,
-  LEFT: 1 << 12, UP: 1 << 13, RIGHT: 1 << 14, DOWN: 1 << 15,
-};
+// The W3C standard gamepad layout's buttons 0-15, in order.
+const STANDARD_PAD = [
+  BTN.B, BTN.A, BTN.Y, BTN.X,
+  BTN.L, BTN.R, BTN.ZL, BTN.ZR,
+  BTN.MINUS, BTN.PLUS, BTN.STICK_L, BTN.STICK_R,
+  BTN.UP, BTN.DOWN, BTN.LEFT, BTN.RIGHT,
+];
 
 function inputStatus(text: string, detail = ''): void {
   const el = $('input-state');
@@ -169,23 +169,9 @@ function pushInput(): void {
   let { x: slx, y: sly } = touchpadStick('left');
   let { x: srx, y: sry } = touchpadStick('right');
   if (pad) {
-    // Standard order: 0-3 B/A/Y/X, 4-7 L/R/ZL/ZR, 8-9 select/start, 10-11 sticks, 12-17 dpad.
-    if (pad.buttons[0]?.pressed) mask |= BTN.B;
-    if (pad.buttons[1]?.pressed) mask |= BTN.A;
-    if (pad.buttons[2]?.pressed) mask |= BTN.Y;
-    if (pad.buttons[3]?.pressed) mask |= BTN.X;
-    if (pad.buttons[4]?.pressed) mask |= BTN.L;
-    if (pad.buttons[5]?.pressed) mask |= BTN.R;
-    if (pad.buttons[6]?.pressed) mask |= BTN.ZL;
-    if (pad.buttons[7]?.pressed) mask |= BTN.ZR;
-    if (pad.buttons[8]?.pressed) mask |= BTN.MINUS;
-    if (pad.buttons[9]?.pressed) mask |= BTN.PLUS;
-    if (pad.buttons[10]?.pressed) mask |= BTN.STICK_L;
-    if (pad.buttons[11]?.pressed) mask |= BTN.STICK_R;
-    if (pad.buttons[12]?.pressed) mask |= BTN.UP;
-    if (pad.buttons[13]?.pressed) mask |= BTN.DOWN;
-    if (pad.buttons[14]?.pressed) mask |= BTN.LEFT;
-    if (pad.buttons[15]?.pressed) mask |= BTN.RIGHT;
+    STANDARD_PAD.forEach((bit, i) => {
+      if (pad.buttons[i]?.pressed) mask |= bit;
+    });
     // -32768..32767, ~15% deadzone; Y negated because Horizon's axis points up.
     const dz = 0.15;
     const axes = pad.axes || [];
