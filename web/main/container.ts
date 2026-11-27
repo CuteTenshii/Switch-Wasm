@@ -11,11 +11,15 @@ import {
   awaitFirstFrame, beginLoad, currentAction, failLoad, loadPhase, type LoadAction,
 } from './loading';
 import { log } from './log';
+import {
+  describeDlc, describeUpdate, extrasFor, holdDlc, holdUpdate, pairedNotes, type HeldDlc,
+} from './pairing';
 import { call } from './rpc';
 import { run, updateReadouts } from './runloop';
 import { endTitle, noteBooted, refuseBootWhileNandBusy } from './session';
 import { openPanel, setNote, setState, showScreen } from './shell';
 import { setRunning } from './title';
+import { appendRows, renderTitleCard } from './titlecard';
 import { knownTitle, type KnownTitle } from './titles';
 
 const nspDrop = $('nsp-drop');
@@ -39,9 +43,7 @@ $('nsp-file').addEventListener('change', (e) => {
 async function handleContainerFile(file: File): Promise<void> {
   const verdict = await classify(file, ['pfs0', 'xci', 'nca'], 'Drop it on the screen to boot it.');
   if (!verdict.ok) {
-    // Without clearing: an open container should not vanish over a bad drop.
-    $('nsp-result').querySelectorAll('.nca-inspect').forEach((node) => node.remove());
-    $('nsp-result').appendChild(el('div', 'nca-info nca-inspect', verdict.why));
+    showInspectNote(verdict.why);
     log(verdict.why, 'error');
     return;
   }
@@ -63,89 +65,33 @@ async function openFile(file: File): Promise<OpenedContainer | null> {
     return await call('openContainer', file);
   } catch (err) {
     const why = 'Could not open ' + file.name + ': ' + (err as Error).message;
-    // Without clearing: an open container should not vanish over a bad drop.
-    $('nsp-result').querySelectorAll('.nca-inspect').forEach((node) => node.remove());
-    $('nsp-result').appendChild(el('div', 'nca-info nca-inspect', why));
+    showInspectNote(why);
     log(why, 'error');
     return null;
   }
 }
 
-// Updates and add-on content are paired with their title rather than opened.
-interface HeldUpdate {
-  file: File;
-  titleId: string;
-  version: string;
+// In place of the last inspect note, without clearing: an open container should not vanish
+// over a bad drop. Matched on `.nca-inspect`: the title card has an `.nca-info` block too.
+function showInspectNote(text: string): HTMLElement {
+  $('nsp-result').querySelectorAll('.nca-inspect').forEach((node) => node.remove());
+  const note = el('div', 'nca-info nca-inspect', text);
+  $('nsp-result').appendChild(note);
+  return note;
 }
-
-let heldUpdate: HeldUpdate | null = null;
-
-interface HeldDlc {
-  file: File;
-  titleId: string;
-  indices: number[];
-}
-
-let heldDlc: HeldDlc[] = [];
 
 // Empty until the open container's Control NCA has been read.
 let openTitleId = '';
 
-// What each title was last launched with; the files themselves do not survive a reload.
-const UPDATE_MEMORY = 'switch-wasm:updates';
-const DLC_MEMORY = 'switch-wasm:dlc';
-
-interface RememberedUpdate { name: string; version: string }
-
-function rememberedUpdates(): Record<string, RememberedUpdate> {
-  try {
-    return JSON.parse(localStorage.getItem(UPDATE_MEMORY) || '{}') as Record<string, RememberedUpdate>;
-  } catch {
-    return {};
-  }
-}
-
-function rememberUpdate(u: HeldUpdate): void {
-  const all = rememberedUpdates();
-  all[u.titleId] = { name: u.file.name, version: u.version };
-  try {
-    localStorage.setItem(UPDATE_MEMORY, JSON.stringify(all));
-  } catch {
-    // A full or blocked store only loses the reminder.
-  }
-}
-
-function rememberedDlc(): Record<string, string[]> {
-  try {
-    return JSON.parse(localStorage.getItem(DLC_MEMORY) || '{}') as Record<string, string[]>;
-  } catch {
-    return {};
-  }
-}
-
-function rememberDlc(titleId: string, name: string): void {
-  const all = rememberedDlc();
-  const names = new Set(all[titleId] || []);
-  names.add(name);
-  all[titleId] = [...names];
-  try {
-    localStorage.setItem(DLC_MEMORY, JSON.stringify(all));
-  } catch {
-    // A full or blocked store only loses the reminder.
-  }
-}
-
 // `explain` says what happens to the file next; a launch that holds it says that itself.
-function handleDlcFile(file: File, packs: DlcEntry[], explain = true): void {
-  const titleId = packs[0]?.title_id ?? '';
-  heldDlc = heldDlc.filter((held) => held.file.name !== file.name);
-  heldDlc.push({ file, titleId, indices: packs.map((e) => e.index) });
-  rememberDlc(titleId, file.name);
+function handleDlcFile(file: File, packs: DlcEntry[], explain = true): HeldDlc {
+  const held = holdDlc(file, packs);
   // The core has logged what the file holds; this is what happens to it.
-  if (explain) log(titleId === openTitleId
+  if (explain) log(held.titleId === openTitleId
     ? 'The add-on content is mounted when this title launches.'
     : 'Open that game to launch it with the add-on content.', 'info');
   showPairedNotes();
+  return held;
 }
 
 // Hold each of `files`, updates and add-on content the caller has checked, for the next launch.
@@ -157,72 +103,25 @@ export async function holdForLaunch(files: File[]): Promise<void> {
   }
 }
 
-function describeDlc(packs: number): string {
-  return packs === 1 ? '1 add-on content pack' : packs + ' add-on content packs';
-}
-
-function handleUpdateFile(file: File, { title: titleId, version }: UpdateInfo, explain = true): void {
-  heldUpdate = { file, titleId, version };
-  rememberUpdate(heldUpdate);
+function handleUpdateFile(file: File, update: UpdateInfo, explain = true): void {
+  holdUpdate(file, update);
   // The core has logged what the file holds; this is what happens to it.
-  if (explain) log(titleId === openTitleId
+  if (explain) log(update.title === openTitleId
     ? 'The update is applied when this title launches.'
     : 'Open that game to launch it patched.', 'info');
   showPairedNotes();
-}
-
-function describeUpdate(u: HeldUpdate | RememberedUpdate & { file?: File }): string {
-  const version = 'version' in u && u.version ? 'v' + u.version : '';
-  const name = 'file' in u && u.file ? u.file.name : (u as RememberedUpdate).name;
-  return version || name;
 }
 
 // Rendered under the card, not inside it, so rebuilding the card clears them.
 function showPairedNotes(): void {
   $('nsp-result').querySelectorAll('.paired-note').forEach((node) => node.remove());
   let after: Element | null = $('nsp-result').querySelector('.title-card');
-  for (const line of pairedNotes()) {
+  for (const line of pairedNotes(openTitleId)) {
     const note = el('div', 'nca-info paired-note', line);
     if (after) after.after(note);
     else $('nsp-result').prepend(note);
     after = note;
   }
-}
-
-function pairedNotes(): string[] {
-  const lines: string[] = [];
-  if (heldUpdate) {
-    lines.push(heldUpdate.titleId === openTitleId
-      ? 'Update ' + describeUpdate(heldUpdate) + ' - applied when this title launches.'
-      : 'Update ' + describeUpdate(heldUpdate) + ' held for ' + heldUpdate.titleId
-        + ' - open that game to launch it patched.');
-  } else {
-    const known = openTitleId ? rememberedUpdates()[openTitleId] : undefined;
-    if (known) {
-      lines.push('This title was last launched with update ' + describeUpdate(known)
-        + ' (' + known.name + '). Drop that file again to launch it patched.');
-    }
-  }
-
-  const mine = heldDlc.filter((held) => held.titleId === openTitleId);
-  const packs = mine.reduce((n, held) => n + held.indices.length, 0);
-  if (packs) {
-    lines.push(describeDlc(packs) + ' - mounted when this title launches ('
-      + mine.map((held) => held.file.name).join(', ') + ').');
-  }
-  for (const held of heldDlc.filter((h) => h.titleId !== openTitleId)) {
-    lines.push(describeDlc(held.indices.length) + ' held for ' + held.titleId
-      + ' - open that game to launch it with them.');
-  }
-  if (!packs && openTitleId) {
-    const known = rememberedDlc()[openTitleId] || [];
-    const missing = known.filter((name) => !heldDlc.some((h) => h.file.name === name));
-    if (missing.length) {
-      lines.push('This title was last launched with add-on content ('
-        + missing.join(', ') + '). Drop those files again to launch it with them.');
-    }
-  }
-  return lines;
 }
 
 // Boot from the stage: open the container and launch its Program NCA.
@@ -268,8 +167,7 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
     return;
   }
   if (opened.kind === 'dlc') {
-    handleDlcFile(file, opened.packs);
-    const held = heldDlc[heldDlc.length - 1];
+    const held = handleDlcFile(file, opened.packs);
     setState('idle');
     failLoad(held.titleId === openTitleId
       ? describeDlc(opened.packs.length) + ' added - launch ' + (heldTitle?.name || 'the game')
@@ -343,81 +241,8 @@ async function showTitleCard(): Promise<ControlInfo | null> {
   return info;
 }
 
-function renderTitleCard(info: ControlInfo, iconUrl: string | null): HTMLElement {
-  const card = el('div', 'title-card');
-  if (iconUrl) {
-    const img = el('img', 'title-icon');
-    img.alt = info.name;
-    img.src = iconUrl;
-    card.appendChild(img);
-  }
-  const meta = el('div', 'title-meta');
-  meta.appendChild(el('div', 'title-name', info.name));
-  if (info.publisher) meta.appendChild(el('div', 'title-publisher', info.publisher));
-  const tags = [];
-  if (info.version) tags.push('v' + info.version);
-  if (info.demo) tags.push('demo');
-  tags.push(info.title_id);
-  meta.appendChild(el('div', 'title-tags', tags.join(' · ')));
-  card.appendChild(meta);
-
-  const details = el('div', 'nca-info');
-  appendRows(details, titleRows(info));
-  card.appendChild(details);
-  return card;
-}
-
-function titleRows(info: ControlInfo): [string, string][] {
-  const rows: [string, string][] = [];
-  const push = (k: string, v: string | undefined) => {
-    if (v) rows.push([k, v]);
-  };
-  push('Language', info.language);
-  push('Localized', (info.languages || []).join(', '));
-  push('Age rating', (info.ratings || []).map((r) => r.organisation + ' ' + r.age).join(', '));
-  push('User account', info.startup_user_account);
-  push('Screenshots', info.screenshot);
-  push('Video capture', info.video_capture);
-  push('Save data', saveDataSummary(info));
-  if (info.add_on_content_base_id && !/^0+$/.test(info.add_on_content_base_id)) {
-    push('DLC base id', info.add_on_content_base_id);
-  }
-  if (info.save_data_owner_id && info.save_data_owner_id !== info.title_id
-    && !/^0+$/.test(info.save_data_owner_id)) {
-    push('Save data owner', info.save_data_owner_id);
-  }
-  push('Error codes', info.error_code_category);
-  push('ISBN', info.isbn);
-  return rows;
-}
-
-function saveDataSummary(info: ControlInfo): string {
-  const part = (label: string, size = 0, journal = 0) => {
-    if (!size && !journal) return null;
-    const journalNote = journal ? ' (+' + fmtSize(journal) + ' journal)' : '';
-    return label + ' ' + fmtSize(size) + journalNote;
-  };
-  return [
-    part('user', info.user_save_size, info.user_save_journal_size),
-    part('device', info.device_save_size, info.device_save_journal_size),
-    part('BCAT', info.bcat_storage_size, 0),
-  ].filter(Boolean).join(', ');
-}
-
-function appendRows(out: HTMLElement, rows: [string, string][]): void {
-  for (const [k, v] of rows) {
-    const row = el('div');
-    row.appendChild(el('span', 'k', k + ':'));
-    row.append(' ' + v);
-    out.appendChild(row);
-  }
-}
-
 async function inspectNca(f: NspFile, index: number): Promise<void> {
-  // Matched on `.nca-inspect`: the title card has an `.nca-info` block too.
-  $('nsp-result').querySelectorAll('.nca-inspect').forEach((node) => node.remove());
-  const out = el('div', 'nca-info nca-inspect', 'Parsing ' + f.name + ' ...');
-  $('nsp-result').appendChild(out);
+  const out = showInspectNote('Parsing ' + f.name + ' ...');
   await parseAndRenderNca(out, index, () => launchNca(f.name, index));
 }
 
@@ -425,8 +250,7 @@ async function inspectNca(f: NspFile, index: number): Promise<void> {
 async function handleStandaloneNca(file: File): Promise<NcaInfo | null> {
   clearNsp();
   setNote('container-badge', 'opening ' + file.name, false);
-  const out = el('div', 'nca-info nca-inspect', 'Parsing ' + file.name + ' ...');
-  $('nsp-result').appendChild(out);
+  const out = showInspectNote('Parsing ' + file.name + ' ...');
   try {
     await call('openNca', file);
   } catch (e) {
@@ -491,15 +315,13 @@ function launchNca(name: string, index?: number): Promise<void> {
   // The core's trace buffer is cleared by booting, so the page reports the version.
   const notes = [];
   let identity = heldTitle;
-  if (heldUpdate?.titleId === openTitleId) {
-    notes.push('Update ' + describeUpdate(heldUpdate)
+  const { update, packs } = extrasFor(openTitleId);
+  if (update) {
+    notes.push('Update ' + describeUpdate({ version: update.version, name: update.file.name })
       + ' applied: its modules, over the base game\'s data.');
     // The update's version is what runs.
-    if (identity && heldUpdate.version) identity = { ...identity, version: heldUpdate.version };
+    if (identity && update.version) identity = { ...identity, version: update.version };
   }
-  const packs = heldDlc
-    .filter((held) => held.titleId === openTitleId)
-    .reduce((n, held) => n + held.indices.length, 0);
   if (packs) notes.push(describeDlc(packs) + ' mounted.');
   // The title card also comes from an encrypted header, so a rerun once keys are in reads it again.
   const relaunch = async () => {
