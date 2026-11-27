@@ -193,23 +193,23 @@ pub(crate) fn sampled_texture_format(
     if format == Format::PackedDepth {
         return Ok((wgpu::TextureFormat::Rg32Float, Widen::PackedDepth));
     }
-    match device_texture_format(features, format) {
-        Ok(wanted) => Ok((wanted, Widen::None)),
-        Err(refused) => {
-            let widened = match format {
-                Format::R16Unorm => Some((wgpu::TextureFormat::R32Float, Widen::Unorm16)),
-                Format::R16Snorm => Some((wgpu::TextureFormat::R32Float, Widen::Snorm16)),
-                Format::Rg16Unorm => Some((wgpu::TextureFormat::Rg32Float, Widen::Unorm16)),
-                Format::Rg16Snorm => Some((wgpu::TextureFormat::Rg32Float, Widen::Snorm16)),
-                Format::Rgba16Unorm => Some((wgpu::TextureFormat::Rgba32Float, Widen::Unorm16)),
-                Format::Rgba16Snorm => Some((wgpu::TextureFormat::Rgba32Float, Widen::Snorm16)),
-                _ => None,
-            };
-            match widened {
-                Some(pair) if features.contains(wgpu::Features::FLOAT32_FILTERABLE) => Ok(pair),
-                _ => Err(refused),
-            }
-        }
+    // Asked before every bind, so the refusal's message is built only when nothing replaces it.
+    let wanted = texture_format(format)?;
+    if features.contains(wanted.required_features()) {
+        return Ok((wanted, Widen::None));
+    }
+    let widened = match format {
+        Format::R16Unorm => Some((wgpu::TextureFormat::R32Float, Widen::Unorm16)),
+        Format::R16Snorm => Some((wgpu::TextureFormat::R32Float, Widen::Snorm16)),
+        Format::Rg16Unorm => Some((wgpu::TextureFormat::Rg32Float, Widen::Unorm16)),
+        Format::Rg16Snorm => Some((wgpu::TextureFormat::Rg32Float, Widen::Snorm16)),
+        Format::Rgba16Unorm => Some((wgpu::TextureFormat::Rgba32Float, Widen::Unorm16)),
+        Format::Rgba16Snorm => Some((wgpu::TextureFormat::Rgba32Float, Widen::Snorm16)),
+        _ => None,
+    };
+    match widened {
+        Some(pair) if features.contains(wgpu::Features::FLOAT32_FILTERABLE) => Ok(pair),
+        _ => device_texture_format(features, format).map(|wanted| (wanted, Widen::None)),
     }
 }
 
