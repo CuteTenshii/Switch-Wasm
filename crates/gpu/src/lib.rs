@@ -1400,11 +1400,14 @@ impl Renderer for Gpu {
             if self.unlatched > 0 {
                 self.clean_frames_needed = self.clean_frames_needed.saturating_mul(2);
             }
-            eprintln!(
-                "[gpu] a draw fell back where a readback lands later than the call that \
-                 asked for it; the rasterizer has the frames from here until {} in a row \
-                 could have been the device's. What it fell back on: {:?}",
-                self.clean_frames_needed, self.reasons
+            switch_core::trace::emit_at(
+                switch_core::trace::Level::Warn,
+                &format!(
+                    "[gpu] a draw fell back where a readback lands later than the call that \
+                     asked for it; the rasterizer has the frames from here until {} in a row \
+                     could have been the device's. What it fell back on: {:?}",
+                    self.clean_frames_needed, self.reasons
+                ),
             );
         }
         self.fell_back_this_frame = false;

@@ -184,7 +184,10 @@ impl Gpu {
         self.fallbacks += 1;
         self.fell_back_this_frame = true;
         if !self.reasons.contains(&why) {
-            eprintln!("[gpu] falling back: {why}");
+            switch_core::trace::emit_at(
+                switch_core::trace::Level::Warn,
+                &format!("[gpu] falling back: {why}"),
+            );
             self.reasons.push(why.clone());
         }
         self.last_fallback = Some(why);
@@ -200,7 +203,7 @@ impl Gpu {
         };
         self.gave_up = true;
         let said = format!("the device was lost ({why}); the rasterizer has the frame from here");
-        eprintln!("[gpu] {said}");
+        switch_core::trace::emit_at(switch_core::trace::Level::Warn, &format!("[gpu] {said}"));
         self.report = Some(said);
         self.space = Space::default();
         self.parked.clear();
