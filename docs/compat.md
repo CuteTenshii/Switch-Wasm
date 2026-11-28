@@ -15,9 +15,9 @@ Every entry was measured on a MacBook Air (M4, 24 GB of RAM); speeds and frame r
 | Title | Title ID | Version | Status | How far it gets | Measured |
 |---|---|---|---|---|---|
 | Minecraft | 0100D71004694000 | 1.0.0 | Playable | Fully playable at 30-40 fps. | 2026-11-15 |
-| Just Dance 2017 | 0100BCE000598000 | 1.0.0 | Playable | Fully playable at a stable 60 fps, no known issues. | 2026-11-15 |
-| Just Dance 2022 | 0100EA6014BB8000 | 326704.600931 | Playable | Fully playable at a stable 60 fps, no known issues. | 2026-11-15 |
-| Just Dance 2019 | 010075600AE96000 | 284652.419607 | Playable | Fully playable at 40-50 fps, with small audio stutters. | 2026-11-15 |
+| Just Dance 2017 | 0100BCE000598000 | 1.0.0 | Playable | Fully playable at a stable 60 fps, with Joy-Con motion, no known issues. | 2026-11-28 |
+| Just Dance 2022 | 0100EA6014BB8000 | 326704.600931 | Playable | Fully playable at a stable 60 fps, with Joy-Con motion, no known issues. | 2026-11-28 |
+| Just Dance 2019 | 010075600AE96000 | 284652.419607 | Playable | Fully playable at a stable 60 fps, with Joy-Con motion, no known issues. | 2026-11-28 |
 | The Legend of Zelda: Echoes of Wisdom | 01008CF01BAAC000 | 1.0.0 | In-game | Falls back to the software rasterizer. The prologue's first scene by frame 125, but the right half of the screen is a 2x-zoomed copy of the left. | 2026-11-14 |
 | Mario Kart 8 Deluxe | 0100152000022000 | 1.0.0 | Menus | Its menus render, but from race selection on (character selection and later) the frame rate drops too low to play. | 2026-11-15 |
 | Home Menu (`qlaunch`) | 0100000000001000 | 21.2.0 | Menus | Navigable: settings can be browsed and changed, and the album and profile pages open as applets. | 2026-11-14 |
