@@ -21,6 +21,9 @@ the TypeScript frontend plus the Rust core compiled to `wasm32-unknown-unknown`.
 
 - `crates/core`: dependency-free emulator core, including the AArch64
   interpreter and JIT, loaders, services, memory, audio, and software GPU.
+- `crates/shader`: Maxwell shader decoding, the scalar interpreter the software
+  renderer runs, and WGSL translation. It reaches guest memory only through
+  sources the core passes in.
 - `crates/gpu`: optional `wgpu` renderer behind the core renderer
   interface. The software renderer is its correctness reference.
 - `crates/wasm`: browser bindings over the one global session. Buffers cross the

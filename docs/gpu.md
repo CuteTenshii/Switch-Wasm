@@ -128,18 +128,27 @@ Section headings are paths under `crates/core/src/gpu/`; a heading that starts w
 
 ## `shader/mod.rs`
 
-- Programs are 32-byte blocks: one `sched` control word, then three instructions. Binaries carry no length, so decoding walks the CFG from the entry and stops each path at its terminator (stopping at the first `exit` misses code reached by branches). A branch target on a `sched` word means the block's first instruction.
+- Shader decoding, interpretation and WGSL translation are the `switch-shader` crate (`crates/shader`), which reads guest memory only through the constant, global memory and texture sources a host passes in. What is left here reads programs out of guest memory; `shader/sources.rs` holds the memory-backed sources.
 - Mesa-compiled binaries carry a 0x50-byte header whose first bytes are not reliably zero, so the header is assumed only when slot 1 does not decode; deko3d/uam binaries have none. This lives in one place because the rasterizer, the wgpu backend and compute all need the same answer.
+- `DecodeReads` records the GPU-virtual pages and constant words a decode read, so backends can cache translations; only constant words are re-read to validate, program pages are watched.
+- A guest-memory error under a decode or an invocation crosses `switch-shader` as `Error::Host` and converts back to the same `Error`, so a `GpuSyncPending` from a read still parks the channel.
+
+## `shader/sources.rs`
+
+- Per-draw caches (`ConstCache`, TIC/TSC descriptors, decoded blocks) are owned by the caller so the per-fragment structs can be rebuilt while the pixel loop borrows `ctx` mutably. Constant buffers can't change mid-draw.
+
+## `crates/shader/src/lib.rs`
+
+- Programs are 32-byte blocks: one `sched` control word, then three instructions. Binaries carry no length, so decoding walks the CFG from the entry and stops each path at its terminator (stopping at the first `exit` misses code reached by branches). A branch target on a `sched` word means the block's first instruction.
 - The SPH's `omap.target` is the only source of fragment output registers: registers are assigned in target order, targets with no writes are skipped, and disabled components inside a written target still take a register. The WGSL translator maps outputs the same way (`Translation::header`); it used to read output 0 from `r0..r3` whatever the map said.
 - `brx` targets come from a constant-bank jump table. The decoder walks the selector's use-def chain back to the `imnmx` clamp (which the scheduler may hoist far away) and gives up on any unexpected or predicated write rather than guess a table length. Jump targets are base + entry, unrounded, so the base must not be aligned past `sched` words. The resolved targets are kept for later CFG analysis.
-- `DecodeReads` records the GPU-virtual pages and constant words a decode read, so backends can cache translations; only constant words are re-read to validate, program pages are watched.
 - The rasterizer interpolates only the varyings the fragment shader reads (`interpolated_slots`), since the cost is per covered pixel.
 
-## `shader/cfg.rs`
+## `crates/shader/src/cfg.rs`
 
 - Maxwell uses a reconvergence stack (`ssy`/`sync`, `pbk`/`brk`, `pcnt`/`cont`), not structured control flow. If every pop statically pairs with one push, each pair maps to an `if` or loop and WGSL translation is mechanical; an instruction reachable with two different stacks needs per-lane masking instead. `Cfg::pairing` answers this question; it does not build structured output.
 
-## `shader/isa/`
+## `crates/shader/src/isa/`
 
 - Perspective correction: the fragment shader reads interpolated `1/w` at `a[0x7c]` via `ipa pass`, computes `w = mufu rcp`, and multiplies other varyings by it in perspective `ipa`. Barycentrics are therefore screen-space linear in both renderers.
 - The guard predicate is bits [16,19) plus negate at 19; register 7 is `PT`.
@@ -147,10 +156,9 @@ Section headings are paths under `crates/core/src/gpu/`; a heading that starts w
 - `lea.hi` adds the low word of the 64-bit `hi:a` shifted right by `32 - shift`, and `neg` negates all 64 bits. WGSL has no `u64`, so the translation borrows across the two words by hand; `lea_computes_the_same_words_on_both_renderers` checks it against the interpreter. Echoes of Wisdom's first was `lea.hi r4, r4, r3, rz, 0x1f`. The `.x`, `.cc` and predicate-writing forms are refused, as Eden refuses them.
 - `f2i` takes neg from bit 45 and abs from bit 49, as Mesa's `emitF2I` emits and the other conversions do; Eden's `F2I` names them the other way round, so its field names are no proof. It reads an f16 source from the half bit 41 names, which only Eden documents. `pset` writes 1.0 or all ones (bit 44) from three predicates. `fcmp` copies raw bits, picking between two values by how a third compares with 0.0. Just Dance 2023's shaders use all three.
 
-## `shader/interp/`
+## `crates/shader/src/interp/`
 
-- `ShaderResult` boxes `Error` (56 bytes) so a `Result` fits in a register pair; unboxed, it cost a measurable share of a Home Menu frame. Unbox only at `resume`'s boundary.
-- Per-draw caches (`ConstCache`, TIC/TSC descriptors, decoded blocks) are owned by the caller so the per-fragment structs can be rebuilt while the pixel loop borrows `ctx` mutably. Constant buffers can't change mid-draw.
+- `ShaderResult` boxes `Error` so a `Result` fits in a register pair; unboxed, it cost a measurable share of a Home Menu frame. Unbox only at `resume`'s boundary.
 - `gpr` has 256 slots so `RZ` indexes without a bounds check; RZ is rewritten to 0 unconditionally (cheaper than a branch). Program ops and predicates are sliced to one length to share one bounds check.
 - `texs` results are deferred: compiled code reads destination registers' old values between the fetch and its first consumer, so each result lands just before its first reader, or at the next branch/exit. `reads()` must list every operand register of texture ops or queued results land late.
 - `a[]` is a flat 256-word array with a written-mask (unwritten `clip.w` must default to 1.0); it replaced a HashMap that dominated per-pixel cost.
@@ -161,18 +169,18 @@ Section headings are paths under `crates/core/src/gpu/`; a heading that starts w
 - `tmml` (0xdf58, `tmml.b` 0xdf60) is decoded only with mask 0x2, the level a sample would read, which is 0 because every image is sampled at level 0. The hardware returns the raw LOD first and that level second, as nouveau's `handleTXLQ` reads them (Eden returns them in SPIR-V's order instead); a mask asking for the raw LOD stays undecoded and falls back (Breath of the Wild).
 - `tex.aoffi` offsets are texels scaled by level size (Persona 5 Royal's blur); a 3D image's z nibble (bits 8 to 11) moves it by slices (Breath of the Wild).
 
-## `shader/compiled.rs`
+## `crates/shader/src/compiled.rs`
 
 - Lowering exists because fragment shaders run once per covered pixel: binary-searched branch targets, linear `texs` lookups and constant-cache reads are paid once instead.
 - Ops are stored apart from predicates because an `Op` is 32 bytes against 40 for `Instruction`: two per cache line instead of 1.6.
 - Constant folding is sound because a constant buffer cannot change during a draw (one method). Unbound banks stay unfolded so the error still comes from the reading instruction. Undecoded branch targets error only when taken, since unreachable branches exist in shaders that run fine.
 
-## `shader/wgsl/`
+## `crates/shader/src/wgsl/`
 
 - Control flow: Maxwell has a reconvergence stack (`ssy`/`sync`), backward `bra` loops and `brx` multi-way jumps. Although `cfg` proves push/pop pairing for every Home Menu shader, the translation emits a `switch` over `pc` inside a `loop` with an explicit stack (the `interp::Invocation` machine in WGSL), which cannot mistranslate control flow. It is slower on the GPU; recovering structure where `cfg` proves it safe is a future change local to this module, with the state machine as fallback.
 - Registers are untyped `u32` with `bitcast<f32>`: shaders mix integer and float use of one register, so typing them would be wrong. Registers, helpers and bindings are recorded while emitting, with no second pass that could disagree; `Layout::of` derives from the `Translation` for the same reason.
 - Registers are `var<private>` because a fragment shader's colour is r0..r3 after the invocation; there is no output attribute.
-- Varyings are `@interpolate(linear)`: `ipa` receives value/w and multiplies by `rcp(a[0x7c])` itself ([shader/isa/](#shaderisa)), so perspective interpolation would divide twice (it looks like a texcoord bug). The vertex stage multiplies by 1/w; fragment `position.w` is 1/w, matching `a[0x7c]`.
+- Varyings are `@interpolate(linear)`: `ipa` receives value/w and multiplies by `rcp(a[0x7c])` itself ([crates/shader/src/isa/](#cratesshadersrcisa)), so perspective interpolation would divide twice (it looks like a texcoord bug). The vertex stage multiplies by 1/w; fragment `position.w` is 1/w, matching `a[0x7c]`.
 - `Layout::flip_y` must be set when the guest viewport does *not* mirror y (offscreen): WebGPU has no negative viewport height, and its NDC-to-framebuffer transform already mirrors. Using `Viewport::flip_y` directly flips twice and still looks almost right, because UIs are mostly symmetric.
 - Global memory addresses for `ldg`, `stg` and atomics are either a descriptor in a constant bank plus a register index (A Short Hike) or a whole descriptor loaded by `ldc.64`/two `mov`s (Nintendo Switch Sports). Other addresses are unsupported rather than guessed.
 - A `ldg` through a constant-bank descriptor binds the buffer the descriptor names, at the address register minus the descriptor's low word, read at the `ldg`. Taking the register the `iadd.cout` added from was wrong: shaders rewrite it before loading, even in place (`iadd.cout r12, r12, c0[0x110]`). Echoes of Wisdom's controller applet builds its glyph quads from records loaded that way, and on the device every line of its text was missing.
@@ -222,7 +230,7 @@ Section headings are paths under `crates/core/src/gpu/`; a heading that starts w
 
 - `Pipeline` resolves register state into WebGPU vocabulary so backends never re-decode raw codes. Anything WebGPU cannot express (except fans, handled by index rewriting) is `Unsupported`, never approximated, and the caller falls back to the software rasterizer. Unknown codes are errors here even where the rasterizer defaults (e.g. blend factor `One`).
 - WebGPU's blend constant is per channel, so a blend reading only the constant's alpha (`ConstantAlpha`, `OneMinusConstantAlpha`) reads `Constant` with that alpha in every channel (`Pipeline::blend_constant`); beside a per-channel constant factor it is drawn so only when every channel of the constant equals its alpha (Breath of the Wild).
-- Facing is judged in window space like `raster::culls`, so it carries over unchanged through the y negation (`Layout::flip_y`, [shader/wgsl/](#shaderwgsl)).
+- Facing is judged in window space like `raster::culls`, so it carries over unchanged through the y negation (`Layout::flip_y`, [crates/shader/src/wgsl/](#cratesshadersrcwgsl)).
 - With `SET_VIEWPORT_SCALE_OFFSET` off, `Viewport` covers colour target 0 (the surface clip is left at 16384, past WebGPU's limit) and carries `window_coordinates`, and the vertex entry maps x and y to `2 * p / size - w` before its y flip: WebGPU clips before the viewport, so passing pixels through would clip them away.
 - Clip z: the GL (-w..w) or Vulkan (0..w) convention is inferred from the viewport's depth transform (`Viewport::depth_minus_one_to_one`: `translate - scale >= 0`, e.g. scale 0.5 and translate 0.5 is GL); WebGPU clips 0..w.
 - `Rgba16Float` can't stand in for `Rg11b10Ufloat` (guest surface width). The feature `Rg11b10Ufloat` rendering needs and the native-only 16-bit norm formats are under [convert.rs](gpu-backend.md#convertrs). Integer colour formats are unnamed except `RGBA32_UINT` (`Rgba32Uint`), whose raw words the shader writes and reads, and `RGBA16_UINT` (`Rgba16Uint`, Breath of the Wild), whose words it saturates to 16 bits as the hardware does.
