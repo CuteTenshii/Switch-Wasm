@@ -4,9 +4,10 @@ use super::attrib::fetch_attribute;
 use super::ScreenVertex;
 use crate::gpu::engine::threed::{VertexArray, VertexAttrib, ViewportTransform};
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::shader::compiled::Compiled;
-use crate::gpu::shader::interp::{ConstantSource, Env, Invocation, MemoryGlobal, TextureSource};
+use crate::gpu::shader::sources::MemoryGlobal;
 use crate::Result;
+use switch_shader::compiled::Compiled;
+use switch_shader::interp::{ConstantSource, Env, Invocation, TextureSource};
 
 /// The `a[]` offset of the clip position, and the fixed interpolated-`1/w` slot.
 pub(super) const CLIP_POS_OFFSET: u16 = 0x70;
@@ -21,9 +22,9 @@ pub(super) const VARYING_STRIDE: u16 = 0x10;
 pub(super) const INSTANCE_ID_OFFSET: u16 = 0x2f8;
 pub(super) const VERTEX_ID_OFFSET: u16 = 0x2fc;
 /// How many varying slots exist, generic and fixed-function texture coordinates
-/// ([`crate::gpu::shader::varying_slot`]). [`Program::interpolated_slots`] narrows it to what the
+/// ([`switch_shader::varying_slot`]). [`Program::interpolated_slots`] narrows it to what the
 /// shader reads.
-pub(super) const NUM_VARYINGS: usize = crate::gpu::shader::VARYING_SLOTS;
+pub(super) const NUM_VARYINGS: usize = switch_shader::VARYING_SLOTS;
 /// Vertex attribute slots scanned, so shaders need not declare a count.
 pub(super) const MAX_VERTEX_ATTRIBS: u32 = 16;
 /// One vertex after the vertex shader: clip position and every varying.

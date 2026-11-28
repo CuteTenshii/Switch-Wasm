@@ -12,7 +12,7 @@ use crate::{
 use switch_core::gpu::engine::threed::ShaderStage;
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::pipeline::{self as state};
-use switch_core::gpu::shader::wgsl::{self, Stage};
+use switch_shader::wgsl::{self, Stage};
 
 impl Gpu {
     /// Build (or reuse) the pipeline and run the pass.

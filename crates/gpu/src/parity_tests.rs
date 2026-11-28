@@ -121,9 +121,9 @@ fn a_10_10_10_2_colour_reaches_the_same_pixels_on_both_renderers() {
 /// A colour through local memory (`st.64 l[RZ + 0x10]` and back) renders the same on both.
 #[test]
 fn a_colour_through_local_memory_reaches_the_same_pixels_on_both_renderers() {
-    use switch_core::gpu::shader::isa::{self, MemSize};
-    use switch_core::gpu::shader::Op;
     use switch_core::gpu::testing::block;
+    use switch_shader::isa::{self, MemSize};
+    use switch_shader::Op;
     const ALWAYS: u64 = 7 << 16;
     const RZ: u64 = 0xff << 8;
     let at = 0x10u64 << 20;
@@ -185,9 +185,9 @@ fn a_colour_through_local_memory_reaches_the_same_pixels_on_both_renderers() {
 /// gives: each channel is 1.0 only when its `lea` produced the expected word.
 #[test]
 fn lea_computes_the_same_words_on_both_renderers() {
-    use switch_core::gpu::shader::isa::{self, ICmp};
-    use switch_core::gpu::shader::Op;
     use switch_core::gpu::testing::block;
+    use switch_shader::isa::{self, ICmp};
+    use switch_shader::Op;
     const PT: u64 = 7 << 16;
     let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
     let lea_hi = |dst: u64, a: u64, b: u64, hi: u64, shift: u64, neg: u64| {
@@ -305,9 +305,9 @@ fn bind_global(h: &mut Harness, words: &[u32]) {
 /// device read the wrong record words, so none of its text showed.
 #[test]
 fn a_global_load_reads_where_the_address_points_after_its_offset_register_changes() {
-    use switch_core::gpu::shader::isa::{self, MemSize};
-    use switch_core::gpu::shader::Op;
     use switch_core::gpu::testing::block;
+    use switch_shader::isa::{self, MemSize};
+    use switch_shader::Op;
     const PT: u64 = 7 << 16;
     const RZ: u64 = 0xff;
     const ONE: u32 = 0x3f80_0000;
@@ -404,8 +404,8 @@ fn a_global_reduction_leaves_the_same_words_in_guest_memory_on_both_renderers() 
         0x4c18u64 << 48 | 1 << 47 | shift << 39 | word << 20 | PT | a << 8 | dst
     };
     assert!(matches!(
-        switch_core::gpu::shader::isa::decode(iscadd_c0(10, 7, 0x110 / 4, 2)).op,
-        switch_core::gpu::shader::Op::Iscadd {
+        switch_shader::isa::decode(iscadd_c0(10, 7, 0x110 / 4, 2)).op,
+        switch_shader::Op::Iscadd {
             cout: true,
             shift: 2,
             ..
@@ -569,8 +569,8 @@ fn global_words_after_both_aliased(
 /// reductions and the compare-exchange forms included. Each is applied once per covered fragment.
 #[test]
 fn global_atomics_leave_the_same_words_on_both_renderers() {
-    use switch_core::gpu::shader::isa::{self, AtomOp, AtomSpace, AtomType};
-    use switch_core::gpu::shader::Op;
+    use switch_shader::isa::{self, AtomOp, AtomSpace, AtomType};
+    use switch_shader::Op;
     let red = |op: u64, ty: u64, word: u64, src: u64| {
         0xebf8u64 << 48 | (word * 4) << 28 | op << 23 | ty << 20 | PT | 10 << 8 | src
     };
@@ -686,9 +686,9 @@ fn a_buffer_a_draw_writes_and_reads_through_two_descriptors_runs_on_the_device()
 /// storage writable: Tears of the Kingdom's draws fell back on it.
 #[test]
 fn a_vertex_read_of_a_buffer_the_fragment_stage_writes_runs_on_the_device() {
-    use switch_core::gpu::shader::isa::{self, MemSize};
-    use switch_core::gpu::shader::Op;
     use switch_core::gpu::testing::block;
+    use switch_shader::isa::{self, MemSize};
+    use switch_shader::Op;
     let iadd_c0 = |dst: u64, word: u64, cin: u64, cout: u64| {
         0x4c10u64 << 48 | cout << 47 | cin << 43 | word << 20 | PT | RZ << 8 | dst
     };
@@ -936,8 +936,8 @@ fn a_read_inside_a_buffer_written_on_the_device_reads_it_there() {
 /// rasterizer leaves, including a 16-bit store straddling two words.
 #[test]
 fn global_stores_and_narrow_loads_leave_the_same_words_on_both_renderers() {
-    use switch_core::gpu::shader::isa::{self, MemSize};
-    use switch_core::gpu::shader::Op;
+    use switch_shader::isa::{self, MemSize};
+    use switch_shader::Op;
     let stg = |size: u64, byte: u64, src: u64| {
         0xeed8u64 << 48 | size << 48 | byte << 20 | PT | 10 << 8 | src
     };
@@ -1032,8 +1032,8 @@ fn a_byte_store_to_a_one_byte_buffer_runs_on_the_device() {
 /// The register form of `iadd3` adds the same halves and shifts the same sums on both renderers.
 #[test]
 fn iadd3_half_selects_and_shifts_give_the_same_words_on_both_renderers() {
-    use switch_core::gpu::shader::isa::{self, Iadd3Shift};
-    use switch_core::gpu::shader::Op;
+    use switch_shader::isa::{self, Iadd3Shift};
+    use switch_shader::Op;
     let (all, lower, upper) = (0, 1, 2);
     let (none, right, left) = (0, 1, 2);
     let iadd3 = |dst: u64, [a, b, c]: [u64; 3], halves: [u64; 3], shift: u64, aneg: u64| {
@@ -1110,9 +1110,9 @@ fn a_shuffling_fragment_shader_reads_the_same_neighbour_the_rasterizer_reads() {
 /// A `vote` counts the quad's four lanes on both renderers, ballot bits in lane order.
 #[test]
 fn a_quad_vote_gives_the_same_verdicts_and_ballot_on_both_renderers() {
-    use switch_core::gpu::shader::isa::{self, ICmp, VoteMode};
-    use switch_core::gpu::shader::Op;
     use switch_core::gpu::testing::block;
+    use switch_shader::isa::{self, ICmp, VoteMode};
+    use switch_shader::Op;
     const PT: u64 = 7 << 16;
     const RZ: u64 = 0xff;
     let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
@@ -1211,9 +1211,9 @@ fn a_quad_vote_gives_the_same_verdicts_and_ballot_on_both_renderers() {
 /// shuffles and votes do. Echoes of Wisdom's lit shader ORs light masks across lanes so.
 #[test]
 fn a_fragments_lane_registers_name_its_place_in_its_quad_on_both_renderers() {
-    use switch_core::gpu::shader::isa;
-    use switch_core::gpu::shader::Op;
     use switch_core::gpu::testing::block;
+    use switch_shader::isa;
+    use switch_shader::Op;
     const PT: u64 = 7 << 16;
     const RZ: u64 = 0xff;
     let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
@@ -1306,9 +1306,9 @@ fn a_fragments_lane_registers_name_its_place_in_its_quad_on_both_renderers() {
 /// Echoes of Wisdom flips its normals by it, so a zero there darkened every lit wall.
 #[test]
 fn a_fragment_reads_its_facing_the_same_on_both_renderers() {
-    use switch_core::gpu::shader::isa;
-    use switch_core::gpu::shader::Op;
     use switch_core::gpu::testing::block;
+    use switch_shader::isa;
+    use switch_shader::Op;
     const PT: u64 = 7 << 16;
     let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
     let mov32i_if = |guard: u64, dst: u64, imm: u32| {
@@ -1387,9 +1387,9 @@ fn a_fragment_reads_its_facing_the_same_on_both_renderers() {
 /// `p2r` and `cset` read predicates and flags the same way on both renderers.
 #[test]
 fn p2r_and_cset_give_the_same_words_on_both_renderers() {
-    use switch_core::gpu::shader::isa;
-    use switch_core::gpu::shader::Op;
     use switch_core::gpu::testing::block;
+    use switch_shader::isa;
+    use switch_shader::Op;
     const PT: u64 = 7 << 16;
     const RZ: u64 = 0xff;
     let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
@@ -1478,9 +1478,9 @@ fn p2r_and_cset_give_the_same_words_on_both_renderers() {
 /// `vmad` and `vsetp` pick, extend and compare bytes and halves the same way on both renderers.
 #[test]
 fn video_ops_give_the_same_words_on_both_renderers() {
-    use switch_core::gpu::shader::isa;
-    use switch_core::gpu::shader::Op;
     use switch_core::gpu::testing::block;
+    use switch_shader::isa;
+    use switch_shader::Op;
     const PT: u64 = 7 << 16;
     // Eden's three bits from 36 (a) or 28 (b): the selector's low bit, then the width.
     const BYTE0: u64 = 0b000;
@@ -1601,9 +1601,9 @@ fn video_ops_give_the_same_words_on_both_renderers() {
 /// A funnel shift keeps the same word, clamps and fills the same way on both renderers.
 #[test]
 fn a_funnel_shift_gives_the_same_words_on_both_renderers() {
-    use switch_core::gpu::shader::isa;
-    use switch_core::gpu::shader::Op;
     use switch_core::gpu::testing::block;
+    use switch_shader::isa;
+    use switch_shader::Op;
     const PT: u64 = 7 << 16;
     const RZ: u64 = 0xff;
     let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
@@ -1690,9 +1690,9 @@ fn a_funnel_shift_gives_the_same_words_on_both_renderers() {
 /// Echoes of Wisdom's shaders use it, and the decoder refused it.
 #[test]
 fn a_reversing_bit_field_extract_gives_the_same_word_on_both_renderers() {
-    use switch_core::gpu::shader::isa;
-    use switch_core::gpu::shader::Op;
     use switch_core::gpu::testing::block;
+    use switch_shader::isa;
+    use switch_shader::Op;
     const PT: u64 = 7 << 16;
     const ONE: u32 = 0x3f80_0000;
     let mov32i = |dst: u64, imm: u32| 0x0100_0000_0000_0000 | (u64::from(imm) << 20) | PT | dst;
@@ -2540,8 +2540,8 @@ fn a_held_depth_surface_samples_as_the_depth_it_holds() {
 /// padded surface, after post-processing draws beside the last cascade.
 #[test]
 fn a_depth_surface_held_as_a_crop_samples_at_its_full_size() {
-    use switch_core::gpu::shader::isa::{self, TexDim};
-    use switch_core::gpu::shader::Op;
+    use switch_shader::isa::{self, TexDim};
+    use switch_shader::Op;
     let (low, high) = testing::BINDLESS_ARRAY_TEX;
     let tex = isa::decode(u64::from(high) << 32 | u64::from(low)).op;
     assert!(
@@ -3083,8 +3083,8 @@ fn a_depth_surface_cropped_to_two_sizes_keeps_what_only_the_whole_held() {
 /// shadow cascades on the device and not others.
 #[test]
 fn a_shadow_map_array_held_in_part_compares_each_layer_as_the_rasterizer_does() {
-    use switch_core::gpu::shader::isa::{self, TexDim};
-    use switch_core::gpu::shader::Op;
+    use switch_shader::isa::{self, TexDim};
+    use switch_shader::Op;
     let (low, high) = testing::SHADOW_ARRAY_TEX;
     let tex = isa::decode(u64::from(high) << 32 | u64::from(low)).op;
     assert!(

@@ -7,10 +7,9 @@ use crate::gpu::engine::threed::{DepthLayout, Engine3D, RenderTarget, ShaderStag
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::pipeline::{Format, Pipeline, StepMode, VertexBuffer};
 use crate::gpu::surface::{ColorFormat, Layout, RowRuns};
-use crate::gpu::texture::{
-    self, DepthTexel, Sampler, SwizzleSource, TexelKind, Texture, TextureSlot,
-};
+use crate::gpu::texture::{self, DepthTexel, Sampler, TexelKind, Texture};
 use crate::{Error, Result};
+use switch_shader::texture::{SwizzleSource, TextureSlot};
 
 /// Which constant banks to resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

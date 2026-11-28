@@ -12,10 +12,10 @@ use super::draw::pipeline_harness;
 use super::*;
 use crate::gpu::engine::threed::{BlendTarget, VertexArray, VertexAttrib};
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::shader::compiled::Compiled;
-use crate::gpu::shader::interp::MemoryGlobal;
-use crate::gpu::shader::Program;
+use crate::gpu::shader::sources::MemoryGlobal;
 use crate::gpu::surface::ColorFormat;
+use switch_shader::compiled::Compiled;
+use switch_shader::Program;
 
 #[test]
 fn three_vertex_colours_interpolate_correctly_at_a_known_interior_point() {
@@ -110,7 +110,7 @@ fn a_fixed_point_target_clamps_the_blend_source_and_a_float_one_does_not() {
 /// A vertex shader's stores land in guest memory, visible to later loads.
 #[test]
 fn a_vertex_shader_stores_to_global_memory() {
-    use crate::gpu::shader::isa::{Instruction, MemSize, Op, Pred, RZ};
+    use switch_shader::isa::{Instruction, MemSize, Op, Pred, RZ};
 
     let (mut mem, vmm, base) = harness();
     let ops = [
@@ -177,7 +177,7 @@ fn a_vertex_shader_stores_to_global_memory() {
         (7, 0),
         &ctx,
         &consts,
-        (&crate::gpu::shader::interp::NoTextures, 0),
+        (&switch_shader::interp::NoTextures, 0),
         false,
         &stores,
     )
@@ -190,7 +190,7 @@ fn a_vertex_shader_stores_to_global_memory() {
 #[test]
 fn a_vertex_shader_reads_its_vertex_and_instance_ids() {
     // `gl_InstanceID` and `gl_VertexID` reach the register as integer bits.
-    use crate::gpu::shader::isa::{Instruction, MemSize, Op, Pred, RZ};
+    use switch_shader::isa::{Instruction, MemSize, Op, Pred, RZ};
 
     let mut program = Program::default();
     for (at, op) in [
@@ -261,7 +261,7 @@ fn a_vertex_shader_reads_its_vertex_and_instance_ids() {
         (7, 42),
         &ctx,
         &consts,
-        (&crate::gpu::shader::interp::NoTextures, 0),
+        (&switch_shader::interp::NoTextures, 0),
         false,
         &stores,
     )
@@ -278,7 +278,7 @@ fn an_instanced_vertex_array_advances_with_the_instance_not_the_vertex() {
         vmm.write_u32(&mem, base + i as u64 * 4, v.to_bits())
             .unwrap();
     }
-    use crate::gpu::shader::isa::{Instruction, MemSize, Op, Pred, RZ};
+    use switch_shader::isa::{Instruction, MemSize, Op, Pred, RZ};
 
     // Copy attribute 0 into the clip position's x.
     let mut program = Program::default();
@@ -349,7 +349,7 @@ fn an_instanced_vertex_array_advances_with_the_instance_not_the_vertex() {
             (3, instance),
             &ctx,
             &consts,
-            (&crate::gpu::shader::interp::NoTextures, 0),
+            (&switch_shader::interp::NoTextures, 0),
             false,
             &stores,
         )

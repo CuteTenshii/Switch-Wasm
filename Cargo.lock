@@ -1227,6 +1227,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "switch-opus",
+ "switch-shader",
  "switch-vp9",
 ]
 
@@ -1237,6 +1238,7 @@ dependencies = [
  "clap",
  "pollster",
  "switch-core",
+ "switch-shader",
  "web-time",
  "wgpu",
 ]
@@ -1265,6 +1267,10 @@ dependencies = [
 
 [[package]]
 name = "switch-relay-proto"
+version = "0.1.0"
+
+[[package]]
+name = "switch-shader"
 version = "0.1.0"
 
 [[package]]

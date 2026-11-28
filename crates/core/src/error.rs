@@ -128,3 +128,30 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// A guest-memory failure under a shader, carried through it whole.
+impl From<Error> for switch_shader::Error {
+    fn from(error: Error) -> switch_shader::Error {
+        switch_shader::Error::Host(Box::new(error))
+    }
+}
+
+/// The same, boxed as the interpreter returns it per operand.
+impl From<Error> for Box<switch_shader::Error> {
+    fn from(error: Error) -> Box<switch_shader::Error> {
+        Box::new(error.into())
+    }
+}
+
+/// A carried error comes back unchanged, so a `GpuSyncPending` still parks the channel.
+impl From<switch_shader::Error> for Error {
+    fn from(error: switch_shader::Error) -> Error {
+        match error {
+            switch_shader::Error::Fault(message) => Error::Gpu(message),
+            switch_shader::Error::Host(host) => match host.downcast::<Error>() {
+                Ok(error) => *error,
+                Err(other) => Error::Gpu(other.to_string()),
+            },
+        }
+    }
+}

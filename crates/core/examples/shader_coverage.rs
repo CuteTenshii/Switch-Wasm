@@ -6,9 +6,9 @@ mod common;
 
 use clap::Parser;
 use std::collections::BTreeMap;
-use switch_core::gpu::shader::compiled::Compiled;
-use switch_core::gpu::shader::wgsl::{self, Caps, Stage, Unsupported};
-use switch_core::gpu::shader::{uses, Program};
+use switch_shader::compiled::Compiled;
+use switch_shader::wgsl::{self, Caps, Stage, Unsupported};
+use switch_shader::{uses, Program};
 
 #[derive(Parser)]
 struct Cli {

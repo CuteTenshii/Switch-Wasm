@@ -76,16 +76,16 @@ use switch_core::gpu::engine::threed::{Engine3D, ShaderStage};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::pipeline::{self as state, Pipeline};
 use switch_core::gpu::renderer::{Blit, BlitRoute, Flush, Renderer, ScanOut, Software, Submit};
-#[cfg(test)]
-use switch_core::gpu::shader::compiled::Compiled;
-#[cfg(test)]
-use switch_core::gpu::shader::wgsl::{self, Stage};
-use switch_core::gpu::shader::wgsl::{Layout, Translation};
 use switch_core::gpu::surface::{Layout as SurfaceLayout, GOB_WIDTH};
 use switch_core::gpu::upload::{Target, TextureKey, Uploads};
 use switch_core::gpu::Framebuffer;
 use switch_core::json;
 use switch_core::Result;
+#[cfg(test)]
+use switch_shader::compiled::Compiled;
+#[cfg(test)]
+use switch_shader::wgsl::{self, Stage};
+use switch_shader::wgsl::{Layout, Translation};
 
 #[cfg(test)]
 use builtin::grid_bytes;
@@ -160,7 +160,7 @@ const COPY_ALIGNMENT: u32 = 256;
 /// Presented frames whose readbacks may be on their way at once.
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
-/// Where a module's textures start binding; see `switch_core::gpu::shader::wgsl`.
+/// Where a module's textures start binding; see `switch_shader::wgsl`.
 const TEXTURE_BINDING: u32 = 32;
 
 /// What an unsupplied vertex attribute reads: the fixed `vec4` default, or zero for an unconfigured slot.

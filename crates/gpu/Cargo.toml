@@ -8,6 +8,7 @@ license = "AGPL-3.0-or-later"
 [dependencies]
 pollster = "1.0.1"
 switch-core = { path = "../core" }
+switch-shader = { path = "../shader" }
 web-time = "1.1"
 wgpu = "30.0.1"
 

@@ -205,7 +205,7 @@ fn main() {
 
     let memory = &cli.memory;
     if memory.undecoded {
-        switch_core::gpu::shader::uses::record_decoded();
+        switch_shader::uses::record_decoded();
     }
     let interval = match (memory.profile, memory.stacks) {
         (0, true) => DEFAULT_INTERVAL,
@@ -326,7 +326,7 @@ fn main() {
     println!("rendering: {}", cpu.nv.gpu.renderer_report());
 
     if memory.undecoded {
-        report_undecoded(switch_core::gpu::shader::uses::take_decoded());
+        report_undecoded(switch_shader::uses::take_decoded());
     }
     for spec in &memory.dump_surface {
         dump_surface(&cpu, spec, out);
@@ -459,8 +459,8 @@ fn scan_mem(cpu: &switch_core::cpu::Cpu, lo: u64, hi: u64) {
 }
 
 /// `--undecoded`: unimplemented instructions by their top 16 opcode bits, the most common first.
-fn report_undecoded(programs: std::collections::BTreeMap<u64, switch_core::gpu::shader::Program>) {
-    use switch_core::gpu::shader::Op;
+fn report_undecoded(programs: std::collections::BTreeMap<u64, switch_shader::Program>) {
+    use switch_shader::Op;
     // Per opcode: instructions, programs, and one word to decode by hand.
     let mut seen: std::collections::BTreeMap<u16, (u64, u64, u64)> = Default::default();
     for program in programs.values() {

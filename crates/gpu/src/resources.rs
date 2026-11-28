@@ -8,8 +8,8 @@ use crate::{
 };
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::renderer::Software;
-use switch_core::gpu::shader::wgsl::{self, Layout, Stage, Translation};
 use switch_core::gpu::upload::{TextureKey, TextureUpload};
+use switch_shader::wgsl::{self, Layout, Stage, Translation};
 
 /// Bounds [`Gpu::views`]; a title's draws bind far fewer textures.
 const MAX_VIEWS: usize = 4096;

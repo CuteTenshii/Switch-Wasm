@@ -5,16 +5,18 @@
 use crate::gpu::engine::compute::EngineCompute;
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::qmd::{ConstantBuffer, Qmd, Release, CONSTANT_BUFFERS, QMD_WORDS};
-use crate::gpu::shader::compiled::Compiled;
-use crate::gpu::shader::interp::{
-    resolve_warp, ConstCache, ConstantSource, Env, GlobalMemory, Halt, Invocation, MemoryTextures,
-    ShaderResult, SharedMemory, TextureSource, WARP_LANES,
-};
-use crate::gpu::shader::isa::{AtomOp, AtomType, SurfaceData};
-use crate::gpu::shader::{decode_program_from_memory, Op};
+use crate::gpu::shader::decode_program_from_memory;
+use crate::gpu::shader::sources::{ConstCache, MemoryTextures};
 use crate::gpu::texture::{self, BlockCache, DescriptorCache, Texture};
 use crate::{Error, Result};
 use std::cell::RefCell;
+use switch_shader::compiled::Compiled;
+use switch_shader::interp::{
+    resolve_warp, ConstantSource, Env, GlobalMemory, Halt, Invocation, ShaderResult, SharedMemory,
+    TextureSource, WARP_LANES,
+};
+use switch_shader::isa::{AtomOp, AtomType, SurfaceData};
+use switch_shader::Op;
 
 /// The most threads one dispatch may run, a liveness guard for the browser worker.
 pub const MAX_DISPATCH_THREADS: u64 = 1 << 20;
@@ -236,15 +238,16 @@ impl ConstantSource for DispatchMemory<'_, '_> {
             return Ok(value);
         }
         let (addr, size) = self.bank(bank).ok_or_else(|| {
-            Box::new(Error::Gpu(format!(
+            Error::Gpu(format!(
                 "compute: read from constant bank {bank}, which the QMD did not bind"
-            )))
+            ))
         })?;
         if u32::from(offset) + 4 > size {
-            return Err(Box::new(Error::Gpu(format!(
+            return Err(Error::Gpu(format!(
                 "compute: constant read c{bank}[{offset:#x}] is past the bound \
                  buffer's size {size:#x}"
-            ))));
+            ))
+            .into());
         }
         let value = self.ctx.borrow().read_u32(addr + u64::from(offset))?;
         self.consts.borrow_mut().insert(key, value);
@@ -431,7 +434,7 @@ impl TextureSource for DispatchMemory<'_, '_> {
         };
         let mut ctx = self.ctx.borrow_mut();
         let old = ctx.read_pixel(addr, bytes)? as u32;
-        let new = crate::gpu::shader::interp::surface_reduced(bytes, old, op, ty, value)?;
+        let new = switch_shader::interp::surface_reduced(bytes, old, op, ty, value)?;
         Ok(ctx.write_pixel(addr, bytes, u128::from(new))?)
     }
 }
@@ -440,10 +443,10 @@ impl TextureSource for DispatchMemory<'_, '_> {
 mod tests {
     use super::*;
     use crate::gpu::exec::GpuStats;
-    use crate::gpu::shader::isa::{self, MemSize, Operand};
     use crate::gpu::syncpt::Host1x;
     use crate::gpu::vmm::{AddressSpace, SMALL_PAGE_SIZE};
     use crate::mem::Memory;
+    use switch_shader::isa::{self, MemSize, Operand};
 
     const SR_TIDX: u8 = 0x21;
     const SR_CTAIDX: u8 = 0x25;

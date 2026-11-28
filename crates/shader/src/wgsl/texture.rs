@@ -1,0 +1,339 @@
+//! Texture binding, sampling, gathering and queries.
+
+use super::emitter::Emitter;
+use super::{tex_dim_code, Unsupported};
+use crate::isa::{Op, TexDim, TexsStore};
+use crate::texture::TextureSlot;
+
+const COMPONENT: [&str; 4] = ["x", "y", "z", "w"];
+
+/// A gather's operands.
+pub(super) struct Gather {
+    pub slot: TextureSlot,
+    pub dim: TexDim,
+    pub coords: [u8; 3],
+    pub layer: Option<u8>,
+    /// `.AOFFI`'s register.
+    pub offset: Option<u8>,
+    /// `.PTP`'s two registers.
+    pub ptp: Option<[u8; 2]>,
+    pub dref: Option<u8>,
+    pub component: u8,
+}
+
+impl Emitter<'_> {
+    /// Record that the program samples `slot` as `dim`, a shadow map or not.
+    fn bind_texture(
+        &mut self,
+        at: usize,
+        slot: TextureSlot,
+        dim: TexDim,
+        compare: bool,
+    ) -> Result<(), Unsupported> {
+        match self.textures.iter().find(|&&(seen, _, _)| seen == slot) {
+            // A slot sampled both as colour and depth cannot be one binding.
+            Some(&(_, _, was)) if was != compare => Err(Unsupported::DepthCompare { at }),
+            Some(_) => Ok(()),
+            // Two slots answering to one key would sample each other's image.
+            None if self
+                .textures
+                .iter()
+                .any(|&(seen, _, _)| seen.key() == slot.key()) =>
+            {
+                Err(Unsupported::SharedHandleKey { at })
+            }
+            None => {
+                self.textures.push((slot, dim, compare));
+                Ok(())
+            }
+        }
+    }
+
+    /// Record that the program stores to `slot`.
+    pub(super) fn bind_image(&mut self, at: usize, slot: TextureSlot) -> Result<(), Unsupported> {
+        if self.images.contains(&slot) {
+            return Ok(());
+        }
+        if self.images.iter().any(|seen| seen.key() == slot.key()) {
+            return Err(Unsupported::SharedHandleKey { at });
+        }
+        self.images.push(slot);
+        Ok(())
+    }
+
+    /// `tex.aoffi`: a sample offset by an immediate texel offset (signed nibbles, x low).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn sample_offset(
+        &mut self,
+        at: usize,
+        slot: TextureSlot,
+        dim: TexDim,
+        dref: Option<u8>,
+        coords: [u8; 3],
+        layer: Option<u8>,
+        offset: u8,
+        op: Op,
+    ) -> Result<(), Unsupported> {
+        let refuse = Unsupported::Op { at, op };
+        if dref.is_some() || !matches!(dim, TexDim::T2d | TexDim::T2dArray | TexDim::T3d) {
+            return Err(refuse);
+        }
+        let packed = self.constant_in(at, offset).ok_or(refuse)?;
+        let axis = |shift: u32| ((packed >> shift) as i32) << 28 >> 28;
+        let texel = match dim {
+            TexDim::T3d => (axis(0), axis(4), axis(8)),
+            _ => (axis(0), axis(4), 0),
+        };
+        let index = match self.texture_offsets.iter().position(|&seen| seen == texel) {
+            Some(index) => index,
+            None => {
+                self.texture_offsets.push(texel);
+                self.texture_offsets.len() - 1
+            }
+        };
+        self.bind_texture(at, slot, dim, false)?;
+        let u = self.f(coords[0]);
+        let v = self.f(coords[1]);
+        let layer = match layer {
+            Some(reg) => {
+                let reg = self.r(reg);
+                format!("({reg} & 0xffffu)")
+            }
+            None => "0u".to_string(),
+        };
+        let w = match dim {
+            TexDim::T3d => self.f(coords[2]),
+            _ => "0.0".to_string(),
+        };
+        let color = self.bind(&format!(
+            "texSampleOffset({}u, {index}u, {u}, {v}, {layer}, {w})",
+            slot.key()
+        ));
+        for (reg, store, _) in self.program.texs_writes(at).to_vec() {
+            if let TexsStore::Float(channel) = store {
+                self.set_f(reg, &format!("{color}.{}", COMPONENT[channel]));
+            }
+        }
+        Ok(())
+    }
+
+    /// `tlds`: the texel at integer coordinates, as `textureLoad` of level 0.
+    pub(super) fn fetch_texture(&mut self, at: usize, fetch: Fetch) -> Result<(), Unsupported> {
+        let Fetch {
+            slot,
+            dim,
+            coords,
+            layer,
+            offset,
+            level,
+        } = fetch;
+        self.bind_texture(at, slot, dim, false)?;
+        self.read_otherwise.insert(slot.key());
+        let mut x = self.r(coords[0]);
+        let mut y = self.r(coords[1]);
+        if let Some(reg) = offset {
+            let packed = format!("bitcast<i32>({})", self.r(reg));
+            x = format!("({x} + bitcast<u32>(extractBits({packed}, 0u, 4u)))");
+            y = format!("({y} + bitcast<u32>(extractBits({packed}, 4u, 4u)))");
+        }
+        let z = match (dim, layer) {
+            (TexDim::T3d, _) => self.r(coords[2]),
+            (TexDim::T2dArray, Some(reg)) => format!("({} & 0xffffu)", self.r(reg)),
+            _ => "0u".to_string(),
+        };
+        let texel = match level {
+            Some(reg) => {
+                if !self.fetched_levels.contains(&slot) {
+                    self.fetched_levels.push(slot);
+                }
+                let level = self.r(reg);
+                self.bind(&format!(
+                    "texFetchLevel({}u, {level}, {x}, {y}, {z})",
+                    slot.key()
+                ))
+            }
+            None => self.bind(&format!("texFetch({}u, {x}, {y}, {z})", slot.key())),
+        };
+        self.store_channels(at, &texel);
+        Ok(())
+    }
+
+    /// `txq`: texture size as integers.
+    pub(super) fn query_texture(&mut self, at: usize, slot: TextureSlot, lod: u8) {
+        self.queried.push(slot);
+        self.read_otherwise.insert(slot.key());
+        let lod = self.r(lod);
+        let size = self.bind(&format!("texDims({}u, {lod})", slot.key()));
+        for (reg, store, _) in self.program.texs_writes(at).to_vec() {
+            if let TexsStore::Float(channel) = store {
+                self.set_r(reg, &format!("{size}.{}", COMPONENT[channel]));
+            }
+        }
+    }
+
+    /// `tld4`: one channel of the four bilinear texels, as `textureGather`; with `dref`, each
+    /// compared. An offset moves the coordinates by whole texels first, as `interp` does, since
+    /// `textureGather` takes only a constant one. `.PTP` gathers four times, each moved by its
+    /// own offset, and keeps the texel that offset belongs to.
+    pub(super) fn gather_texture(&mut self, at: usize, gather: Gather) -> Result<(), Unsupported> {
+        let Gather {
+            slot,
+            dim,
+            coords,
+            layer,
+            offset,
+            ptp,
+            dref,
+            component,
+        } = gather;
+        self.bind_texture(at, slot, dim, dref.is_some())?;
+        let key = slot.key();
+        self.read_otherwise.insert(key);
+        let u = self.f(coords[0]);
+        let v = self.f(coords[1]);
+        let w = match dim {
+            TexDim::TCube | TexDim::TCubeArray => self.f(coords[2]),
+            _ => "0.0".to_string(),
+        };
+        let layer = match layer {
+            Some(reg) => {
+                let reg = self.r(reg);
+                format!("({reg} & 0xffffu)")
+            }
+            None => "0u".to_string(),
+        };
+        let reference = dref.map(|reg| self.f(reg));
+        let call = |u: &str, v: &str| match &reference {
+            Some(reference) => {
+                format!("texGatherCompare({key}u, {u}, {v}, {w}, {layer}, {reference})")
+            }
+            None => format!("texGather({key}u, {component}u, {u}, {v}, {w}, {layer})"),
+        };
+        let texels = if let Some(regs) = ptp {
+            let step = self.bind(&format!("texStep({key}u)"));
+            let mut gathered = Vec::new();
+            for i in 0..4u32 {
+                let packed = format!("bitcast<i32>({})", self.r(regs[i as usize / 2]));
+                let shift = 16 * (i % 2);
+                let (pu, pv) = (
+                    format!("{u} + f32(extractBits({packed}, {shift}u, 6u)) * {step}.x"),
+                    format!(
+                        "{v} + f32(extractBits({packed}, {}u, 6u)) * {step}.y",
+                        shift + 8
+                    ),
+                );
+                let (pu, pv) = (self.bind(&pu), self.bind(&pv));
+                gathered.push(self.bind(&call(&pu, &pv)));
+            }
+            self.bind(&format!(
+                "vec4<f32>({}.x, {}.y, {}.z, {}.w)",
+                gathered[0], gathered[1], gathered[2], gathered[3]
+            ))
+        } else if let Some(reg) = offset {
+            let step = self.bind(&format!("texStep({key}u)"));
+            let packed = format!("bitcast<i32>({})", self.r(reg));
+            let pu = self.bind(&format!(
+                "{u} + f32(extractBits({packed}, 0u, 6u)) * {step}.x"
+            ));
+            let pv = self.bind(&format!(
+                "{v} + f32(extractBits({packed}, 8u, 6u)) * {step}.y"
+            ));
+            self.bind(&call(&pu, &pv))
+        } else {
+            self.bind(&call(&u, &v))
+        };
+        self.store_channels(at, &texels);
+        Ok(())
+    }
+
+    /// Sample and store the channels, for `texs` and `tex`.
+    pub(super) fn sample_texture(
+        &mut self,
+        at: usize,
+        slot: TextureSlot,
+        dim: TexDim,
+        dref: Option<u8>,
+        coords: [u8; 3],
+        layer: Option<u8>,
+    ) -> Result<(), Unsupported> {
+        let compare = dref.is_some();
+        // Only a cube's gather compares; there is no sample of one.
+        if compare && matches!(dim, TexDim::TCube | TexDim::TCubeArray) {
+            return Err(Unsupported::TextureDimension { dim });
+        }
+        self.bind_texture(at, slot, dim, compare)?;
+        let key = slot.key();
+        let u = self.f(coords[0]);
+        let v = match dim {
+            TexDim::T1d => "0.0".to_string(),
+            _ => self.f(coords[1]),
+        };
+        // The layer is an integer in the register's low half.
+        let layer = match layer {
+            Some(reg) => {
+                let reg = self.r(reg);
+                format!("({reg} & 0xffffu)")
+            }
+            None => "0u".to_string(),
+        };
+        // A 3D third coordinate is normalized; an array's is a layer.
+        let w = match dim {
+            TexDim::T3d | TexDim::TCube | TexDim::TCubeArray => self.f(coords[2]),
+            _ => "0.0".to_string(),
+        };
+        let code = tex_dim_code(dim);
+        let color = match dref {
+            // A shadow sample fills every requested channel except alpha.
+            Some(reg) => {
+                let reference = self.f(reg);
+                self.bind(&format!(
+                    "texSampleCompare({key}u, {code}u, {u}, {v}, {layer}, {reference})"
+                ))
+            }
+            None => self.bind(&format!(
+                "texSample({key}u, {code}u, {u}, {v}, {layer}, {w})"
+            )),
+        };
+        self.store_channels(at, &color);
+        Ok(())
+    }
+
+    /// Land `color`'s channels where the instruction at `at` writes them.
+    fn store_channels(&mut self, at: usize, color: &str) {
+        // Stored now rather than at first use like the interpreter; equivalent
+        // unless the destination is overwritten before being read.
+        let writes = self.program.texs_writes(at).to_vec();
+        for (reg, store, _) in writes {
+            match store {
+                TexsStore::Float(channel) => {
+                    self.set_f(reg, &format!("{color}.{}", COMPONENT[channel]));
+                }
+                // `.F16` packs two channels as halves.
+                TexsStore::Halves(low, high) => {
+                    let half = |c: Option<usize>| match c {
+                        Some(channel) => format!("{color}.{}", COMPONENT[channel]),
+                        None => "0.0".to_string(),
+                    };
+                    self.set_r(
+                        reg,
+                        &format!(
+                            "pack2x16float(vec2<f32>({}, {}))",
+                            half(Some(low)),
+                            half(high)
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A `tlds`: where and how it fetches, and the register naming its level, if one does.
+pub(super) struct Fetch {
+    pub(super) slot: TextureSlot,
+    pub(super) dim: TexDim,
+    pub(super) coords: [u8; 3],
+    pub(super) layer: Option<u8>,
+    pub(super) offset: Option<u8>,
+    pub(super) level: Option<u8>,
+}

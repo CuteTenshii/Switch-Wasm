@@ -8,19 +8,11 @@ use crate::gpu::syncpt::Host1x;
 use crate::gpu::vmm::{AddressSpace, SMALL_PAGE_SIZE};
 use crate::mem::Memory;
 
-pub fn word(low: u32, high: u32) -> [u8; 8] {
-    (((high as u64) << 32) | low as u64).to_le_bytes()
-}
-
-/// One 32-byte scheduling block: the sched word and three instructions.
-pub fn block(sched: (u32, u32), a: (u32, u32), b: (u32, u32), c: (u32, u32)) -> Vec<u8> {
-    let mut out = Vec::with_capacity(32);
-    out.extend_from_slice(&word(sched.0, sched.1));
-    out.extend_from_slice(&word(a.0, a.1));
-    out.extend_from_slice(&word(b.0, b.1));
-    out.extend_from_slice(&word(c.0, c.1));
-    out
-}
+pub use switch_shader::testing::{
+    block, gather_compare_fragment_shader, gather_cube_compare_fragment_shader,
+    gather_cube_fragment_shader, gather_fragment_shader, gather_offset_fragment_shader,
+    gather_ptp_fragment_shader, solid_fragment_shader, word,
+};
 
 /// `gl_Position = aPosition; vColor = aColor;`
 pub fn passthrough_vertex_shader() -> Vec<u8> {
@@ -36,29 +28,6 @@ pub fn passthrough_vertex_shader() -> Vec<u8> {
         (0x0807ff00, 0xeff1ff80), // st b128 a[0x80] $r0 0x0  (vColor)
         (0x0007000f, 0xe3000000), // exit
         (0, 0),
-    ));
-    bytes
-}
-
-/// `oColor = vColor;`
-pub fn solid_fragment_shader() -> Vec<u8> {
-    let mut bytes = block(
-        (0xe1a0070f, 0x00240401),
-        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
-        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
-        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
-    );
-    bytes.extend(block(
-        (0xb0400341, 0x055c8400),
-        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
-        (0x8037ff02, 0xe043ff88), // ipa $r2 a[0x88] $r3 0x0 0x1
-        (0xc037ff03, 0xe043ff88), // ipa $r3 a[0x8c] $r3 0x0 0x1
-    ));
-    bytes.extend(block(
-        (0xffe1ffef, 0x001f8000),
-        (0x0007000f, 0xe3000000), // exit
-        (0xff87000f, 0xe2400fff), // bra 0x50 (padding, never reached)
-        (0x00070f00, 0x50b00000), // nop (padding, never reached)
     ));
     bytes
 }
@@ -169,8 +138,8 @@ pub fn frag_coord_fragment_shader() -> Vec<u8> {
 /// handle from `c3[0x10]`: each fragment stores its own coordinates, so the order fragments
 /// run in cannot change what lands.
 pub fn image_store_fragment_shader() -> Vec<u8> {
-    use crate::gpu::shader::isa::{FMod, FRound, Operand, SurfaceDim};
-    use crate::gpu::shader::Op;
+    use switch_shader::isa::{FMod, FRound, Operand, SurfaceDim};
+    use switch_shader::Op;
     let split = |w: u64| (w as u32, (w >> 32) as u32);
     let f2i_u32 = |reg: u8| {
         split(checked(
@@ -221,144 +190,6 @@ pub fn image_store_fragment_shader() -> Vec<u8> {
 
 /// [`bindless_array_fragment_shader`]'s sample: the layer in `r0`, then `u` and `v`.
 pub const BINDLESS_ARRAY_TEX: (u32, u32) = (0xb0470000, 0xdeba0007);
-
-/// `oColor = textureGather(texture, vColor.xy, component)` from bound slot 4.
-pub fn gather_fragment_shader(component: u32) -> Vec<u8> {
-    let tld4_high = 0xc83a0047 | (component & 3) << 24;
-    let mut bytes = block(
-        (0xe1a0070f, 0x00240401),
-        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
-        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
-        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
-    );
-    bytes.extend(block(
-        (0xb0400341, 0x055c8400),
-        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
-        (0xaff70000, tld4_high),  // tld4 r|g nodep $r0 $r0 0x0 0x4 t2d 0xf
-        (0x0007000f, 0xe3000000), // exit
-    ));
-    bytes
-}
-
-/// `oColor = textureGather(texture, vColor.xy + texel * ivec2(1, -1), component)` from slot 4,
-/// the offset in a register.
-pub fn gather_offset_fragment_shader(component: u32) -> Vec<u8> {
-    let tld4_high = 0xc83a0047 | (component & 3) << 24 | 1 << 22;
-    let mut bytes = block(
-        (0xe1a0070f, 0x00240401),
-        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
-        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
-        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
-    );
-    bytes.extend(block(
-        (0xb0400341, 0x055c8400),
-        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
-        (0xf017000a, 0x01000003), // mov32i $r10 0x3f01: x +1, y -1
-        (0xa0a70000, tld4_high),  // tld4.aoffi r|g nodep $r0 $r0 $r10 0x4 t2d 0xf
-    ));
-    bytes.extend(block(
-        (0xffe1ffef, 0x001f8000),
-        (0x0007000f, 0xe3000000), // exit
-        (0xff87000f, 0xe2400fff), // bra (padding, never reached)
-        (0x00070f00, 0x50b00000), // nop (padding, never reached)
-    ));
-    bytes
-}
-
-/// `oColor = textureGather(texture, vColor.xy, component)` with each of the four texels moved
-/// by its own offset (`tld4.ptp`), from slot 4.
-pub fn gather_ptp_fragment_shader(component: u32) -> Vec<u8> {
-    let tld4_high = 0xc83a0047 | (component & 3) << 24 | 2 << 22;
-    let mut bytes = block(
-        (0xe1a0070f, 0x00240401),
-        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
-        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
-        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
-    );
-    bytes.extend(block(
-        (0xb0400341, 0x055c8400),
-        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
-        (0xf017000a, 0x010033e3), // mov32i $r10 0x033e3f01: (+1, -1) and (-2, +3)
-        (0x2007000b, 0x010003f0), // mov32i $r11 0x003f0200: (0, +2) and (-1, 0)
-    ));
-    bytes.extend(block(
-        (0xffe1ffef, 0x001f8000),
-        (0xa0a70000, tld4_high), // tld4.ptp r|g nodep $r0 $r0 $r10 0x4 t2d 0xf
-        (0x0007000f, 0xe3000000), // exit
-        (0xff87000f, 0xe2400fff), // bra (padding, never reached)
-    ));
-    bytes
-}
-
-/// `oColor = textureGather(shadowMap, vColor.xy, 0.5)` from slot 4: each texel compared.
-pub fn gather_compare_fragment_shader() -> Vec<u8> {
-    let mut bytes = block(
-        (0xe1a0070f, 0x00240401),
-        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
-        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
-        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
-    );
-    bytes.extend(block(
-        (0xb0400341, 0x055c8400),
-        (0x4037ff01, 0xe043ff88),           // ipa $r1 a[0x84] $r3 0x0 0x1
-        (0x0007f002, 0x0103f000),           // mov32i $r2 0x3f000000: 0.5
-        (0xa0270000, 0xc83a0047 | 1 << 18), // tld4.dc nodep $r0 $r0 $r2 0x4 t2d 0xf
-    ));
-    bytes.extend(block(
-        (0xffe1ffef, 0x001f8000),
-        (0x0007000f, 0xe3000000), // exit
-        (0xff87000f, 0xe2400fff), // bra (padding, never reached)
-        (0x00070f00, 0x50b00000), // nop (padding, never reached)
-    ));
-    bytes
-}
-
-/// `oColor = textureGather(shadowCube, vColor.xyz, 0.5)` from slot 4: each texel compared.
-pub fn gather_cube_compare_fragment_shader() -> Vec<u8> {
-    let mut bytes = block(
-        (0xe1a0070f, 0x00240401),
-        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
-        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
-        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
-    );
-    bytes.extend(block(
-        (0xb0400341, 0x055c8400),
-        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
-        (0x8037ff02, 0xe043ff88), // ipa $r2 a[0x88] $r3 0x0 0x1
-        (0x0007f004, 0x0103f000), // mov32i $r4 0x3f000000: 0.5
-    ));
-    bytes.extend(block(
-        (0xffe1ffef, 0x001f8000),
-        (0xe0470000, 0xc83a0047 | 1 << 18), // tld4.dc nodep $r0 $r0 $r4 0x4 cube 0xf
-        (0x0007000f, 0xe3000000),           // exit
-        (0xff87000f, 0xe2400fff),           // bra (padding, never reached)
-    ));
-    bytes
-}
-
-/// `oColor = textureGather(cube, vColor.xyz, component)` from slot 4.
-pub fn gather_cube_fragment_shader(component: u32) -> Vec<u8> {
-    let tld4_high = 0xc83a0047 | (component & 3) << 24;
-    let mut bytes = block(
-        (0xe1a0070f, 0x00240401),
-        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
-        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
-        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
-    );
-    bytes.extend(block(
-        (0xb0400341, 0x055c8400),
-        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
-        (0x8037ff02, 0xe043ff88), // ipa $r2 a[0x88] $r3 0x0 0x1
-        (0xeff70000, tld4_high),  // tld4 r|g nodep $r0 $r0 0x0 0x4 cube 0xf
-    ));
-    bytes.extend(block(
-        (0xffe1ffef, 0x001f8000),
-        (0x0007000f, 0xe3000000), // exit
-        (0xff87000f, 0xe2400fff), // bra (padding, never reached)
-        (0x00070f00, 0x50b00000), // nop (padding, never reached)
-    ));
-    bytes
-}
 
 /// `body` behind a Shader Program Header whose output map is `omap_target`, a nibble of
 /// components per render target, as Mesa and nvn lay fragment programs out.
@@ -1516,8 +1347,8 @@ fn qmd_words(grid: [u32; 3], block: [u32; 3], bank: u64) -> Vec<u32> {
 /// Thread `tid` copies word `tid` of the buffer bank 0 describes at `0x60` into the one it
 /// describes at `0x40`.
 pub fn copy_program() -> Vec<u64> {
-    use crate::gpu::shader::isa::{self, MemSize, Operand, RZ};
-    use crate::gpu::shader::Op;
+    use switch_shader::isa::{self, MemSize, Operand, RZ};
+    use switch_shader::Op;
     const PT: u64 = 7 << 16;
     let check = |word: u64, expected: Op| {
         assert_eq!(isa::decode(word).op, expected, "encoded {word:#018x}");
@@ -1592,8 +1423,8 @@ pub fn copy_program() -> Vec<u64> {
 /// Every thread of a launch of four-thread CTAs stores `index * 4 + c0[0x50]` at word
 /// `index`, `index` being its CTA's base plus its thread id, through bank 0's descriptor.
 pub fn indexed_store_program() -> Vec<u64> {
-    use crate::gpu::shader::isa::{self, MemSize, Operand, RZ};
-    use crate::gpu::shader::Op;
+    use switch_shader::isa::{self, MemSize, Operand, RZ};
+    use switch_shader::Op;
     const PT: u64 = 7 << 16;
     let check = |word: u64, expected: Op| {
         assert_eq!(isa::decode(word).op, expected, "encoded {word:#018x}");
@@ -1688,9 +1519,9 @@ pub const IMAGE_COPY_V: u32 = 0x6c;
 pub const IMAGE_COPY_LAYER: u32 = 0x74;
 
 /// Assert `word` decodes as `expected`.
-fn checked(word: u64, expected: crate::gpu::shader::Op) -> u64 {
+fn checked(word: u64, expected: switch_shader::Op) -> u64 {
     assert_eq!(
-        crate::gpu::shader::isa::decode(word).op,
+        switch_shader::isa::decode(word).op,
         expected,
         "encoded {word:#018x}"
     );
@@ -1701,10 +1532,10 @@ const PT: u64 = 7 << 16;
 
 /// `ldc dst, c0[offset]`.
 fn ldc0(dst: u8, offset: u32) -> u64 {
-    use crate::gpu::shader::isa::{MemSize, RZ};
+    use switch_shader::isa::{MemSize, RZ};
     checked(
         0xef94u64 << 48 | u64::from(offset) << 20 | PT | u64::from(RZ) << 8 | u64::from(dst),
-        crate::gpu::shader::Op::Ldc {
+        switch_shader::Op::Ldc {
             dst,
             bank: 0,
             offset: offset as i32,
@@ -1716,17 +1547,12 @@ fn ldc0(dst: u8, offset: u32) -> u64 {
 
 /// `sust.p.2d.rgba [coords], src, handle_reg`.
 fn sust_p_2d(src: u8, coords: u8, handle_reg: u8) -> u64 {
-    sust_p(
-        crate::gpu::shader::isa::SurfaceDim::D2,
-        src,
-        coords,
-        handle_reg,
-    )
+    sust_p(switch_shader::isa::SurfaceDim::D2, src, coords, handle_reg)
 }
 
 /// `sust.p.rgba [coords], src, handle_reg` of `dim`, a 2D image or array.
-fn sust_p(dim: crate::gpu::shader::isa::SurfaceDim, src: u8, coords: u8, handle_reg: u8) -> u64 {
-    use crate::gpu::shader::isa::{SurfaceData, SurfaceDim};
+fn sust_p(dim: switch_shader::isa::SurfaceDim, src: u8, coords: u8, handle_reg: u8) -> u64 {
+    use switch_shader::isa::{SurfaceData, SurfaceDim};
     let code = match dim {
         SurfaceDim::D2 => 3,
         SurfaceDim::Array2d => 4,
@@ -1740,7 +1566,7 @@ fn sust_p(dim: crate::gpu::shader::isa::SurfaceDim, src: u8, coords: u8, handle_
             | PT
             | u64::from(coords) << 8
             | u64::from(src),
-        crate::gpu::shader::Op::Sust {
+        switch_shader::Op::Sust {
             src,
             coords,
             handle: 0,
@@ -1752,27 +1578,24 @@ fn sust_p(dim: crate::gpu::shader::isa::SurfaceDim, src: u8, coords: u8, handle_
 }
 
 fn exit_word() -> u64 {
-    checked(
-        0xe300_0000_0000_0000 | PT | 0xF,
-        crate::gpu::shader::Op::Exit,
-    )
+    checked(0xe300_0000_0000_0000 | PT | 0xF, switch_shader::Op::Exit)
 }
 
 /// Thread `(x, y)` samples the bindless texture at `(2^x * u, 2^y * v)` and stores the texel
 /// to texel `(x, y)` of the bindless image.
 pub fn image_copy_program() -> Vec<u64> {
-    image_copy_program_as(crate::gpu::shader::isa::SurfaceDim::D2)
+    image_copy_program_as(switch_shader::isa::SurfaceDim::D2)
 }
 
 /// [`image_copy_program`], storing as a 2D array to the layer bank word
 /// [`IMAGE_COPY_LAYER`] holds, as Pokémon Legends: Z-A does.
 pub fn image_copy_array_program() -> Vec<u64> {
-    image_copy_program_as(crate::gpu::shader::isa::SurfaceDim::Array2d)
+    image_copy_program_as(switch_shader::isa::SurfaceDim::Array2d)
 }
 
-fn image_copy_program_as(dim: crate::gpu::shader::isa::SurfaceDim) -> Vec<u64> {
-    use crate::gpu::shader::isa::{Operand, TexDim};
-    use crate::gpu::shader::Op;
+fn image_copy_program_as(dim: switch_shader::isa::SurfaceDim) -> Vec<u64> {
+    use switch_shader::isa::{Operand, TexDim};
+    use switch_shader::Op;
     let s2r = |dst: u8, sr: u8| {
         checked(
             0xf0c8u64 << 48 | u64::from(sr) << 20 | PT | u64::from(dst),
@@ -1835,7 +1658,7 @@ fn image_copy_program_as(dim: crate::gpu::shader::isa::SurfaceDim) -> Vec<u64> {
 /// [`IMAGE_SIZE_LEVEL`] holds, as Echoes of Wisdom's cubemap filter does, and stores `u` in
 /// every channel to the texel at that size.
 pub fn image_size_program() -> Vec<u64> {
-    use crate::gpu::shader::Op;
+    use switch_shader::Op;
     vec![
         ldc0(8, IMAGE_SIZE_LEVEL),
         checked(
@@ -1862,8 +1685,8 @@ pub fn image_size_program() -> Vec<u64> {
 /// [`ComputeHarness::image_copy_words`]: it adds one to texel `(0, 0)`, raises `(1, 0)` to its
 /// x and increments `(2, 0)` wrapping past two, so only the thread count decides what lands.
 pub fn image_reduce_program() -> Vec<u64> {
-    use crate::gpu::shader::isa::{AtomOp, AtomType, SurfaceDim};
-    use crate::gpu::shader::Op;
+    use switch_shader::isa::{AtomOp, AtomType, SurfaceDim};
+    use switch_shader::Op;
     let sured = |op: AtomOp, code: u64, coords: u8, src: u8| {
         checked(
             0xeb50u64 << 48
@@ -1921,8 +1744,8 @@ pub const WARP_THREADS: u32 = 36;
 /// Word `2 * WARP_THREADS + tid` gets `fswzadd`'s identity swizzle of 3.0 and 1.0, whose signs
 /// follow the lane's place in its quad.
 pub fn warp_program() -> Vec<u64> {
-    use crate::gpu::shader::isa::{self, MemSize, Operand, ShflMode, RZ};
-    use crate::gpu::shader::Op;
+    use switch_shader::isa::{self, MemSize, Operand, ShflMode, RZ};
+    use switch_shader::Op;
     const PT: u64 = 7 << 16;
     let check = |word: u64, expected: Op| {
         assert_eq!(isa::decode(word).op, expected, "encoded {word:#018x}");

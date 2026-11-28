@@ -10,11 +10,12 @@ use crate::{
 };
 use switch_core::gpu::engine::threed::{Engine3D, ShaderStage};
 use switch_core::gpu::exec::ExecCtx;
-use switch_core::gpu::pipeline::{self as state, AttributeBase, Pipeline};
-use switch_core::gpu::shader::compiled::Compiled;
-use switch_core::gpu::shader::wgsl::{self, Coverage, Layout, Stage, Translation};
-use switch_core::gpu::texture::TextureSlot;
+use switch_core::gpu::pipeline::{self as state, Pipeline};
 use switch_core::gpu::upload::{Banks, Cached, Target, Targets, TexturePools, Uploads};
+use switch_shader::attribute::AttributeBase;
+use switch_shader::compiled::Compiled;
+use switch_shader::texture::TextureSlot;
+use switch_shader::wgsl::{self, Coverage, Layout, Stage, Translation};
 
 impl Gpu {
     /// Decide whether a draw can run here, without uploading anything.
@@ -685,8 +686,8 @@ impl Gpu {
         upload: &switch_core::gpu::upload::TextureUpload,
         binding: &wgsl::TextureBinding,
     ) -> std::result::Result<Option<wgsl::Fold>, String> {
-        use switch_core::gpu::shader::isa::TexDim;
         use switch_core::gpu::texture::Wrap;
+        use switch_shader::isa::TexDim;
         let limits = self.device_limits.clone();
         let plain_2d = matches!(binding.dim, TexDim::T2d | TexDim::T2dArray)
             && !binding.compare
@@ -727,7 +728,7 @@ impl Gpu {
                 if let Some(translation) = &self.no_fragment {
                     return Ok((translation.clone(), 0));
                 }
-                let program = switch_core::gpu::shader::no_fragment_program();
+                let program = switch_shader::no_fragment_program();
                 let translation = Arc::new(
                     wgsl::translate_for(&Compiled::new(&program), self.wgsl_caps(false))
                         .map_err(|e| e.to_string())?,

@@ -10,12 +10,12 @@ use crate::{
 };
 use switch_core::gpu::engine::threed::ShaderStage;
 use switch_core::gpu::exec::ExecCtx;
-use switch_core::gpu::shader::wgsl::{self, Layout};
 use switch_core::gpu::surface::{
     block_linear_volume_offset, Layout as SurfaceLayout, GOB_HEIGHT, GOB_WIDTH,
 };
 use switch_core::gpu::upload::{ConstantUpload, Uploads};
 use switch_core::gpu::upload::{Texels, TextureKey, TextureUpload};
+use switch_shader::wgsl::{self, Layout};
 
 /// A sampled texture's held layers, and each one's surface's write count.
 type HeldLayers = (Vec<(u32, HeldLayer)>, Vec<u64>);
@@ -470,7 +470,7 @@ impl Gpu {
         (entries, resources): (&mut Vec<wgpu::BindGroupLayoutEntry>, &mut Vec<Resource>),
         ctx: &ExecCtx,
     ) -> std::result::Result<Option<usize>, String> {
-        use switch_core::gpu::shader::isa::TexDim;
+        use switch_shader::isa::TexDim;
         let compare = declared_texture.compare;
         let uint = declared_texture.uint;
         // An integer image is read texel by texel, which needs no filter.
@@ -911,8 +911,8 @@ impl Gpu {
         read_otherwise: &[u32],
         drawn: &[u64],
     ) -> Option<wgsl::Crop> {
-        use switch_core::gpu::shader::isa::TexDim;
         use switch_core::gpu::texture::Wrap;
+        use switch_shader::isa::TexDim;
         let edge = |wrap: Wrap| matches!(wrap, Wrap::ClampToEdge | Wrap::ClampToBorder);
         if binding.compare
             || binding.uint
@@ -922,7 +922,7 @@ impl Gpu {
             || read_otherwise.contains(&binding.slot.key())
             || matches!(
                 binding.slot,
-                switch_core::gpu::texture::TextureSlot::Level { .. }
+                switch_shader::texture::TextureSlot::Level { .. }
             )
             || !edge(upload.sampler.wrap_u)
             || !edge(upload.sampler.wrap_v)
@@ -2139,7 +2139,7 @@ impl Gpu {
                 Red::Unorm8 => f32::from(b[0]) / 255.0,
                 Red::Unorm16 => f32::from(u16::from_le_bytes([b[0], b[1]])) / 65535.0,
                 Red::Float16 => {
-                    switch_core::gpu::surface::f16_to_f32(u16::from_le_bytes([b[0], b[1]]))
+                    switch_shader::float16::f16_to_f32(u16::from_le_bytes([b[0], b[1]]))
                 }
                 Red::Float32 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
                 Red::StencilBits => f32::from_bits(u32::from(b[0])),

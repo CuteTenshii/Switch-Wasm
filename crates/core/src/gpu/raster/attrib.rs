@@ -2,8 +2,8 @@
 
 use crate::gpu::engine::threed::{VertexArray, VertexAttrib};
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::surface::f16_to_f32;
 use crate::{Error, Result};
+use switch_shader::float16::f16_to_f32;
 
 /// `DkVtxAttribSize`'s component count and per-component bit width
 /// (deko3d.h), for the shapes this fetcher decodes.

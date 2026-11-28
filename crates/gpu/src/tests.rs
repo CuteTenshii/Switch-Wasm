@@ -84,8 +84,8 @@ fn naga_still_needs_a_return_after_a_loop_that_cannot_fall_through() {
 #[test]
 fn the_quad_swap_a_browser_gets_is_wgsl_naga_accepts() {
     use super::{wgpu, wgsl, Compiled, Layout, Stage};
-    use switch_core::gpu::shader::isa::{Instruction, Operand, Pred, ShflMode};
-    use switch_core::gpu::shader::{Op, Program};
+    use switch_shader::isa::{Instruction, Operand, Pred, ShflMode};
+    use switch_shader::{Op, Program};
 
     let Some((_serial, gpu)) = device() else {
         return;
@@ -131,8 +131,8 @@ fn the_quad_swap_a_browser_gets_is_wgsl_naga_accepts() {
 #[test]
 fn mario_karts_tld4s_and_an_integer_target_are_wgsl_naga_accepts() {
     use super::{wgpu, wgsl, Compiled, Layout, Stage};
-    use switch_core::gpu::shader::isa::{self, Instruction, Pred};
-    use switch_core::gpu::shader::{Op, Program};
+    use switch_shader::isa::{self, Instruction, Pred};
+    use switch_shader::{Op, Program};
 
     let Some((_serial, gpu)) = device() else {
         return;
@@ -210,11 +210,11 @@ fn mario_karts_tld4s_and_an_integer_target_are_wgsl_naga_accepts() {
 #[test]
 fn condition_code_extended_and_fmz_forms_are_wgsl_naga_accepts() {
     use super::{wgpu, wgsl, Compiled, Layout, Stage};
-    use switch_core::gpu::shader::isa::{
+    use switch_shader::isa::{
         BoolOp, FCmp, FMod, FmulScale, Half16, ICmp, Iadd3Shift, Instruction, LogicOp, LopTest,
         Operand, Pred,
     };
-    use switch_core::gpu::shader::{Op, Program};
+    use switch_shader::{Op, Program};
 
     let Some((_serial, gpu)) = device() else {
         return;
@@ -395,8 +395,8 @@ fn condition_code_extended_and_fmz_forms_are_wgsl_naga_accepts() {
 #[test]
 fn persona_5_royals_tlds_and_shadow_tld4s_are_wgsl_naga_accepts() {
     use super::{wgpu, wgsl, Compiled, Layout, Stage};
-    use switch_core::gpu::shader::isa::{self, Instruction, Pred};
-    use switch_core::gpu::shader::{Op, Program};
+    use switch_shader::isa::{self, Instruction, Pred};
+    use switch_shader::{Op, Program};
 
     let Some((_serial, gpu)) = device() else {
         return;
@@ -436,12 +436,12 @@ fn persona_5_royals_tlds_and_shadow_tld4s_are_wgsl_naga_accepts() {
 fn validated_module(
     gpu: &super::Gpu,
     label: &str,
-    ops: &[switch_core::gpu::shader::Op],
+    ops: &[switch_shader::Op],
     tweak: impl FnOnce(&mut super::Layout),
 ) -> String {
     use super::{wgpu, wgsl, Compiled, Layout, Stage};
-    use switch_core::gpu::shader::isa::{Instruction, Pred};
-    use switch_core::gpu::shader::{Op, Program};
+    use switch_shader::isa::{Instruction, Pred};
+    use switch_shader::{Op, Program};
 
     let mut program = Program::default();
     for (index, op) in ops.iter().copied().chain([Op::Exit]).enumerate() {
@@ -472,8 +472,8 @@ fn validated_module(
 /// Every `tlds` shape: an offset, an array layer, a volume slice, and a folded image's rows.
 #[test]
 fn every_tlds_shape_is_wgsl_naga_accepts() {
-    use switch_core::gpu::shader::isa::{TexDim, RZ};
-    use switch_core::gpu::shader::Op;
+    use switch_shader::isa::{TexDim, RZ};
+    use switch_shader::Op;
 
     let Some((_serial, gpu)) = device() else {
         return;
@@ -512,8 +512,8 @@ fn every_tlds_shape_is_wgsl_naga_accepts() {
 /// guest's texels, in WGSL naga accepts.
 #[test]
 fn a_smaller_level_reads_in_the_guests_texels() {
-    use switch_core::gpu::shader::isa::{TexDim, RZ};
-    use switch_core::gpu::shader::Op;
+    use switch_shader::isa::{TexDim, RZ};
+    use switch_shader::Op;
 
     let Some((_serial, gpu)) = device() else {
         return;
@@ -569,8 +569,8 @@ fn a_smaller_level_reads_in_the_guests_texels() {
 /// A gather whose offset is in a register, folded images included, is valid WGSL.
 #[test]
 fn a_gather_with_a_register_offset_is_wgsl_naga_accepts() {
-    use switch_core::gpu::shader::isa::{TexDim, RZ};
-    use switch_core::gpu::shader::Op;
+    use switch_shader::isa::{TexDim, RZ};
+    use switch_shader::Op;
 
     let Some((_serial, gpu)) = device() else {
         return;
@@ -636,8 +636,8 @@ fn a_gather_with_a_register_offset_is_wgsl_naga_accepts() {
 /// Every `tld4` form, shadow, cube and per-texel offsets included, is valid WGSL.
 #[test]
 fn every_tld4_form_is_wgsl_naga_accepts() {
-    use switch_core::gpu::shader::isa::{Operand, TexDim};
-    use switch_core::gpu::shader::Op;
+    use switch_shader::isa::{Operand, TexDim};
+    use switch_shader::Op;
 
     let Some((_serial, gpu)) = device() else {
         return;
@@ -693,10 +693,8 @@ fn every_tld4_form_is_wgsl_naga_accepts() {
 #[test]
 fn global_stores_loads_and_atomics_are_wgsl_naga_accepts() {
     use super::{wgpu, wgsl, Compiled, Layout, Stage};
-    use switch_core::gpu::shader::isa::{
-        AtomOp, AtomSpace, AtomType, Instruction, MemSize, Pred, RZ,
-    };
-    use switch_core::gpu::shader::{Op, Program};
+    use switch_shader::isa::{AtomOp, AtomSpace, AtomType, Instruction, MemSize, Pred, RZ};
+    use switch_shader::{Op, Program};
 
     let Some((_serial, gpu)) = device() else {
         return;
@@ -782,8 +780,8 @@ fn global_stores_loads_and_atomics_are_wgsl_naga_accepts() {
 #[test]
 fn tomodachi_lifes_cube_array_and_video_min_are_wgsl_naga_accepts() {
     use super::{wgpu, wgsl, Compiled, Layout, Stage};
-    use switch_core::gpu::shader::isa::{self, Instruction, Pred};
-    use switch_core::gpu::shader::{Op, Program};
+    use switch_shader::isa::{self, Instruction, Pred};
+    use switch_shader::{Op, Program};
 
     let Some((_serial, gpu)) = device() else {
         return;
@@ -886,8 +884,8 @@ fn a_rejection_nothing_asked_about_is_still_counted() {
 #[test]
 fn nintendo_switch_sports_txq_and_tld4_are_wgsl_naga_accepts() {
     use super::{wgpu, wgsl, Compiled, Layout, Stage};
-    use switch_core::gpu::shader::isa::{self, Instruction, Pred};
-    use switch_core::gpu::shader::{Op, Program};
+    use switch_shader::isa::{self, Instruction, Pred};
+    use switch_shader::{Op, Program};
 
     let Some((_serial, gpu)) = device() else {
         return;
@@ -924,8 +922,8 @@ fn nintendo_switch_sports_txq_and_tld4_are_wgsl_naga_accepts() {
 #[test]
 fn nintendo_switch_sports_csetp_is_wgsl_naga_accepts() {
     use super::{wgpu, wgsl, Compiled, Layout, Stage};
-    use switch_core::gpu::shader::isa::{self, Instruction, Pred};
-    use switch_core::gpu::shader::{Op, Program};
+    use switch_shader::isa::{self, Instruction, Pred};
+    use switch_shader::{Op, Program};
 
     let Some((_serial, gpu)) = device() else {
         return;
@@ -3117,8 +3115,9 @@ fn a_draw_sampling_its_own_target_updates_the_copy_only_past_a_barrier() {
     use switch_core::gpu::engine::threed::ShaderStage;
     use switch_core::gpu::pipeline::Format;
     use switch_core::gpu::surface::Layout;
-    use switch_core::gpu::texture::{Sampler, SwizzleSource, TextureSlot, Wrap};
+    use switch_core::gpu::texture::{Sampler, Wrap};
     use switch_core::gpu::upload::{TextureKey, TextureUpload};
+    use switch_shader::texture::{SwizzleSource, TextureSlot};
 
     let Some((_serial, mut gpu)) = device() else {
         return;
@@ -3228,8 +3227,9 @@ fn a_kept_copy_of_a_held_array_takes_only_the_layer_written_since() {
     use switch_core::gpu::engine::threed::ShaderStage;
     use switch_core::gpu::pipeline::Format;
     use switch_core::gpu::surface::Layout;
-    use switch_core::gpu::texture::{Sampler, SwizzleSource, TextureSlot, Wrap};
+    use switch_core::gpu::texture::{Sampler, Wrap};
     use switch_core::gpu::upload::{TextureKey, TextureUpload};
+    use switch_shader::texture::{SwizzleSource, TextureSlot};
 
     let Some((_serial, mut gpu)) = device() else {
         return;
@@ -3514,8 +3514,8 @@ fn a_kept_copy_of_a_held_array_takes_only_the_layer_written_since() {
 /// infinities and NaNs, and a spread of arbitrary words.
 #[test]
 fn the_double_conversion_helpers_match_the_interpreter_on_the_device() {
-    use switch_core::gpu::shader::interp::{f64_to_f32_bits, int_to_f64_bits};
-    use switch_core::gpu::shader::wgsl::helper_source;
+    use switch_shader::interp::{f64_to_f32_bits, int_to_f64_bits};
+    use switch_shader::wgsl::helper_source;
     let Some((_serial, gpu)) = device() else {
         return;
     };

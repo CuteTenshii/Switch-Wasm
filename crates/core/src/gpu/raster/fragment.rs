@@ -7,12 +7,11 @@ use crate::gpu::engine::threed::{
     BlendTarget, DepthState, DepthTarget, Engine3D, RenderTarget, ShaderStage,
 };
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::shader::compiled::Compiled;
-use crate::gpu::shader::interp::{
-    resolve_warp, Env, Halt, Invocation, MemoryConstants, MemoryGlobal, MemoryTextures,
-};
+use crate::gpu::shader::sources::{MemoryConstants, MemoryGlobal, MemoryTextures};
 use crate::gpu::surface::{ColorFormat, SampleGrid, MAX_SAMPLES};
 use crate::{Error, Result};
+use switch_shader::compiled::Compiled;
+use switch_shader::interp::{resolve_warp, Env, Halt, Invocation};
 
 /// `DEPTH_TEST_FUNC` takes either the GL enums (`0x200..=0x207`, as Mesa
 /// writes) or the D3D numbering (`1..=8`, as Eden's `ComparisonOp` lists).
@@ -442,11 +441,11 @@ impl Fragments {
 pub(super) fn with_fragment_env<T>(
     engine: &Engine3D,
     ctx: &ExecCtx,
-    consts: &std::cell::RefCell<crate::gpu::shader::interp::ConstCache>,
+    consts: &std::cell::RefCell<crate::gpu::shader::sources::ConstCache>,
     descriptors: &std::cell::RefCell<crate::gpu::texture::DescriptorCache>,
     blocks: &std::cell::RefCell<crate::gpu::texture::BlockCache>,
     stores: &std::cell::RefCell<Vec<(u64, u32)>>,
-    surface_stores: &std::cell::RefCell<Vec<crate::gpu::shader::interp::SurfaceWrite>>,
+    surface_stores: &std::cell::RefCell<Vec<crate::gpu::shader::sources::SurfaceWrite>>,
     f: impl FnOnce(&mut Env) -> Result<T>,
 ) -> Result<T> {
     let fs_consts = MemoryConstants {

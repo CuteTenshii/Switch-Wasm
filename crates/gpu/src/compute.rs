@@ -11,9 +11,9 @@ use switch_core::gpu::compute::{self as software, Launch};
 use switch_core::gpu::engine::compute::EngineCompute;
 use switch_core::gpu::engine::threed::ShaderStage;
 use switch_core::gpu::exec::ExecCtx;
-use switch_core::gpu::shader::wgsl::{self, ComputeShape, Layout, Stage};
 use switch_core::gpu::upload::{self, Cached, ConstantUpload, Target, TexturePools, TextureUpload};
 use switch_core::Result;
+use switch_shader::wgsl::{self, ComputeShape, Layout, Stage};
 
 /// What a store to a null image is declared as.
 const NULL_IMAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;

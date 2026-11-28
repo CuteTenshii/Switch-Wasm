@@ -11,15 +11,17 @@ use crate::gpu::engine::threed::{
     ShaderStage, VertexArray, VertexAttrib, ViewportTransform,
 };
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::shader::compiled::Compiled;
-use crate::gpu::shader::interp::{
-    ConstCache, Invocation, MemoryConstants, MemoryGlobal, MemoryTextures, SurfaceWrite,
+use crate::gpu::shader::decode_program_from_memory;
+use crate::gpu::shader::sources::{
+    ConstCache, MemoryConstants, MemoryGlobal, MemoryTextures, SurfaceWrite,
 };
-use crate::gpu::shader::{decode_program_from_memory, wgsl, Op, Program};
 use crate::gpu::surface::{SampleGrid, MAX_SAMPLES};
 use crate::gpu::texture::{BlockCache, DescriptorCache};
 use crate::{Error, Result};
 use std::cell::RefCell;
+use switch_shader::compiled::Compiled;
+use switch_shader::interp::Invocation;
+use switch_shader::{wgsl, Op, Program};
 
 /// Whether `cull` throws this triangle away, judged by its winding in window
 /// space (y down) after the viewport transform, as Eden does.
@@ -174,12 +176,12 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         Some(binding) => decode_program_from_memory(&*ctx, binding.addr, &|bank: u8| {
             engine.bound_constbuf(ShaderStage::Fragment, bank as u32)
         })?,
-        None => crate::gpu::shader::no_fragment_program(),
+        None => switch_shader::no_fragment_program(),
     };
     // Only when a diagnostic asked; see `examples/shader_coverage.rs`.
-    crate::gpu::shader::uses::note(wgsl::Stage::Vertex, vs_binding.addr, &vs_decoded);
+    switch_shader::uses::note(wgsl::Stage::Vertex, vs_binding.addr, &vs_decoded);
     if fs_binding.is_some() {
-        crate::gpu::shader::uses::note(wgsl::Stage::Fragment, fs_addr, &fs_decoded);
+        switch_shader::uses::note(wgsl::Stage::Fragment, fs_addr, &fs_decoded);
     }
     trace_wgsl(
         engine,
@@ -319,7 +321,7 @@ fn trace_wgsl(engine: &Engine3D, vs: (u64, &Program), fs: (u64, &Program)) {
         return;
     }
     let keep = crate::dump::wants(crate::dump::Artefact::RasterWgsl);
-    use crate::gpu::shader::wgsl::{Layout, Stage};
+    use switch_shader::wgsl::{Layout, Stage};
     // Unfolded, as the device translates it: folding turns the constant
     // operands a `ldg` descriptor is traced through into immediates.
     for (name, stage, (addr, program)) in [("vs", Stage::Vertex, vs), ("fs", Stage::Fragment, fs)] {
@@ -377,7 +379,7 @@ fn lower(
 fn runs_in_quads(program: &Compiled) -> bool {
     program.ops().iter().any(|op| {
         matches!(op, Op::Shfl { .. } | Op::Vote { .. } | Op::Fswzadd { .. })
-            || matches!(op, Op::S2r { sr, .. } if crate::gpu::shader::reads_lane(*sr))
+            || matches!(op, Op::S2r { sr, .. } if switch_shader::reads_lane(*sr))
     })
 }
 
@@ -508,12 +510,12 @@ fn trace_uploads(engine: &Engine3D, ctx: &ExecCtx, vs_program: &Compiled, fs_pro
         .map_err(|e| Error::Gpu(format!("pipeline: {e}")))
         .and_then(|p| {
             // The two stages index different constant buffers per slot.
-            let mut slots: Vec<(ShaderStage, crate::gpu::texture::TextureSlot)> = Vec::new();
+            let mut slots: Vec<(ShaderStage, switch_shader::texture::TextureSlot)> = Vec::new();
             for (stage, program) in [
                 (ShaderStage::VertexB, vs_program),
                 (ShaderStage::Fragment, fs_program),
             ] {
-                if let Ok(translated) = crate::gpu::shader::wgsl::translate(program) {
+                if let Ok(translated) = switch_shader::wgsl::translate(program) {
                     slots.extend(
                         translated
                             .textures
@@ -577,7 +579,7 @@ fn trace_cfg(vs: (u64, &Compiled), fs: (u64, &Compiled)) {
     for (stage, (addr, program)) in [("vs", vs), ("fs", fs)] {
         crate::traceln!(
             "[cfg] {stage}@{addr:#x} {}",
-            crate::gpu::shader::cfg::Cfg::new(program).describe()
+            switch_shader::cfg::Cfg::new(program).describe()
         );
     }
 }

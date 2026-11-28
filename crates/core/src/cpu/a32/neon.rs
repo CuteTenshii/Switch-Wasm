@@ -1344,7 +1344,7 @@ fn f32_to_f16_standard(bits: u32) -> u16 {
     if f32::from_bits(bits).is_nan() {
         return 0x7E00;
     }
-    crate::gpu::surface::f32_to_f16(f32::from_bits(bits))
+    switch_shader::float16::f32_to_f16(f32::from_bits(bits))
 }
 
 /// `VCVT.F32.F16`: exact except NaN, which becomes the default NaN.
@@ -1352,7 +1352,7 @@ fn f16_to_f32_standard(bits: u16) -> u32 {
     if bits & 0x7C00 == 0x7C00 && bits & 0x03FF != 0 {
         return 0x7FC0_0000;
     }
-    crate::gpu::surface::f16_to_f32(bits).to_bits()
+    switch_shader::float16::f16_to_f32(bits).to_bits()
 }
 
 /// The ARM ARM's `RecipEstimate`.

@@ -4,7 +4,7 @@
 //! fields are scattered in per-mode runs described by [`MODES`]. Alpha is 1.0.
 
 use super::{anchor, BitReader, Block, PARTITIONS_2, WEIGHTS_3, WEIGHTS_4};
-use crate::gpu::surface::f16_to_f32;
+use switch_shader::float16::f16_to_f32;
 
 /// The twelve endpoint fields, as `channel * 4 + endpoint` where the channels
 /// run R, G, B and the endpoints are the specification's w, x, y and z.

@@ -2,9 +2,9 @@
 //! because not every guest format is available on the device.
 
 use switch_core::gpu::pipeline::{self as state, Format};
-use switch_core::gpu::shader::wgsl;
 use switch_core::gpu::upload::{DepthKind, IndexFormat};
 use switch_core::{Error, Result};
+use switch_shader::wgsl;
 
 pub(crate) fn topology(topology: state::Topology) -> wgpu::PrimitiveTopology {
     match topology {

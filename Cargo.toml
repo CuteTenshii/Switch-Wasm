@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/gpu", "crates/opus", "crates/relay", "crates/relay-proto", "crates/vp9", "crates/wasm"]
+members = ["crates/core", "crates/gpu", "crates/opus", "crates/relay", "crates/relay-proto", "crates/shader", "crates/vp9", "crates/wasm"]
 
 [profile.release]
 opt-level = 3
@@ -19,6 +19,10 @@ debug = false
 
 # The core tests execute guest code, so keep some optimisation there.
 [profile.test.package.switch-core]
+opt-level = 1
+
+# Guest shaders run in its interpreter.
+[profile.test.package.switch-shader]
 opt-level = 1
 
 [workspace.lints.clippy]
