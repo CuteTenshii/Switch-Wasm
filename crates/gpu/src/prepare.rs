@@ -57,6 +57,9 @@ impl Gpu {
         let extras = extra_colors.iter().any(Option::is_some);
         // The first attached colour sets the pass's size, which every other one must have.
         let sizing = color.or_else(|| extra_colors.iter().flatten().next().copied());
+        // A pass needs an attachment; the rasterizer sizes this draw by the bound depth surface,
+        // which a draw that neither tests nor writes it leaves as it was.
+        let depth = depth.or_else(|| targets.depth.filter(|_| sizing.is_none()));
         if let Some(sizing) = sizing {
             if let Some(other) = std::iter::once(color)
                 .chain(extra_colors.iter().copied())

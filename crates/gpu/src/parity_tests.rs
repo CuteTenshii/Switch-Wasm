@@ -3804,6 +3804,25 @@ fn a_depth_only_pass_still_writes_depth() {
 }
 
 #[test]
+fn a_draw_with_only_an_unused_depth_surface_runs_on_the_device() {
+    // Paper Mario: The Origami King leaves depth bound, tested and written by nothing.
+    let set_up = |h: &mut Harness| {
+        h.depth_target(0x0207);
+        h.engine.regs.set(testing::DEPTH_TEST_ENABLE, 0);
+        h.engine.regs.set(testing::DEPTH_WRITE_ENABLE, 0);
+        h.engine.regs.set(0x200, 0);
+        h.engine.regs.set(0x201, 0);
+        h.triangle([1.0, 1.0, 1.0, 1.0]);
+    };
+    agrees(set_up);
+    let mut h = Harness::new();
+    set_up(&mut h);
+    let before = h.depth();
+    h.draw_with(&mut Software).expect("the draw");
+    assert_eq!(h.depth(), before, "the draw changed the depth surface");
+}
+
+#[test]
 fn a_triangle_fan_is_assembled_the_way_the_rasterizer_assembles_one() {
     // Fans go through `raster::assemble` on both renderers.
     for primitive in [6, 9] {
