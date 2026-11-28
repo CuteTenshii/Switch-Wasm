@@ -2,6 +2,7 @@
 
 use crate::tests::device;
 
+use switch_core::gpu::engine::twod::Engine2D;
 use switch_core::gpu::renderer::{Blit, BlitRoute, Renderer, Software, Submit};
 use switch_core::gpu::surface::{self, blend, taps, ColorFormat, Layout, Surface};
 use switch_core::gpu::testing::{self, Harness};
@@ -4750,7 +4751,7 @@ fn a_blit_out_of_guest_memory_uploads_its_source_and_agrees_with_the_engine() {
         step: (2.0, 2.0),
         filtered: true,
     };
-    let route = gpu.blit_on_device(&blit, &h.ctx());
+    let route = gpu.blit_on_device(&blit, &mut h.ctx());
     assert_eq!(route, BlitRoute::Done);
     gpu.flush(&mut h.ctx()).expect("the flush");
     let ctx = h.ctx();
@@ -4783,7 +4784,7 @@ fn converting_blit_agrees_with_the_engine(texels: &[u32], source: u32, target: u
     };
     blit.src.format = ColorFormat::from_raw(source).expect("a source format");
     blit.dst.format = ColorFormat::from_raw(target).expect("a target format");
-    let route = gpu.blit_on_device(&blit, &h.ctx());
+    let route = gpu.blit_on_device(&blit, &mut h.ctx());
     assert_eq!(route, BlitRoute::Done);
     gpu.flush(&mut h.ctx()).expect("the flush");
     let ctx = h.ctx();
@@ -4828,7 +4829,7 @@ fn a_blit_out_of_srgb_stays_with_the_engine() {
     };
     blit.src.format = ColorFormat::from_raw(SRGB8).expect("A8B8G8R8_sRGB");
     blit.dst.format = blit.src.format;
-    assert_eq!(gpu.blit_on_device(&blit, &h.ctx()), BlitRoute::Flush);
+    assert_eq!(gpu.blit_on_device(&blit, &mut h.ctx()), BlitRoute::Flush);
 }
 
 /// Echoes of Wisdom's copy of its `Z24S8` depth surface, word for word, into a `B8G8R8A8` one.
@@ -4891,7 +4892,7 @@ fn a_depth_surface_moved_into_colour_on_the_device_carries_the_words_the_engine_
 
     let mut h = draw(&mut gpu);
     let blit = blit(&h);
-    assert_eq!(gpu.blit_on_device(&blit, &h.ctx()), BlitRoute::Done);
+    assert_eq!(gpu.blit_on_device(&blit, &mut h.ctx()), BlitRoute::Done);
     h.flush_with(&mut gpu);
     // What the engine would move once the depth is back in guest memory.
     let expected = words(&mut h, DEPTH);
@@ -4904,6 +4905,146 @@ fn a_depth_surface_moved_into_colour_on_the_device_carries_the_words_the_engine_
         "the words carry stencil"
     );
     assert_eq!(words(&mut h, COPY), expected);
+}
+
+/// Pokémon Legends: Z-A's move of its `Z24S8` depth, every other word, into a half-size surface,
+/// a depth surface also held on the device or a colour one: the words land as the engine moves
+/// them once both surfaces are back in guest memory.
+fn depth_words_moved_at_half_size_agree_with_the_engine(into_depth: bool) {
+    const DEPTH: u64 = 0x1000;
+    const COPY: u64 = 0x2000;
+    const DEPTH_ADDRESS_HIGH: u32 = 0x3F8;
+    const DEPTH_ADDRESS_LOW: u32 = 0x3F9;
+    let (width, height) = (testing::TARGET_WIDTH, testing::TARGET_HEIGHT);
+    let Some((_serial, mut gpu)) = device() else {
+        return;
+    };
+    // Stencil neither renderer draws, different in every word.
+    let write_stencil = |h: &mut Harness, at: u64, words: u32, salt: u32| {
+        let base = h.base;
+        let mut ctx = h.ctx();
+        for i in 0..words {
+            ctx.write_u32(base + at + u64::from(i) * 4, (i * 37 + salt) & 0xff)
+                .expect("a word");
+        }
+    };
+    let draw = |renderer: &mut dyn Renderer| {
+        let mut h = Harness::new();
+        h.depth_target(0x0207);
+        h.engine.regs.set(0x364, 0.75f32.to_bits());
+        write_stencil(&mut h, DEPTH, width * height, 5);
+        h.write_vertex(0, [-1.0, 1.0, 0.1, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        h.write_vertex(1, [1.0, 1.0, 0.9, 1.0], [0.0, 1.0, 0.0, 1.0]);
+        h.write_vertex(2, [-1.0, -1.0, 0.4, 1.0], [0.0, 0.0, 1.0, 1.0]);
+        h.clear_depth_with(renderer).expect("the depth clear");
+        h.draw_with(renderer).expect("the draw");
+        write_stencil(&mut h, COPY, width * height / 4, 101);
+        if !into_depth {
+            return h;
+        }
+        // The half-size depth the move lands in.
+        let copy = h.base + COPY;
+        h.depth_target_sized(0x0207, width / 2, height / 2);
+        h.engine.regs.set(DEPTH_ADDRESS_HIGH, (copy >> 32) as u32);
+        h.engine.regs.set(DEPTH_ADDRESS_LOW, copy as u32);
+        h.engine.regs.set(0x364, 0.25f32.to_bits());
+        h.clear_depth_with(renderer)
+            .expect("the second depth clear");
+        h.draw_with(renderer).expect("the second draw");
+        h
+    };
+    // The move's registers as the guest writes them, `B8G8R8A8` views of both surfaces, one
+    // GOB per block, the launch left out.
+    let engine = |h: &Harness| {
+        let mut engine = Engine2D::new();
+        let (src, dst) = (h.base + DEPTH, h.base + COPY);
+        for (method, value) in [
+            (0x080, 0xCF),
+            (0x081, 0),
+            (0x082, 0),
+            (0x086, width / 2),
+            (0x087, height / 2),
+            (0x088, (dst >> 32) as u32),
+            (0x089, dst as u32),
+            (0x08C, 0xCF),
+            (0x08D, 0),
+            (0x08E, 0),
+            (0x092, width),
+            (0x093, height),
+            (0x094, (src >> 32) as u32),
+            (0x095, src as u32),
+            (0x0AB, 3),
+            (0x223, 0),
+            (0x22C, 0),
+            (0x22D, 0),
+            (0x22E, width / 2),
+            (0x22F, height / 2),
+            (0x230, 0),
+            (0x231, 2),
+            (0x232, 0),
+            (0x233, 2),
+            (0x234, 0),
+            (0x235, 1),
+            (0x236, 0),
+            (Engine2D::LAUNCHES_BLIT, 1),
+        ] {
+            engine.regs.set(method, value);
+        }
+        engine
+    };
+    let copy_words = |h: &mut Harness| -> Vec<u32> {
+        let base = h.base;
+        let ctx = h.ctx();
+        (0..u64::from(width * height / 4))
+            .map(|i| ctx.read_u32(base + COPY + i * 4).expect("a word"))
+            .collect()
+    };
+
+    // The engine's route: everything back in guest memory first. The device draws depth a step
+    // apart from the rasterizer in places, so both runs draw on the device.
+    let mut want = draw(&mut gpu);
+    want.flush_with(&mut gpu);
+    let before = copy_words(&mut want);
+    {
+        let mut engine = engine(&want);
+        engine
+            .write(Engine2D::LAUNCHES_BLIT, 1, &mut want.ctx())
+            .expect("the engine's move");
+    }
+    let expected = copy_words(&mut want);
+    assert_ne!(expected, before, "the move changes the copy");
+    assert!(
+        expected.iter().any(|word| word >> 8 != expected[0] >> 8),
+        "the copy holds more than one depth"
+    );
+    assert!(
+        expected
+            .iter()
+            .any(|word| word & 0xff != expected[0] & 0xff),
+        "the copy holds more than one stencil"
+    );
+
+    let mut h = draw(&mut gpu);
+    let blit = engine(&h).request().expect("the move");
+    let in_flight = gpu.space.pending.len();
+    assert_eq!(gpu.blit_on_device(&blit, &mut h.ctx()), BlitRoute::Done);
+    assert_eq!(
+        gpu.space.pending.len(),
+        in_flight,
+        "the move asked for nothing back"
+    );
+    h.flush_with(&mut gpu);
+    assert_eq!(copy_words(&mut h), expected);
+}
+
+#[test]
+fn a_depth_surface_moved_into_a_held_depth_surface_agrees_with_the_engine() {
+    depth_words_moved_at_half_size_agree_with_the_engine(true);
+}
+
+#[test]
+fn a_depth_surface_moved_into_colour_at_half_size_agrees_with_the_engine() {
+    depth_words_moved_at_half_size_agree_with_the_engine(false);
 }
 
 /// Minecraft's world pass: each surface is larger one way, and the draw lands in their overlap.

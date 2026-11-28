@@ -90,16 +90,19 @@ impl Gpu {
     /// Whether a surface held at another address shares memory with the blit's surfaces, which
     /// only guest memory tells apart.
     pub(super) fn blit_aliases_held(&self, blit: &Blit) -> bool {
-        [&blit.src, &blit.dst].into_iter().any(|surface| {
-            let range = surface.addr..surface.addr + u64::from(surface.size());
-            self.space.held.values().any(|held| {
-                held.target.addr != surface.addr && overlap(&span(&held.target), &range)
-            }) || self
-                .space
-                .retired
-                .iter()
-                .any(|retired| overlap(&span(&retired.held.target), &range))
-        })
+        [(&blit.src, true), (&blit.dst, false)]
+            .into_iter()
+            .any(|(surface, only_read)| {
+                let range = surface.addr..surface.addr + u64::from(surface.size());
+                self.space.held.values().any(|held| {
+                    held.target.addr != surface.addr && overlap(&span(&held.target), &range)
+                }) || self.space.retired.iter().any(|retired| {
+                    // A clean one owes guest memory nothing, and the source is only read. Pokémon
+                    // Legends: Z-A otherwise flushed its depth every frame over its own colour view.
+                    (retired.held.dirty || !only_read)
+                        && overlap(&span(&retired.held.target), &range)
+                })
+            })
     }
 
     /// Whether a surface rebound or on its way back to guest memory shares memory with `range`,
@@ -153,14 +156,14 @@ impl Gpu {
 
     /// Run `blit` on the device if its source is, or can be held there as the plain colour
     /// surface the registers name; anything else is for the engine, after a flush.
-    pub(super) fn blit_on_device(&mut self, blit: &Blit, ctx: &ExecCtx) -> BlitRoute {
+    pub(super) fn blit_on_device(&mut self, blit: &Blit, ctx: &mut ExecCtx) -> BlitRoute {
         match self.try_blit_on_device(blit, ctx) {
             Some(()) => BlitRoute::Done,
             None => BlitRoute::Flush,
         }
     }
 
-    fn try_blit_on_device(&mut self, blit: &Blit, ctx: &ExecCtx) -> Option<()> {
+    fn try_blit_on_device(&mut self, blit: &Blit, ctx: &mut ExecCtx) -> Option<()> {
         let (x0, y0, width, height) = blit.dst_rect;
         let source = Target::of_surface(&blit.src).ok()?;
         let target = Target::of_surface(&blit.dst).ok()?;
@@ -173,15 +176,16 @@ impl Gpu {
         {
             return None;
         }
-        let packed = self
-            .space
-            .held
-            .get(&source.addr)
-            .is_some_and(|held| held.target != source && holds_words_of(held, &source));
+        self.uncrop_for_words(&source)?;
+        let packed = self.holds_words_at(&source);
         // The last parameter: the rounding scale and sRGB flag, or whether the target is BGRA.
         let (entry, tail) = if packed {
             if !moves_words(blit, &target) {
                 return None;
+            }
+            self.uncrop_for_words(&target)?;
+            if self.holds_words_at(&target) {
+                return self.blit_words_into_depth(blit, &source, &target, ctx);
             }
             let bgra = u32::from(target.format == Format::Bgra8Unorm);
             ((PACKED_DEPTH_WGSL, "fs_blit"), [bgra, 0])
@@ -224,24 +228,11 @@ impl Gpu {
         }
 
         let pipeline = self.blit_pipeline(format, entry);
-        let mut bytes = Vec::with_capacity(48);
-        for value in [
-            blit.src_origin.0 as f32,
-            blit.src_origin.1 as f32,
-            blit.step.0 as f32,
-            blit.step.1 as f32,
-            x0 as f32,
-            y0 as f32,
-            source.width.saturating_sub(1) as f32,
-            source.height.saturating_sub(1) as f32,
-        ] {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        for value in tail {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        bytes.resize(48, 0);
-        let parameters = self.buffer("blit", &bytes, wgpu::BufferUsages::UNIFORM);
+        let parameters = self.buffer(
+            "blit",
+            &blit_parameters(blit, &source, tail),
+            wgpu::BufferUsages::UNIFORM,
+        );
         if !self.space.held.contains_key(&source.addr)
             || !self.space.held.contains_key(&target.addr)
         {
@@ -250,7 +241,7 @@ impl Gpu {
         // Made once nothing can turn the blit away, which would drop it undestroyed. Source
         // and target do not overlap, so holding the target left the source's words as they were.
         let stencil = if packed {
-            Some(self.stencil_words(&source, ctx)?)
+            Some(self.picked_stencil_texture(blit, ctx)?)
         } else {
             None
         };
@@ -329,21 +320,188 @@ impl Gpu {
         Some(())
     }
 
-    /// `source`'s words as guest memory holds them, for their stencil bytes.
-    fn stencil_words(&mut self, source: &Target, ctx: &ExecCtx) -> Option<wgpu::Texture> {
-        let bytes = source.read(ctx).ok()?;
+    /// A depth surface held as a crop of `surface`, with `surface`'s size kept beside it, goes
+    /// back to that size on the device so its words are moved there. Pokémon Legends: Z-A moves
+    /// words of its 1920x1080 depth after drawing it as a 960x540 crop, and the flush that took
+    /// instead read the depth back and uploaded it twice a frame.
+    fn uncrop_for_words(&mut self, surface: &Target) -> Option<()> {
+        let Some(held) = self.space.held.get(&surface.addr) else {
+            return Some(());
+        };
+        if held.target == *surface || held.target.depth.is_none() {
+            return Some(());
+        }
+        let Some(whole) = held
+            .other
+            .as_deref()
+            .filter(|other| holds_words_of(other, surface))
+            .map(|other| other.target)
+        else {
+            return Some(());
+        };
+        self.switch_crop(&whole, true).ok().map(|_| ())
+    }
+
+    /// Whether `surface`'s words are an `S8D24` depth surface held on the device.
+    fn holds_words_at(&self, surface: &Target) -> bool {
+        self.space
+            .held
+            .get(&surface.addr)
+            .is_some_and(|held| held.target != *surface && holds_words_of(held, surface))
+    }
+
+    /// The engine's move of `S8D24` words between two depth surfaces held on the device: the
+    /// depth is drawn there, and the stencil bytes, which the device never holds, are moved in
+    /// guest memory. Pokémon Legends: Z-A copies its depth whole and at half size every frame.
+    fn blit_words_into_depth(
+        &mut self,
+        blit: &Blit,
+        source: &Target,
+        target: &Target,
+        ctx: &mut ExecCtx,
+    ) -> Option<()> {
+        // A readback landing later would write over the stencil bytes moved now.
+        if self.in_flight_overlaps(&span(source)) || self.in_flight_overlaps(&span(target)) {
+            return None;
+        }
+        let (_, src_bytes) = swizzled_bytes(&blit.src, ctx)?;
+        let picked = picked_stencil(blit, &src_bytes)?;
+        let (dst_cpu, mut dst_bytes) = swizzled_bytes(&blit.dst, ctx)?;
+        if !place_stencil(blit, &picked, &mut dst_bytes) {
+            return None;
+        }
+        self.writing_guest_memory(ctx, |_, ctx| ctx.write_span(dst_cpu, &dst_bytes))
+            .ok()?;
+
+        let pipeline = self.blit_depth_pipeline();
+        let parameters = self.buffer(
+            "blit",
+            &blit_parameters(blit, source, [0, 0]),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let source_view =
+            self.space
+                .held
+                .get(&source.addr)?
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor {
+                    aspect: wgpu::TextureAspect::DepthOnly,
+                    ..Default::default()
+                });
+        let held = self.space.held.get_mut(&target.addr)?;
+        held.dirty = true;
+        held.writes += 1;
+        held.overwritten.clear();
+        let target_view = held
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let layout = pipeline.get_bind_group_layout(0);
+        // `fs_blit_depth` reads no words, so the layout made from it has no binding 1.
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("blit depth"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: parameters.as_entire_binding(),
+                },
+            ],
+        });
+        let (x0, y0, width, height) = blit.dst_rect;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("blit depth"),
+            });
+        {
+            let timed = self.time_pass(|| "blit depth".into());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("blit depth"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &target_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: self.render_timestamps(timed),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.set_scissor_rect(x0, y0, width, height);
+            pass.draw(0..3, 0..1);
+        }
+        self.submit_with_batch(encoder);
+        Some(())
+    }
+
+    /// The pipeline drawing `fs_blit_depth` into a `depth32float` surface.
+    fn blit_depth_pipeline(&mut self) -> wgpu::RenderPipeline {
+        let key = (wgpu::TextureFormat::Depth32Float, "fs_blit_depth");
+        if let Some(pipeline) = self.blit_pipelines.get(&key) {
+            return pipeline.clone();
+        }
+        let (_, module) = self.module("blit", PACKED_DEPTH_WGSL);
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("blit depth"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: key.0,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(key.1),
+                    compilation_options: Default::default(),
+                    targets: &[],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+        self.blit_pipelines.insert(key, pipeline.clone());
+        pipeline
+    }
+
+    /// The stencil bytes `blit` moves as guest memory holds them, one texel for each in its
+    /// destination rectangle. Reading the whole source for them was 13% of Pokémon Legends:
+    /// Z-A's frames, most of whose moves take a few texels of a 1920x1080 depth surface.
+    fn picked_stencil_texture(&mut self, blit: &Blit, ctx: &ExecCtx) -> Option<wgpu::Texture> {
+        let (_, src_bytes) = swizzled_bytes(&blit.src, ctx)?;
+        let picked = picked_stencil(blit, &src_bytes)?;
+        let (_, _, width, height) = blit.dst_rect;
         let size = wgpu::Extent3d {
-            width: source.width,
-            height: source.height,
+            width,
+            height,
             depth_or_array_layers: 1,
         };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("stencil words"),
+            label: Some("stencil bytes"),
             size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Uint,
+            format: wgpu::TextureFormat::R8Uint,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -354,11 +512,11 @@ impl Gpu {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &bytes,
+            &picked,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(source.row_bytes),
-                rows_per_image: Some(source.rows),
+                bytes_per_row: Some(width),
+                rows_per_image: Some(height),
             },
             size,
         );
@@ -434,6 +592,113 @@ fn holds_words_of(held: &Held, source: &Target) -> bool {
     ) && held.texture.format() == wgpu::TextureFormat::Depth32Float
         && held.texture.sample_count() == 1
         && (held.texture.width(), held.texture.height()) == (source.width, source.height)
+}
+
+/// The uniform `BLIT_WGSL` and `PACKED_DEPTH_WGSL` read, `tail` being its last field.
+fn blit_parameters(blit: &Blit, source: &Target, tail: [u32; 2]) -> Vec<u8> {
+    let (x0, y0, _, _) = blit.dst_rect;
+    let mut bytes = Vec::with_capacity(48);
+    for value in [
+        blit.src_origin.0 as f32,
+        blit.src_origin.1 as f32,
+        blit.step.0 as f32,
+        blit.step.1 as f32,
+        x0 as f32,
+        y0 as f32,
+        source.width.saturating_sub(1) as f32,
+        source.height.saturating_sub(1) as f32,
+    ] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in tail {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.resize(48, 0);
+    bytes
+}
+
+/// A surface's bytes as it lies in guest memory, and their CPU address, when one mapping
+/// holds them all.
+fn swizzled_bytes(surface: &Surface, ctx: &ExecCtx) -> Option<(u64, Vec<u8>)> {
+    let len = surface.size();
+    let cpu = ctx.span(surface.addr, u64::from(len))?;
+    let mut bytes = vec![0u8; len as usize];
+    ctx.read_span(cpu, &mut bytes).ok()?;
+    Some((cpu, bytes))
+}
+
+/// The row and column offsets of each texel of `blit`'s destination rectangle in `surface`,
+/// whose texel is picked from `pick`'s coordinates; the source as the engine samples it, the
+/// destination where it writes.
+fn offsets(
+    surface: &Surface,
+    bpp: u32,
+    pick: impl Fn(u32, bool) -> u32,
+    (width, height): (u32, u32),
+) -> (Vec<usize>, Vec<usize>) {
+    let rows = (0..height)
+        .map(|y| {
+            surface
+                .layout
+                .row_offset(pick(y, false), surface.width_bytes()) as usize
+        })
+        .collect();
+    let columns = (0..width)
+        .map(|x| surface.layout.column_offset(pick(x, true) * bpp) as usize)
+        .collect();
+    (rows, columns)
+}
+
+/// Whether every texel the offsets name lies within `len` bytes.
+fn within((rows, columns): &(Vec<usize>, Vec<usize>), len: usize) -> bool {
+    let furthest = |of: &[usize]| of.iter().copied().max().unwrap_or(0);
+    furthest(rows) + furthest(columns) < len
+}
+
+/// The stencil byte, the first of an `S8D24` word, of each word `blit` moves, row by row over
+/// its destination rectangle, picking source texels as the engine does. `None` when a word lies
+/// outside `src_bytes`, the source's swizzled bytes.
+fn picked_stencil(blit: &Blit, src_bytes: &[u8]) -> Option<Vec<u8>> {
+    let src = &blit.src;
+    let (_, _, width, height) = blit.dst_rect;
+    let pick = |at: u32, column: bool| {
+        let (origin, step, size) = if column {
+            (blit.src_origin.0, blit.step.0, src.width)
+        } else {
+            (blit.src_origin.1, blit.step.1, src.height)
+        };
+        ((origin + step * f64::from(at)).max(0.0) as u32).min(size.saturating_sub(1))
+    };
+    let picked = offsets(src, src.format.bytes_per_pixel, pick, (width, height));
+    if !within(&picked, src_bytes.len()) {
+        return None;
+    }
+    let (rows, columns) = picked;
+    Some(
+        rows.iter()
+            .flat_map(|row| columns.iter().map(move |column| src_bytes[row + column]))
+            .collect(),
+    )
+}
+
+/// Write `picked`, from [`picked_stencil`], over the stencil bytes of `blit`'s destination
+/// rectangle in `dst_bytes`, the destination's swizzled bytes. False, having written nothing,
+/// when a word lies outside them.
+fn place_stencil(blit: &Blit, picked: &[u8], dst_bytes: &mut [u8]) -> bool {
+    let dst = &blit.dst;
+    let (x0, y0, width, height) = blit.dst_rect;
+    let at = |at: u32, column: bool| if column { x0 + at } else { y0 + at };
+    let placed = offsets(dst, dst.format.bytes_per_pixel, at, (width, height));
+    if !within(&placed, dst_bytes.len()) {
+        return false;
+    }
+    let (rows, columns) = placed;
+    for (row, picked) in rows.iter().zip(picked.chunks_exact(width as usize)) {
+        for (column, &byte) in columns.iter().zip(picked) {
+            dst_bytes[row + column] = byte;
+        }
+    }
+    true
 }
 
 /// Whether the engine runs `blit` as a move of whole words into `target`, which holds bytes.
