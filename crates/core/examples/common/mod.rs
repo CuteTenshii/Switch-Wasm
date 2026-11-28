@@ -83,9 +83,14 @@ pub struct Report {
 /// The flags of a tool that plays a title: input, drawing and extra cores.
 #[derive(ClapArgs, Clone, Default)]
 pub struct Play {
-    /// Tap buttons every interval steps, e.g. `A+DOWN@300000000`.
-    #[arg(long, value_parser = Press::parse, value_name = "BUTTONS@INTERVAL")]
-    press: Option<Press>,
+    /// Tap buttons or tilt a stick every interval steps, from step FIRST (the interval by
+    /// default), each held HOLD steps (three frames by default), e.g. `A+DOWN@300000000`;
+    /// repeat it to tap several, as in `--press A@3000000000 --press LS_DOWN@3000000000:4500000000:60000000`.
+    #[arg(long, value_parser = Tap::parse, value_name = "BUTTONS@INTERVAL[:FIRST[:HOLD]]")]
+    press: Vec<Tap>,
+    /// Answer every software keyboard the title opens with this text, as the page's dialog does.
+    #[arg(long, value_name = "TEXT")]
+    keyboard_text: Option<String>,
     /// Present frames without drawing them.
     #[arg(long)]
     no_draw: bool,
@@ -615,53 +620,118 @@ const BUTTONS: [(&str, u64); 16] = [
     ("DOWN", 1 << 15),
 ];
 
-/// `--press <buttons>@<interval>`: tap buttons every `interval` steps, e.g.
-/// `--press A+DOWN@300000000`. The first tap waits a whole interval so it does
-/// not land during boot.
+/// A stick held all the way: left stick x and y, then right stick x and y, up positive.
+const STICKS: [(&str, [i32; 4]); 8] = [
+    ("LS_LEFT", [-0x7FFF, 0, 0, 0]),
+    ("LS_RIGHT", [0x7FFF, 0, 0, 0]),
+    ("LS_UP", [0, 0x7FFF, 0, 0]),
+    ("LS_DOWN", [0, -0x7FFF, 0, 0]),
+    ("RS_LEFT", [0, 0, -0x7FFF, 0]),
+    ("RS_RIGHT", [0, 0, 0x7FFF, 0]),
+    ("RS_UP", [0, 0, 0, 0x7FFF]),
+    ("RS_DOWN", [0, 0, 0, -0x7FFF]),
+];
+
+/// One `--press <buttons>@<interval>[:<first>[:<hold>]]`: buttons and stick tilts held for
+/// `hold` steps every `interval` steps from step `first`, which defaults to one interval so a
+/// tap does not land during boot. Cursor menus move only while a stick stays tilted.
 #[derive(Clone)]
-pub struct Press {
+pub struct Tap {
     buttons: u64,
+    sticks: [i32; 4],
     interval: u64,
-    held: bool,
+    first: u64,
+    hold: u64,
 }
 
-impl Press {
-    /// The `--press` flag, if given.
-    pub fn from_flags() -> Option<Press> {
-        flags().play.press.clone()
-    }
-
-    fn parse(raw: &str) -> Result<Press, String> {
-        let fail =
-            |why: &str| format!("{raw}: {why}; expected <buttons>@<interval>, e.g. A@500000000");
-        let (names, interval) = raw.split_once('@').ok_or_else(|| fail("no interval"))?;
-        let interval: u64 = interval
-            .parse()
-            .map_err(|_| fail("the interval is not a number"))?;
-        if interval <= PRESS_HOLD {
+impl Tap {
+    fn parse(raw: &str) -> Result<Tap, String> {
+        let fail = |why: &str| {
+            format!(
+                "{raw}: {why}; expected <buttons>@<interval>[:<first>[:<hold>]], e.g. A@500000000"
+            )
+        };
+        let (names, timing) = raw.split_once('@').ok_or_else(|| fail("no interval"))?;
+        let mut timing = timing.split(':');
+        let mut number = |what: &str, default: Option<u64>| match timing.next() {
+            Some(text) => text
+                .parse::<u64>()
+                .map_err(|_| fail(&format!("the {what} is not a number"))),
+            None => default.ok_or_else(|| fail(&format!("no {what}"))),
+        };
+        let interval = number("interval", None)?;
+        let first = number("first step", Some(interval))?;
+        let hold = number("hold", Some(PRESS_HOLD))?;
+        if interval <= hold {
             return Err(fail("the interval must be longer than a press"));
         }
         let mut buttons = 0;
+        let mut sticks = [0; 4];
         for name in names.split('+') {
             let upper = name.trim().to_ascii_uppercase();
-            match BUTTONS.iter().find(|(button, _)| *button == upper) {
-                Some((_, bit)) => buttons |= bit,
-                None => return Err(fail(&format!("no button named {name:?}"))),
+            if let Some((_, bit)) = BUTTONS.iter().find(|(button, _)| *button == upper) {
+                buttons |= bit;
+            } else if let Some((_, tilt)) = STICKS.iter().find(|(stick, _)| *stick == upper) {
+                for (axis, value) in sticks.iter_mut().zip(tilt) {
+                    *axis += value;
+                }
+            } else {
+                return Err(fail(&format!("no button or stick named {name:?}")));
             }
         }
-        Ok(Press {
+        Ok(Tap {
             buttons,
+            sticks,
             interval,
-            held: false,
+            first,
+            hold,
         })
     }
 
-    /// Press or release for the step count `done`; call once per tick.
+    fn down(&self, done: u64) -> bool {
+        done >= self.first && (done - self.first) % self.interval < self.hold
+    }
+}
+
+/// Every `--press`, tapped together: what is down at a step is every tap down then. With
+/// `--keyboard-text`, also the player at the software keyboard.
+#[derive(Clone)]
+pub struct Press {
+    taps: Vec<Tap>,
+    sent: (u64, [i32; 4]),
+    keyboard_text: Option<String>,
+}
+
+impl Press {
+    /// The `--press` and `--keyboard-text` flags, if any were given.
+    pub fn from_flags() -> Option<Press> {
+        let play = &flags().play;
+        (!play.press.is_empty() || play.keyboard_text.is_some()).then(|| Press {
+            taps: play.press.clone(),
+            sent: (0, [0; 4]),
+            keyboard_text: play.keyboard_text.clone(),
+        })
+    }
+
+    /// Press or release for the step count `done`, and answer a waiting keyboard; call once
+    /// per tick.
     pub fn tick(&mut self, cpu: &mut Cpu, done: u64) {
-        let down = done >= self.interval && done % self.interval < PRESS_HOLD;
-        if down != self.held {
-            self.held = down;
-            cpu.set_gamepad_state(if down { self.buttons } else { 0 }, 0, 0, 0, 0);
+        if let Some(text) = &self.keyboard_text {
+            if cpu.keyboard_request().is_some() {
+                cpu.answer_keyboard(Some(text));
+            }
+        }
+        let mut now = (0, [0; 4]);
+        for tap in self.taps.iter().filter(|tap| tap.down(done)) {
+            now.0 |= tap.buttons;
+            for (axis, value) in now.1.iter_mut().zip(tap.sticks) {
+                *axis = (*axis + value).clamp(-0x7FFF, 0x7FFF);
+            }
+        }
+        if now != self.sent {
+            self.sent = now;
+            let [lx, ly, rx, ry] = now.1;
+            cpu.set_gamepad_state(now.0, lx, ly, rx, ry);
         }
     }
 }
