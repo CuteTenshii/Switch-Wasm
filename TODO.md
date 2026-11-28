@@ -11,7 +11,7 @@ Each stage builds, passes `cargo test --workspace` and clippy, keeps every title
 
 - A service worker that caches the page, the worker scripts and the `.wasm`, so the emulator starts offline and installs as an app with the existing `manifest.webmanifest`. Vite hashes asset names, so the build must hand it the list; it must sit under `base: './'`; and cached responses must keep the COOP/COEP headers, or the page loses cross-origin isolation and `SharedArrayBuffer`.
 - Stretch audio when emulation runs below full speed, so it plays slowed down rather than in bursts with gaps.
-- Motion: `hid:server` 87 (LoadSixAxisSensorCalibrationParameter) still returns zeros; its 0x744-byte layout is not documented in Eden or switchbrew. Orientation has no accelerometer drift correction, and axis signs have not been checked on hardware. DualShock 4 and DualSense reports are not read.
+- Motion: `hid:server` 87 (LoadSixAxisSensorCalibrationParameter) still returns zeros; its 0x744-byte layout is not documented in Eden or switchbrew. DualShock 4 and DualSense reports are not read.
 
 ## Mobile
 
@@ -27,7 +27,6 @@ Each stage builds, passes `cargo test --workspace` and clippy, keeps every title
 - `ssl` and `ssl:s` refuse the commands switchbrew does not describe: `GetCertificateByIndex` (10), `GetTrustedCertificateCount` (11) and `VerifySignature` (103) are names only, and `DebugIoctl` (4) is an error on retail with no code given. A guest that sends one gets a refusal in the log.
 - The log file is hard to read: per-call `[ipc]`/`[wait]` trace lines, `[thread]` reports repeated every few seconds even when nothing changed, and periodic `[audio]`/`[io]`/`[fs]` stats.
 - Compute dispatches, and copy-engine transfers that are not one plain run or that overlap a held surface, still send every held surface back; `Renderer::sync_ranges`, which refused 2D blits use, would keep the rest on the device where the ranges are known.
-- Minecraft's Terms and Conditions page panics in the `web` applet (`010000000000100a`): `Heap::allocate` fails for `0x2c000` bytes (2048 elements of `0x58`, built at `0x0818039c` in the 21.2.0 applet, count read from a config struct at `+0x9c`) from a heap object at `0x3004d000` in the applet's `SetHeapSize` region. Neither the applet heap size nor any `GetInfo` answer explains it; find where that heap's capacity is set.
 - Tomodachi Life: Living the Dream stays on its loading screen through frame 1500 (19.3B steps; `docs/compat.md`).
 - Firefox loses the device to `Out of memory` in Breath of the Wild's first scene (about 13 to 15B steps) on a GPU without resizable BAR. Its wgpu stages every queue write in the small host-visible device-local heap (246 MiB on an RTX 3060 Ti, its budget shared with every other application), loses the device once a heap reaches 99% of its budget and refuses an allocation past 95% (`memory_budget_thresholds` in `gfx/wgpu_bindings/src/server.rs`). It refused a 12.5 KB request with 145 MiB of that heap used against a budget other applications had shrunk to 100 MiB; the 246 MiB card has 8 GiB free beside it. Native wgpu sets no thresholds, so only a native run given Firefox's (`MemoryBudgetThresholds { for_resource_creation: Some(95), for_device_loss: Some(99) }`) reproduces it, and `RUST_LOG=wgpu_hal=warn` with Playwright's `DEBUG=pw:browser` shows the refusal from `browser_boot.mjs --firefox`. Bounding the backend's writes between submits and splitting texture uploads into 4 MiB pieces got it further but not past, so this is to report to Mozilla: wgpu should fall back to host memory rather than lose the device. Resizable BAR avoids it.
 - A Firefox run of Breath of the Wild faulted with `GPU: the readback was not mapped` (a readback's `mapAsync` rejected) with no device error before it. Not explained: Firefox keeps a mappable buffer's shared memory until it is collected, but the segments stayed flat over a 400 s run.
@@ -36,6 +35,6 @@ Each stage builds, passes `cargo test --workspace` and clippy, keeps every title
 
 ## Video
 
-- Mario Kart 8 Deluxe's menu movie still shows black: its H.264 pictures decode, VIC composes them and the title copies each frame into a texture at `0x204490000`, but no draw samples that texture.
+- Mario Kart 8 Deluxe's menu movie plays, but its decode is wrong in ways not yet recorded.
 - H.264 with Chrome's software decoder drops pictures that arrive out of display order, since the rebuilt SPS asks for no reordering (`docs/video.md`).
 - JD2022's intro video decodes and plays; see `docs/video.md` for what is still missing: counter output for streams that adapt probabilities (which also cannot go to the browser's decoder, so they decode in software), nvdec surfaces in guest memory, and VIC pitch alignment.
