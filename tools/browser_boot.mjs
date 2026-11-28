@@ -38,8 +38,11 @@
 // `--script=<file>` (or the steps inline, `;` apart) drives the title one step after another, each
 // waiting for the one before: `wait <s>`, `press <key> [times [gap-s]]`, `pressuntil <key> <gap-s> <timeout-s>` (taps until the keyboard dialog
 // opens), `text <string>` (types into the
-// keyboard dialog and confirms it), `log <timeout-s> <regex>` (waits for a console line) and
-// `shot <file>`. A failed step stops the script and sets the exit code. `#` starts a comment line.
+// keyboard dialog and confirms it), `log <timeout-s> <regex>` (waits for a console line),
+// `stick <x> <y> <s>` (holds a gamepad's left stick, -1 to 1 with y down, as the browser reports
+// it, for that long: the keyboard has no stick, and cursor menus such as Pokémon Legends: Z-A's
+// move only while one is held) and `shot <file>`. A failed step stops the script and sets the
+// exit code. `#` starts a comment line.
 // `--screenshot-every` also saves the screen every N seconds, beside `--screenshot`'s file.
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -117,7 +120,7 @@ const presses = (flag('press') ?? '').split(',').filter(Boolean).map((spec) => {
   return { key: match[1], next: Number(match[2]), every: Number(match[3] ?? 0) };
 });
 
-const SCRIPT_VERBS = ['wait', 'press', 'pressuntil', 'text', 'log', 'shot'];
+const SCRIPT_VERBS = ['wait', 'press', 'pressuntil', 'text', 'log', 'stick', 'shot'];
 const scriptFile = flag('script') && resolve(flag('script'));
 const steps = (flag('script')
   ? (existsSync(scriptFile) ? readFileSync(scriptFile, 'utf8') : flag('script'))
@@ -156,6 +159,23 @@ const browser = useFirefox
     });
 try {
   const page = await browser.newPage();
+  // A standard-layout pad with nothing pressed, its left stick at the axes a `stick` step holds,
+  // stands in for the page's own pads while the step lasts.
+  await page.addInitScript(() => {
+    const own = navigator.getGamepads?.bind(navigator);
+    let axes = null;
+    window.browserBootStick = (held) => {
+      axes = held;
+    };
+    navigator.getGamepads = () => {
+      if (!axes) return own ? own() : [];
+      const buttons = Array.from({ length: 17 }, () => ({ pressed: false, touched: false, value: 0 }));
+      return [{
+        id: 'browser_boot stick', index: 0, connected: true, mapping: 'standard',
+        timestamp: performance.now(), buttons, axes: [axes[0], axes[1], 0, 0],
+      }];
+    };
+  });
   // Chromium has no switch that takes WebGPU away, so the property goes before any
   // script runs: init scripts reach the page, and the worker's scripts are rewritten.
   if (noWebGpu) {
@@ -425,6 +445,11 @@ try {
       await page.locator('#keyboard[open]').waitFor({ timeout: STEP_TIMEOUT_MS });
       await page.locator('#keyboard-text').fill(rest);
       await page.locator('#btn-keyboard-ok').click();
+    } else if (verb === 'stick') {
+      const [x, y, held] = [first, ...others].map(Number);
+      await page.evaluate((axes) => window.browserBootStick(axes), [x, y]);
+      await page.waitForTimeout(held * 1000);
+      await page.evaluate(() => window.browserBootStick(null));
     } else if (verb === 'log') {
       const pattern = new RegExp(others.join(' '));
       const deadline = Date.now() + Number(first) * 1000;
